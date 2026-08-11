@@ -1,0 +1,8 @@
+# Data never goes in git — input files contain client/order data
+input/
+output/
+
+__pycache__/
+*.pyc
+.venv/
+venv/

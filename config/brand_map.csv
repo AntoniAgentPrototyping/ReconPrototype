@@ -1,0 +1,61 @@
+platform,storefront,client_brand,confidence,note
+tiktok,abbott grow,Abbott,high,
+tiktok,abbott pediasure,Abbott,high,
+tiktok,abbott-ensure,Abbott,high,
+tiktok,glucerna,Abbott,high,July 29-31 files name this store 'Abbott Glucerna'
+tiktok,similac,Abbott,high,July 29-31 files name this store 'Abbott Similac'
+tiktok,ahc,Unilever AHC,high,Shopee and Lazada name the same brand 'Unilever AHC'
+tiktok,astroman,Astroman,high,
+tiktok,curel,Curel,high,Kao brand; the team's own files invoice Curel separately
+tiktok,kao,KAO,high,
+tiktok,kate,Kate,high,separate Kate tab in the team's own invoicing files
+tiktok,lashe,Lashe,high,
+tiktok,mars,Mars,high,
+tiktok,merries,Merries,high,Kao brand; separate invoice bucket in the team's files
+tiktok,mondelez kinh do,Mondelez,high,
+tiktok,nutifood nutrition store,Nutifood,high,
+tiktok,nutifood-varna-life,Nutifood,high,Varna is a Nutifood brand
+tiktok,nutifood-varna-store,Nutifood,high,Varna is a Nutifood brand
+tiktok,pepsico foods,PepsiCo,high,
+tiktok,purite,Purite,high,
+tiktok,sanofi,Sanofi,high,
+tiktok,tolpa,Tolpa,high,
+tiktok,u food,U Food,high,
+tiktok,unilever homecare,Unilever Home Care,high,Lazada 'Unilever Cham Soc Gia Dinh' translates to home care
+tiktok,veet & reckitt personal care,Reckitt - Personal Care (Veet),needs-confirmation,NOT merged: Reckitt storefronts may be separate client entities
+tiktok,xmen,X-Men,high,
+shopee,astroman,Astroman,high,
+shopee,curel,Curel,high,
+shopee,kao,KAO,high,
+shopee,kate,Kate,high,
+shopee,lashe,Lashe,high,
+shopee,mars wrigley,Mars,high,Mars Wrigley is Mars' confectionery arm; TikTok/Lazada store is 'Mars'
+shopee,masan,Masan,high,
+shopee,merries,Merries,high,
+shopee,mondelezkinhdovn,Mondelez,high,
+shopee,nutifoodgpddvietnam,Nutifood,high,
+shopee,reckitt sức khỏe sắc đẹp,Reckitt - Suc Khoe Sac Dep,needs-confirmation,NOT merged: possibly a separate client entity
+shopee,reckitt chamsocnhacua,Reckitt - Cham soc nha cua,needs-confirmation,NOT merged: possibly a separate client entity
+shopee,sanofi,Sanofi,high,
+shopee,thuan phat,Thuan Phat,high,
+shopee,ufood store,U Food,high,
+shopee,unilever ahc,Unilever AHC,high,
+shopee,xmenforboss,X-Men,high,
+lazada,curel,Curel,high,
+lazada,kao,KAO,high,
+lazada,lactacyd,Sanofi - Lactacyd,needs-confirmation,Lactacyd is a Sanofi brand; confirm whether it invoices under Sanofi
+lazada,lashe,Lashe,high,
+lazada,mars,Mars,high,
+lazada,masan,Masan,high,
+lazada,merries,Merries,high,
+lazada,mondelez,Mondelez,high,
+lazada,nutifood grow,Nutifood,high,
+lazada,pepsico foods store,PepsiCo,high,
+lazada,reckitt,Reckitt - Lazada storefront,needs-confirmation,NOT merged: scope of this storefront unknown
+lazada,thuận phát,Thuan Phat,high,same store as Shopee 'Thuan Phat'; diacritics differ
+lazada,thuan phat,Thuan Phat,high,
+lazada,tolpa,Tolpa,high,
+lazada,unilever ahc,Unilever AHC,high,
+lazada,unilever chăm sóc gia đình nâng tầm cuộc sống unilever1,Unilever Home Care,high,'Cham Soc Gia Dinh' = home care; same division as TikTok 'Unilever Homecare'
+lazada,unilever chăm sóc vẻ đẹp unilever 2,Unilever Beauty,high,single storefront; no cross-platform merge involved
+lazada,xmen for boss,X-Men,high,

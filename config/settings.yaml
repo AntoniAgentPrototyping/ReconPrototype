@@ -1,0 +1,367 @@
+# settings.yaml — global pipeline configuration
+#
+# Column maps corrected against REAL May-2026 exports on 2026-07-16
+# (TikTok order file "7. Order U food 17.05.xlsx", income "7. income U food.xlsx").
+# The pre-sample placeholder maps are preserved in tools/sample_config/settings.yaml
+# (used by the synthetic smoke test) and in the comment block at the end of this file.
+
+vat_rate: 0.08            # used only by the legacy placeholder formulas (sample smoke path)
+
+# VAT model (confirmed by the team): ONE default factor plus per-SKU
+# exceptions from the team-owned master file below. The 8% rate is a
+# TEMPORARY tax concession — when it reverts to 10%, change the single
+# `default:` line to 1.10 and nothing else.
+vat_factors:
+  default: 1.08
+
+# Team-owned master (additive-only, maintained by the team): fee-type
+# mapping (Lib sheet) + per-SKU VAT exceptions (VAT sheet). Read live at
+# runtime; the lazada_*.csv snapshots are the fallback, and live-vs-snapshot
+# drift is reported on every run (src/masters.py).
+masters_file: "Lib & VAT rate.xlsb"
+
+# Force a specific Excel engine per platform/kind. June 2026 TikTok order
+# exports ship a broken <dimension> tag that the default openpyxl reader
+# truncates to one column; calamine ignores the dimension and reads the real
+# cells (and reads well-formed May files identically). Everything not listed
+# here keeps the default openpyxl fast path + single-column calamine fallback.
+reader_engine:
+  tiktok:
+    orders: calamine
+  # Shopee via openpyxl took 45+ min per window once OneDrive sync began
+  # competing for the disk (Aug 2026); calamine reads the same files in
+  # minutes and every July diagnostic already validated it on these exact
+  # exports. Output totals are tie-checked after any engine change.
+  shopee:
+    orders: calamine
+    income: calamine
+
+tolerances:
+  # Legacy values used by the sample/spec path only. The "~10,000 VND" rule
+  # from the build spec is NOT what the team's files use — see tiktok below.
+  split_rounding_vnd: 10000
+  exact_check_vnd: 1
+  # The team's OWN tolerance checks, read from their TikTok workbooks
+  # ("Tiktok result 01 to 17T5 For KA.xlsx"):
+  #   'PV sum'!E3     = IF(ABS(E2)<12000, "OK", "check lai sai roi")
+  #   'Xuat HD bt'!P5 = IF(ABS(O5)<2000, "ok có thể xuất HD", "Cần check lại số có vấn đề")
+  #   'PV xuat HD'!I1 = IF(ABS(H1)<1000, "ok có thể xuất HD", "Cần check lại số có vấn đề")
+  tiktok:
+    pv_sum_vnd: 12000       # pre-VAT: per-store totals vs per-VAT-bucket totals
+    xuat_hd_vnd: 2000       # with-VAT: line totals vs VAT-bucket recombination
+    pv_xuat_hd_vnd: 1000    # pre-VAT: line totals vs SKU-pivot recombination
+  # Shopee's own checks (For KA "shopee result Sample For KA 01 to 10T05.xlsx"):
+  #   'PV sum'!G3    = IF(ABS(E2)<2000,...)   — NOT TikTok's 12,000
+  #   'Xuat HD bt'!R5 = IF(ABS(Q5)<2000,...)
+  #   'return'!R7    = IF(ABS(Q7)<10, "Return full ko xuat HD",
+  #                       "Return 1 phan phai xuat HD") — the finance-file
+  #     Return-tab split: recomputed order total + refund within 10 VND of
+  #     zero = full return (skip invoice), else partial (must invoice).
+  shopee:
+    pv_sum_vnd: 2000
+    xuat_hd_vnd: 2000
+    return_full_vnd: 10
+
+periods:
+  rolling_window_months: 2
+
+# Settlement-window bounds — DEDUPLICATION OF A PULL ARTIFACT, not a rule.
+# A window's finance file may only contain settlements dated inside its own
+# labelled window. Add an entry ONLY when a raw export was pulled with the
+# wrong start/end date AND its out-of-window rows are proven to be already
+# present in the adjacent window. Evidence goes in the comment.
+#
+# 2026-07_w2 (verified 2026-08-07, tools scratch w2_boundary.py): the team's
+# "Tiktok 2026_08 to 14 July" export also carried the whole 7-July settlement
+# block (24,251 revenue rows — exactly the 24,251 rows w1 holds for 7 July)
+# plus 256 stray rows dated 01-06 July. Every one of those orders is already
+# in w1 ("01 to 07T07"), which legitimately owns settlements through 7 July.
+# Rows settled 08-14 July whose orders also appear in w1 (1,180 rows) are
+# genuine second payout events and are KEPT.
+window_settlement_bounds:
+  "2026-07_w2":
+    from: "2026-07-08"
+
+# TikTok amounts parse as standard (1234567.89). Re-verify per platform.
+number_style: standard
+
+# Drop raw columns that aren't in the column maps at read time: strips PII
+# immediately (the team's Shopee M code does the same) and keeps full-
+# platform runs within memory. Nothing downstream reads unmapped columns.
+drop_unmapped_columns: true
+
+# NO row dedupe on real data: byte-identical order lines are legitimate
+# (duplicated gift SKUs — Sanofi Shopee May, team qty 2 vs deduped 1), and
+# the team's Power Query never dedupes. Overlap protection comes from the
+# one-period-folder-per-settlement-window layout instead.
+dedupe_rows: false
+
+# Date parsing: set true per platform if exports use dd/mm/yyyy text dates.
+# TikTok confirmed dd/mm/yyyy (probe with false produced impossible Jan-Dec
+# ranges for a May-only window).
+dayfirst:
+  tiktok: true
+  shopee: false   # TODO verify when Shopee is mapped
+
+# Rows to drop immediately after the header row. TikTok order exports have a
+# per-column description row under the header ("Current order status." etc.)
+# that must not be ingested as data.
+skip_rows_after_header:
+  tiktok:
+    orders: 1
+
+file_formats: [".xlsx", ".csv"]
+
+# Which sheet to read per platform/kind (real exports are multi-sheet).
+# null/absent = first sheet.
+sheet_names:
+  tiktok:
+    orders: "OrderSKUList"
+    income: "Order details"
+  shopee:
+    orders: "orders"
+
+# Regex sheet matching for exports that split data across numbered sheets.
+# Shopee income caps sheets at ~10k rows: "Doanh thu", "Doanh thu - 1", ...
+# Mirrors the team's M code (Text.Contains(name, "Doanh thu")).
+sheet_patterns:
+  shopee:
+    income: "Doanh thu"
+
+# 1-based row holding the real (leaf) headers. Shopee income has two
+# band/group rows above it (triple PromoteHeaders in the team's M code).
+header_rows:
+  shopee:
+    income: 3
+
+# Neither TikTok nor Shopee exports carry a store/shop column: store identity
+# is implied by the per-store download file. Derive it from the file name.
+# Group 1 of the regex = store name.
+store_from_filename:
+  # July 2026 added new order-file suffixes: "7.7"/"14.7"/"21.7"/"28.7"
+  # (single-digit second part — May only had ".05"-style) and the 29-31
+  # window's "29-31" income suffix. All optional trailing tokens, never
+  # part of the store name.
+  # "Life14.07" (no separator before the dotted token) appears in July w2 —
+  # dotted date tokens may follow the name directly; bare numeric tokens
+  # still require a separator so store names are never truncated.
+  tiktok: '^\s*\d+\.?\s*(?:order|income)\s+(.+?)(?:[ _]*\d{1,2}\.\d{1,2}|[ _]+\d{1,2}|[ _]+\d{2}-\d{2})?\s*\.xlsx$'
+  # Shopee names: "Income Kate.xlsx", "Income. Curel.xlsx", "Income.Astroman.xlsx",
+  # "Order Kao part 10.xlsx", "Order.AHC part  6.xlsx", "Order.mars.wrigley part 2.xlsx".
+  # June 2026 added a leading store-number prefix: "10_Income.Reckitt...xlsx",
+  # "13_Order. ufood_store.xlsx", and inconsistently "1_ Income. Curel.xlsx"
+  # (space after the underscore) — (?:\d+_\s*) handles all of them + May.
+  shopee: '^\s*(?:\d+_\s*)?(?:order|income)[. ]\s*(.+?)(?:\s+part\s*\d+)?\s*\.xlsx$'
+
+# Stores present in the May-2026 data (names as they appear in file names).
+# TikTok: 17 stores in window 01-17T05; window 18-30T05 has 18 (adds
+# "Nutifood Nutrition Store"). The old "26 TikTok stores" figure is NOT
+# supported by this data; the requirements doc's 18 matches window 2.
+# Numbering mystery RESOLVED (Hoang): #16 is the Veet & Reckitt combined
+# file (Total files label it "Reckitt VN Chăm sóc cá nhân" — see aliases).
+#
+# KNOWN NAMING INCONSISTENCIES between Order and Income file names — these
+# will break store matching on full-platform runs until an alias map is added:
+#   - order "RVeet & Reckitt Personal Care" (typo) vs income "Veet & Reckitt Personal Care"
+#   - order "Pediasure"                     vs income "Abbott Pediasure"
+#   - order "Nutifood-Varna-Life"           vs income "Nutifood-Varna-life" (case)
+# Stores that legitimately appear only in some windows: absent -> warning,
+# not hard stop. "Nutifood Nutrition Store" onboarded mid-May (window 2 only).
+stores_optional:
+  tiktok:
+    - "Nutifood Nutrition Store"
+    # July 2026: not present in every weekly window
+    - "Nutifood-Varna-life"
+    # July 2026 onboarded stores (first seen in the July dump; presence
+    # varies by window — Curel appears only in 29-31):
+    - "Glucerna"
+    - "Kate"
+    - "Mondelez Kinh Do"
+    - "Pepsico foods"
+    - "Similac"
+    - "Tolpa"
+    - "Curel"
+    # July w5 (29-31, 3-day window): these stores had zero settlements —
+    # their income exports are header-only. Absence warns, never silent.
+    - "Merries"
+    - "Veet & Reckitt Personal Care"
+
+expected_stores:
+  tiktok:
+    - "Abbott-Ensure"
+    - "Abbott Pediasure"
+    - "Abbott grow"
+    - "AHC"
+    - "Astroman"
+    - "Unilever Homecare"
+    - "U food"
+    - "KAO"
+    - "Lashe"
+    - "Mars"
+    - "Merries"
+    - "Purite"
+    - "Sanofi"
+    - "Nutifood-Varna-Store"
+    - "Nutifood-Varna-life"
+    - "Xmen"
+    - "Veet & Reckitt Personal Care"
+    - "Nutifood Nutrition Store"
+    # July 2026 onboarded stores:
+    - "Glucerna"
+    - "Kate"
+    - "Mondelez Kinh Do"
+    - "Pepsico foods"
+    - "Similac"
+    - "Tolpa"
+    - "Curel"
+  # Shopee: 17 stores per the May data (16 in windows 1-10/11-20;
+  # "mondelezkinhdovn" appears from 21-end). Matches the requirements doc.
+  shopee:
+    - "Kate"
+    - "Curel"
+    - "Kao"
+    - "Lashe"
+    - "Merries"
+    - "Sanofi"
+    - "Thuan Phat"
+    - "Unilever AHC"
+    - "Xmenforboss"
+    - "Astroman"
+    - "Mars wrigley"
+    - "Masan"
+    - "nutifoodgpddvietnam"
+    - "Reckitt Sức Khỏe Sắc Đẹp"
+    - "Reckitt_chamsocnhacua"
+    - "ufood_store"
+    - "mondelezkinhdovn"
+
+# Brand/invoice grouping per store. TikTok evidence (For KA "PV sum" bucket
+# pivots, both windows): three invoice buckets — "KAO 8%", "Merries 8%",
+# "Others 8%" — i.e. KAO and Merries get their own splits, everything else is
+# combined (the spec's Keoh pattern). Shopee file names suggest Xmen and Kao
+# split there. TODO-HUMAN (Hoang): confirm the full separate-invoice list.
+# Empty map = brand falls back to the store name (loud warning at ingest).
+store_to_brand: {}
+
+# Store alias normalization, applied at ingest right after the store name is
+# derived. Left side = name as it appears in data/file names; right side =
+# canonical store name. "TODO-HUMAN" = unresolved, ingest warns if seen.
+store_aliases:
+  tiktok:
+    "RVeet & Reckitt Personal Care": "Veet & Reckitt Personal Care"   # order-file typo (leading R)
+    "Pediasure": "Abbott Pediasure"                                   # order files drop the "Abbott"
+    "Nutifood-Varna-Life": "Nutifood-Varna-life"                      # casing differs order vs income
+    # RESOLVED (Hoang): this Total-file label is source file #16
+    # "income Veet & Reckitt Personal Care" — the missing number in the
+    # 1-19 sequence. The file covers Veet + Reckitt combined.
+    "Reckitt VN Chăm sóc cá nhân": "Veet & Reckitt Personal Care"
+    # --- July 2026 drift: the 29-31 loose window renames most stores.
+    # Canonical = the w1-w4 July file names (which match May where the
+    # store existed). Typos ("Gluverna", "Reckit") are the team's.
+    "Abbott Ensure": "Abbott-Ensure"
+    "Abbott Grow": "Abbott grow"
+    "Abbott Glucerna": "Glucerna"
+    "Abbott Gluverna": "Glucerna"
+    "Abbott Similac": "Similac"
+    "Mondelez": "Mondelez Kinh Do"
+    "Pepsifood": "Pepsico foods"
+    "pepsifood": "Pepsico foods"
+    "U Food": "U food"
+    "Nutifood Varna Life": "Nutifood-Varna-life"
+    "Nutifood Varna Store": "Nutifood-Varna-Store"
+    # Verified by order-ID overlap (tools/verify_july_aliases.py):
+    "Reckit": "Veet & Reckitt Personal Care"
+    "Reckitt": "Veet & Reckitt Personal Care"
+    "Nutifood Grow": "Nutifood Nutrition Store"
+  shopee:
+    # order vs income file-name drift (case / separator differences)
+    "lashe": "Lashe"
+    "mars.wrigley": "Mars wrigley"
+
+column_maps:
+  tiktok:
+    # Real TikTok Seller Center order export: sheet "OrderSKUList",
+    # 54 columns, header row 1, English. One row per SKU line.
+    # Contains customer PII columns (Recipient, Phone #, Detail Address...)
+    # which are NOT mapped and therefore never leave ingest.
+    orders:
+      "Order ID": order_id
+      "Seller SKU": sku_id            # TODO confirm vs "SKU ID" (TikTok numeric id): which one does the calc file VLOOKUP on?
+      "Product Name": sku_name
+      "Quantity": quantity
+      "SKU Unit Original Price": unit_price_gross
+      "Created Time": order_created_at
+      "Order Status": order_status
+      "Order Refund Amount": order_refund_amount
+      "SKU Subtotal After Discount": sku_subtotal_after_discount
+      # Needed by the ported calculation chain (intermediary "Xuat HĐ" col N):
+      "SKU Seller Discount": sku_seller_discount
+      # The team's M code replaces null with "Good" (Thanh_recon Order query):
+      "Cancelation/Return Type": cancel_return_type
+    # Real TikTok income export: sheet "Order details" (1 of 4 sheets),
+    # 65 columns, header row 1. One row per order or adjustment.
+    income:
+      "Order/adjustment ID": order_id   # May spelling
+      "Order/Adjustment ID": order_id   # June 2026 rename (capital A)
+      "Type": income_type               # May header
+      "Transaction type": income_type   # June 2026 rename
+      "Order created time": income_order_created_at
+      "Order settled time": statement_date
+      "Total Revenue": gross_revenue
+      "Total settlement amount": net_revenue
+      "Customer refund": actual_refund   # M code: refund amount reported for Partial Return / Payback lines
+      # Columns the team's classification + calculation actually read
+      # (evidence: Income_Final query in Thanh_recon V1/V2 M code):
+      "Subtotal after seller discounts": subtotal_after_seller_discounts
+      "Subtotal before discounts": subtotal_before_discounts
+      "Refund subtotal after seller discounts": refund_subtotal_after_sd
+      "Refund subtotal before seller discounts": refund_subtotal_before_sd
+  shopee:
+    # Real Shopee order export: sheet "orders", 62 Vietnamese columns, header
+    # row 1; store comes from the file name (no shop column). PII columns
+    # (Người Mua, Tên Người nhận, Số điện thoại, Địa chỉ nhận hàng, and the
+    # invoice-request block Họ & Tên / Địa chỉ / Email) are NOT mapped — the
+    # team's own M code removes them at ingest too.
+    orders:
+      "Mã đơn hàng": order_id
+      "SKU phân loại hàng": sku_id
+      "Tên sản phẩm": sku_name
+      "Số lượng": quantity
+      "Giá gốc": unit_price_gross
+      "Ngày đặt hàng": order_created_at
+      "Trạng Thái Đơn Hàng": order_status
+      # Yellow-column inputs (intermediary "Xuat HĐ" cols U/V):
+      "Người bán trợ giá": seller_subsidy
+      "Được Shopee trợ giá": shopee_subsidy
+    # Real Shopee income: sheets matching "Doanh thu*" (10k-row splits),
+    # leaf header row 3, data from row 4. Lines are typed Order/Sku in
+    # "Đơn hàng / Sản phẩm"; the team's M code keeps Order rows only.
+    # Buyer username ("Người Mua") is PII — unmapped.
+    income:
+      "Mã đơn hàng": order_id
+      "Đơn hàng / Sản phẩm": income_type          # "Order" / "Sku"
+      "Ngày đặt hàng": income_order_created_at
+      "Ngày hoàn thành thanh toán": statement_date
+      "Tổng tiền đã thanh toán": net_revenue       # settlement (can be <= 0)
+      "Giá sản phẩm": gross_revenue
+      "Số tiền hoàn lại": actual_refund
+      # Discount components read by the intermediary chain (cols H..M):
+      "Mã ưu đãi Đồng Tài Trợ do Người Bán chịu": cofund_voucher
+      "Sản phẩm được trợ giá từ Shopee": shopee_product_subsidy
+      "Mã ưu đãi do Người Bán chịu": seller_voucher
+      "Mã hoàn xu do Người Bán chịu": seller_coin_cashback
+      "Phí vận chuyển - Người bán hỗ trợ": seller_ship_support
+
+# ---------------------------------------------------------------------------
+# Pre-sample placeholder maps (superseded 2026-07-16, kept for reference):
+# tiktok.orders:  "Order ID"->order_id, "SKU ID"->sku_id, "Product Name"->sku_name,
+#   "Quantity"->quantity, "SKU Unit Original Price"->unit_price_gross,
+#   "Created Time"->order_created_at, "Shop Name"->store   (no Shop Name column exists)
+# tiktok.income:  "Order/adjustment ID"->order_id, "Shop Name"->store,
+#   "Total revenue"->gross_revenue (real header is "Total Revenue"),
+#   "Actual refund"->actual_refund (no such column; refunds = "Customer refund"),
+#   "Total settlement amount"->net_revenue, "Statement date"->statement_date
+#   (real header is "Order settled time")
+# shopee.orders:  "Tên Shop"->store (no such column; rest matched real headers)
+# shopee.income:  flat map now marked TODO above (real file is two-row grouped)
+# ---------------------------------------------------------------------------

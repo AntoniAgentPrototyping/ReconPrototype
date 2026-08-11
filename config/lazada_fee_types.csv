@@ -1,0 +1,119 @@
+﻿fee_name,bucket,status
+Commission,6.CP co Invoice,exp
+Commission fee - correction for undercharge,6.CP co Invoice,exp
+Item Price Credit,1.Doanh Thu,bt
+Lazada Bonus,4.Lazada bonus share by us,bt
+Lazada Bonus - LZD co-fund,4.Lazada bonus share by us,bt
+Lost Claim,1.Doanh Thu,bt
+Payment Fee,6.CP co Invoice,exp
+Payment fee - correction for undercharge,6.CP co Invoice,exp
+Promotional Charges Flexi-Combo,2.Promotional Charges Flexi-Combo,bt
+Promotional Charges Vouchers,3.Promotional Charges Vouchers,bt
+Reversal Commission,6.CP co Invoice,exp
+Reversal Item Price,1.Doanh Thu,bt
+Shipping Fee Refund to Customer,7.CP no Invoice,exp
+Shipping Fee Subsidy (By Seller),7.CP no Invoice,exp
+Free Shipping Max Fee,6.CP co Invoice,exp
+LCP Fee,6.CP co Invoice,exp
+Reversal LCP Fee,6.CP co Invoice,exp
+Sponsored Affiliates,6.CP co Invoice,exp
+Reversal Promotional Charges Flexi-Combo,2.Promotional Charges Flexi-Combo,bt
+Reversal Promotional Charges Vouchers,3.Promotional Charges Vouchers,bt
+Wrong Weight Adjustment,7.CP no Invoice,exp
+Lazcoin discount,5. Lazcoin discount,bt
+Shipping Fee Voucher Refund to Laz,7.CP no Invoice,exp
+Damaged Claim,1.Doanh Thu,bt
+Reversal of Free Shipping Max Fee,6.CP co Invoice,exp
+Sponsored Affiliates Refund,6.CP co Invoice,exp
+LCP Fee - Adjustment,6.CP co Invoice,exp
+Lazada Bonus - LZD co-fund - Reversal,4.Lazada bonus share by us,bt
+Lazada Bonus - Reversal,4.Lazada bonus share by us,bt
+FBL Handling Fee,6.CP co Invoice,exp
+Storage Fee,6.CP co Invoice,exp
+Sponsored Discovery - Top up,7.1. Sponsored Discovery check with CM,exp
+Reversal Lazcoin discount,5. Lazcoin discount,bt
+Shipping Fee Paid by Seller,6.1 CP shipping fee co invoice,exp
+Sponsored Product Fee,6.CP co Invoice,exp
+Marketing solution /social media advertising,6.CP co Invoice,exp
+Sponsored Product Fee Claim,6.CP co Invoice,exp
+Shipping fee - correction for undercharge,6.CP co Invoice,exp
+FBL Bundling Fee,6.CP co Invoice,exp
+Shipping Fee (Paid By Customer),6.1 CP shipping fee co invoice,exp
+Shipping Fee Voucher (by Lazada),6.1 CP shipping fee co invoice,exp
+Lost & Damaged FBL Inventories,1.Doanh Thu,bt
+Seller Funded Marketing Voucher,3.1 Seller Funded Marketing Voucher,exp
+Reversal shipping Fee (Paid by Customer),7.CP no Invoice,exp
+Reversal Shipping Fee Voucher (by Lazada),7.CP no Invoice,exp
+Shipping Fee Claims,6.1 CP shipping fee co invoice,exp
+Shipping Fee Correction,6.CP co Invoice,exp
+Sponsored Discovery - Lazada credit balance,7.CP no Invoice,exp
+Pullout Charge,6.CP co Invoice,exp
+Seller Incentive,1.1 Doanh Thu incentive,bt
+Sponsored Discovery - Top up refund,7.CP no Invoice,exp
+Universal Shopping Campaign,6.CP co Invoice,exp
+Presale Deposit,1.Doanh Thu,bt
+FBL Relabeling Fee,6.CP co Invoice,exp
+LazSubsidy,1.Doanh Thu,bt
+Seller balance adjustments - Credit,9.Hoan Thue VAT,Hoan Thue
+Seller balance adjustments - Debit,6.CP co Invoice,exp
+Sponsored Affiliates Claims,6.CP co Invoice,exp
+Universal Shopping Campaign Refund,6.CP co Invoice,exp
+Commission fee refund - correction for overcharge,6.CP co Invoice,exp
+Pick Up Fee,7.CP no Invoice,exp
+LazSubsidy - reversal,1.Doanh Thu,bt
+Reversal - Damaged Claims,1.Doanh Thu,bt
+Seller Incentive Offline Marketing,12. Income issue invoice,Other income
+FBL Handling fee refund - correction for overcharge,11.Other income,exp
+FBL Item Handling Fee,6.CP co Invoice,exp
+FBL Item Handling Fee Discount,6.CP co Invoice,exp
+FBL Order Handling Fee Discount,6.CP co Invoice,exp
+FBL Outbound Fee,6.CP co Invoice,exp
+LazFlash Extra/Everyday Below $9.99 Subsidy,7.CP no Invoice,exp
+Everyday Below $9.99 Subsidy - Reversal/Everyday Below $9.99 Subsidy - Reversal,7.CP no Invoice,exp
+Reversal Shipping Fee Paid by Seller,6.CP co Invoice,exp
+Marketing Service Deduction - Marketing Fee,6.CP co Invoice,exp
+Buyer Review Incentive,6.CP co Invoice,exp
+Adjustments Item Charge,6.CP co Invoice,exp
+Shipping fee refund - correction for overcharge,6.CP co Invoice,exp
+Campaign Fee,6.CP co Invoice,exp
+Reversal Campaign Fee,6.CP co Invoice,exp
+Reversal Marketing Solution - Social Media Advertising,6.CP co Invoice,exp
+LazCoins Discount Promotion Fee,6.CP co Invoice,exp
+Freeship Max Fee Discount Rebate,6.CP co Invoice,exp
+Reversal of LazCoins Discount Promotion Fee,6.CP co Invoice,exp
+Seller Voucher Credit,7.CP no Invoice,exp
+Reverse - Seller Voucher Credit,7.CP no Invoice,exp
+Lazada Sponsored Solutions refund,7.CP no Invoice,exp
+Wrong Shipping Fee Adjustment,7.CP no Invoice,exp
+Payment Fee Credit,6.CP co Invoice,exp
+LazCoins Discount,4.1 LazCoints Discount,bt
+Reversal of LazCoins Discount,4.1 LazCoints Discount,bt
+Adjustments Campaign Fee,6.CP co Invoice,exp
+Strategic Seller Program Participation Fee,7.CP no Invoice,exp
+Order Processing Fee,6.CP co Invoice,exp
+Voucher Max,6.CP co Invoice,exp
+Order Processing Fee - correction for undercharge,6.CP co Invoice,exp
+Reversal Voucher Max,6.CP co Invoice,exp
+Freeship Max Fee Discount Rebate - Reversal,6.CP co Invoice,exp
+Infrastructure Fee - Auto,6.CP co Invoice,exp
+Infrastructure Fee - Auto reversal,6.CP co Invoice,exp
+Infrastructure Fee - Manual Reversal,6.CP co Invoice,exp
+Reversal of Shipping Voucher (by Seller),6.CP co Invoice,exp
+Seller Virtual Credit - Co-fund Voucher,7.CP no Invoice,exp
+Reverse - Seller Virtual Credit - Co-fund Voucher,7.CP no Invoice,exp
+Lazada Funded Commission from Seller Virtual Credit,6.CP co Invoice,exp
+Reverse - Lazada Funded Commission from Seller Virtual Credit,6.CP co Invoice,exp
+Customer Return Delivery Fee,6.CP co Invoice,exp
+Order Processing Fee - Manual Reversal,6.CP co Invoice,exp
+Reversal Lazada Subsidy on Item Price,1.Doanh Thu,bt
+Product 360 Boost,6.CP co Invoice,exp
+Product 360 Boost Rebate,6.CP co Invoice,exp
+Seller Virtual Credit-LazCoins Discount Rebate,4.1 LazCoints Discount,bt
+Product 360 Boost Refund,6.CP co Invoice,exp
+Price Cut Discount,7.CP no Invoice,exp
+Product 360 Boost Rebate Reversal,6.CP co Invoice,exp
+Reversal of Seller Virtual Credit-LazCoins Discount Rebate,4.1 LazCoints Discount,bt
+Seller Virtual Credit - Co-fund Price Cut,7.CP no Invoice,exp
+Reversal Price Cut Discount,7.CP no Invoice,exp
+Reverse - Seller Virtual Credit - Co-fund Price Cut,7.CP no Invoice,exp
+LazCoins Discount-Affiliates Service Fee,4.1 LazCoints Discount,bt

@@ -1,0 +1,6 @@
+pandas>=2.2
+openpyxl>=3.1
+PyYAML>=6.0
+duckdb>=1.0
+python-calamine>=0.2   # fallback reader for exports with a broken <dimension> tag (June 2026 TikTok orders)
+pyxlsb>=1.0            # reads the team-owned "Lib & VAT rate.xlsb" master
