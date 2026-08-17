@@ -110,8 +110,51 @@ def load_masters(config_dir: Path, settings: dict, log: RunLog) -> dict:
 
 
 def vat_factor_for(sku_series, settings: dict, vat_sku: dict[str, float]):
-    """Default-plus-exceptions VAT: one default factor (the temporary 8%
-    concession — reverting to 10% is the single vat_factors.default line)
-    overridden per SKU by the master's VAT sheet."""
+    """What the master says about each SKU's VAT — **NaN where it says nothing.**
+
+    This used to end in `.fillna(default)`, which made "this SKU is standard
+    rated" and "this SKU is absent from the master" the same value: a
+    wrong-*tax* path with no signal (docs/08-KNOWN-DEFECTS.md#14). The default
+    fall-through is still the team's rule and still applied — it just happens in
+    `resolve_vat_factors`, one level up, where it can be counted and reported.
+
+    `settings` is unread here and kept in the signature because callers and
+    tests pass it positionally; the default it carries belongs to the resolver.
+    """
+    return sku_series.map(vat_sku)
+
+
+def resolve_vat_factors(sku_series, settings: dict, vat_sku: dict[str, float],
+                        log: RunLog, *, label: str = ""):
+    """Apply the team's rule — master exception, else the default factor — and
+    say out loud how much of the data the master actually covered.
+
+    Returns `(factors, unmapped_mask)`. The numbers are unchanged from the
+    silent version: fall-through to the default IS the team's behaviour and is
+    row-verified against their files, so changing it would be inventing a rule
+    ([D1](../docs/06-DECISIONS.md#d1)). What changes is that the fall-through
+    is now quantified in the run log instead of being invisible.
+
+    Measured on the three May windows, and the reason this is not a cosmetic
+    log line: coverage is **zero**. None of TikTok's 224, Shopee's 461 or the
+    sampled Lazada window's 92 distinct SKUs appear among the master's 660,
+    so every line is invoiced at the default and a non-default-rate SKU
+    trading on any of them would be taxed wrongly with no signal.
+    """
     default = float((settings.get("vat_factors") or {}).get("default", 1.08))
-    return sku_series.map(vat_sku).fillna(default)
+    factors = vat_factor_for(sku_series, settings, vat_sku)
+    unmapped = factors.isna()
+    rows = len(factors)
+    n_unmapped = int(unmapped.sum())
+    matched = rows - n_unmapped
+    distinct_unmapped = int(sku_series[unmapped].astype(str).str.strip().nunique())
+
+    log.add(f"  VAT master coverage{label}: {matched:,} of {rows:,} row(s) matched a "
+            f"master SKU; {n_unmapped:,} row(s) / {distinct_unmapped:,} distinct SKU(s) "
+            f"fall back to the {default} default")
+    if rows and matched == 0:
+        log.warn(f"NO SKU{label} matched the VAT master ({len(vat_sku)} entries) — the "
+                 f"per-SKU VAT exception mechanism is inert here and every line is "
+                 f"taxed at {default}. A SKU on a different rate would be invoiced "
+                 f"wrongly with no other signal (docs/08-KNOWN-DEFECTS.md#14)")
+    return factors.fillna(default), unmapped

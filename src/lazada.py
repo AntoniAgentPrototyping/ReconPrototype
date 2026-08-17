@@ -36,7 +36,7 @@ import numpy as np
 import pandas as pd
 
 from .errors import ReconHardStop
-from .ingest import to_number
+from .ingest import report_unparseable, to_number
 from .runlog import RunLog
 
 # Verified 2026-07-17 by tools/calc_verify_lazada.py against the Total files'
@@ -96,7 +96,13 @@ DAILY_MAP = {  # sheet "Income Overview" (the 25-31T05 window uses these)
 }
 SHEETS = {"weekly": "Transaction Overview", "daily": "Income Overview"}
 
-STORE_PATTERN = r"^\s*\d+_\s*(.+?)\s*\.xlsx$"  # "15_Masan.xlsx" -> "Masan"
+# "15_Masan.xlsx" -> "Masan". The optional "(N)" is a BROWSER download-duplicate
+# marker, not part of the store name: a store's five weekly exports downloaded
+# in one session arrive as "2_KAO.xlsx", "2_KAO (1).xlsx" … "2_KAO (4).xlsx",
+# and each is a DIFFERENT settlement week (verified Aug 2026: 05-01..03,
+# 05-18..24, 05-04..10, 05-11..17 — distinct ranges, not re-pulls). Without
+# stripping it the same storefront reads as five separate stores.
+STORE_PATTERN = r"^\s*\d+_\s*(.+?)(?:\s*\(\d+\))?\s*\.xlsx$"
 
 
 def _read_ledger_file(f: Path, variant: str, log: RunLog) -> pd.DataFrame:
@@ -134,8 +140,15 @@ def read_ledger(period_dir: Path, settings: dict, log: RunLog) -> pd.DataFrame:
     if missing:
         raise ReconHardStop(f"Lazada ledger missing canonical columns: {missing}")
     style = settings.get("number_style", "standard")
+    unparseable: dict[str, int] = {}
     for col in ("amount_incl_vat", "vat_amount"):
         df[col] = to_number(df[col], style)
+        n_bad = int(df[col].isna().sum())
+        if n_bad:
+            unparseable[col] = n_bad
+    # Same posture as TikTok/Shopee: an amount that cannot be read stops the
+    # run rather than becoming 0 VND (docs/08-KNOWN-DEFECTS.md#16).
+    report_unparseable(unparseable, "lazada/ledger", style, settings, log)
     df["transaction_date"] = pd.to_datetime(df["transaction_date"], errors="coerce")
     for col in ("order_id", "order_line_id", "sku_id", "fee_name", "store"):
         df[col] = df[col].astype(str).str.strip()
@@ -177,8 +190,12 @@ def classify_ledger(df: pd.DataFrame, fee_types: dict, vat_sku: dict[str, float]
         log.warn(f"{len(unmapped)} ledger rows with fee names missing from the "
                  f"Lib port ({sorted(unmapped['fee_name'].unique())[:5]}) -> exceptions")
 
-    default = float((settings.get("vat_factors") or {}).get("default", 1.08))
-    df["vat_rate"] = df["sku_id"].map(vat_sku).fillna(default)
+    # Same default-plus-exceptions model as TikTok/Shopee, and the same
+    # reporting: a SKU the master does not list is a fall-through, not a
+    # confirmed standard rate (docs/08-KNOWN-DEFECTS.md#14).
+    from .masters import resolve_vat_factors
+    df["vat_rate"], _ = resolve_vat_factors(df["sku_id"], settings, vat_sku, log,
+                                            label=" (lazada ledger)")
     df["amount_no_vat"] = df["amount_incl_vat"].fillna(0) / df["vat_rate"]
 
     for bucket, n in df["fee_bucket"].value_counts(dropna=False).head(8).items():

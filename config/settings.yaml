@@ -61,6 +61,12 @@ tolerances:
     pv_sum_vnd: 2000
     xuat_hd_vnd: 2000
     return_full_vnd: 10
+    # The order-file-vs-income-file revenue crossing (src/tieout.py,
+    # RevenueCrossing). MEASURED exact before it was asserted, on four
+    # independent windows: 0 deviating orders of 48,535 / 14,831 / 16,873
+    # (May s1/s2/s3) and 1 of 81,232 in the team's own June consolidated file.
+    # 1 VND because the relation is exact, not because 1 VND is a nice number.
+    conservation_vnd: 1
 
 periods:
   rolling_window_months: 2
@@ -84,6 +90,19 @@ window_settlement_bounds:
 
 # TikTok amounts parse as standard (1234567.89). Re-verify per platform.
 number_style: standard
+
+# What to do with an amount cell that cannot be parsed under number_style.
+#   hard_stop (default) — name the column and the row count, produce nothing
+#   warn                — log it and continue; the cell becomes 0 VND
+# Blank cells and the Excel accounting dash ("-") are NOT unparseable: they
+# mean zero and are parsed as 0.0. Measured 2026-08-13 — a real Shopee income
+# export writes the dash in 46,972 of 83,134 rows of seller_ship_support, a
+# column that feeds the discount allocation, and both windows have ZERO
+# genuinely unparseable cells. Anything that does fail here is far more likely
+# a monthly format change (a Vietnamese-styled column, a currency suffix) than
+# real data, and it used to become silent zero revenue
+# (docs/08-KNOWN-DEFECTS.md#16).
+numeric_coercion: hard_stop
 
 # Drop raw columns that aren't in the column maps at read time: strips PII
 # immediately (the team's Shopee M code does the same) and keeps full-
@@ -151,7 +170,15 @@ store_from_filename:
   # June 2026 added a leading store-number prefix: "10_Income.Reckitt...xlsx",
   # "13_Order. ufood_store.xlsx", and inconsistently "1_ Income. Curel.xlsx"
   # (space after the underscore) — (?:\d+_\s*) handles all of them + May.
-  shopee: '^\s*(?:\d+_\s*)?(?:order|income)[. ]\s*(.+?)(?:\s+part\s*\d+)?\s*\.xlsx$'
+  # Aug 2026: sub-window income files carry the settlement range in the name —
+  # "Income. Xmenforboss 1-10.xlsx", "Income. Xmenforboss 21-end.xlsx" — which
+  # parsed as the stores 'Xmenforboss 1-10' and 'Xmenforboss 21-end'. Same
+  # optional-trailing-token treatment TikTok already gives "29-31", and the
+  # same rule: the token must be whitespace-separated digits (or the literal
+  # "end"), so a name like "Xmen 2-in-1" cannot be truncated. The 11-20 export
+  # of the same store carries no suffix and proves the bare name is the real
+  # one; check_stores is the backstop if this ever over-strips.
+  shopee: '^\s*(?:\d+_\s*)?(?:order|income)[. ]\s*(.+?)(?:\s+part\s*\d+)?(?:\s+\d{1,2}-(?:\d{1,2}|end))?\s*\.xlsx$'
 
 # Stores present in the May-2026 data (names as they appear in file names).
 # TikTok: 17 stores in window 01-17T05; window 18-30T05 has 18 (adds
@@ -351,6 +378,23 @@ column_maps:
       "Mã ưu đãi do Người Bán chịu": seller_voucher
       "Mã hoàn xu do Người Bán chịu": seller_coin_cashback
       "Phí vận chuyển - Người bán hỗ trợ": seller_ship_support
+      # The team's June "Net revenue" formula (their consolidated file, sheet
+      # "Doanh Thu", column J — read out of the cell on 2026-08-13) is:
+      #   Giá sản phẩm
+      # + Sản phẩm được trợ giá từ Shopee
+      # + Mã ưu đãi do Người Bán chịu
+      # + Mã hoàn xu do Người Bán chịu
+      # + Mã ưu đãi Đồng Tài Trợ do Người Bán chịu
+      # + Mã hoàn xu Đồng Tài Trợ do Người Bán chịu   <-- NOT mapped
+      # Reproducing it from these columns matched their cached values on all
+      # 82,714 rows, max deviation 0.000000 VND. It is what closed the Shopee
+      # money crossing (src/tieout.py::RevenueCrossing).
+      #
+      # The sixth component is deliberately UNMAPPED: it is zero in every row of
+      # every window measured (June and all three May windows), the crossing is
+      # built from the first two components only, and no money formula reads it.
+      # Map it here the day it goes non-zero — that also moves the Shopee
+      # fingerprint digests, which is why it is not mapped speculatively.
 
 # ---------------------------------------------------------------------------
 # Pre-sample placeholder maps (superseded 2026-07-16, kept for reference):

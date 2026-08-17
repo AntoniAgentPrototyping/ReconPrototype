@@ -1,0 +1,38 @@
+# Build context for deploy/Dockerfile (the api and worker image).
+#
+# input/ alone is hundreds of MB of client Excel containing customer PII. It must
+# never enter a build context — that is slow, and it would bake client data into
+# an image layer where it is very hard to remove.
+#
+# EVERY PATTERN HERE IS `**/`-PREFIXED, and that is not decoration. Docker anchors
+# an unprefixed pattern at the CONTEXT ROOT, while git matches the same spelling at
+# any depth. compose builds these images with `context: ..`, so a bare `input/`
+# excluded <root>/input/ and silently did NOT exclude deploy/input/ — which held 40
+# real client Shopee exports, 382 MB, shipped to the daemon on every build. Git had
+# been ignoring that directory the whole time, which is exactly why nobody noticed.
+# Measured 2026-08-17 with a mimic build; see M6-PLAN.md phase 0.
+**/input/
+**/output/
+**/artifacts/
+**/.scratch/
+**/.uploads/
+
+.git/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# The web app has its own image and its own build context.
+web/node_modules/
+web/.next/
+
+# The team-owned .xlsb master is mounted at runtime, never baked in — a stale
+# copy would silently diverge from the team's own rules (D8).
+config/*.xlsb
+
+.env
+.env.*
+!.env.example

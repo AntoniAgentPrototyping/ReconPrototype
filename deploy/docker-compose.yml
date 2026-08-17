@@ -1,0 +1,196 @@
+# The whole stack: Postgres + MinIO + api + worker + web.
+#
+#   cd deploy && cp .env.example .env && $EDITOR .env && docker compose up --build
+#
+# Status, stated precisely because the M4 header here overclaimed and then
+# underclaimed in turn: this file WAS brought up and exercised on 2026-08-17 with
+# Docker 29.7.2 — see docs/07-VERIFICATION.md. The Postgres SQL underneath it is
+# separately verified against a real 17.10 server by the service test suite.
+#
+# There is no input volume any more. Uploaded exports live in MinIO and the worker
+# materialises each window into its own scratch directory at run time
+# (service/materialize.py), which is what lets api and worker share nothing but
+# the network — the shape the target deployment requires, since Railway allows
+# "a single volume" per service and no cross-service mounting
+# (docs/06-DECISIONS.md#d43).
+
+name: recon
+
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-recon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-recon}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    # Not published. The queue is reachable from the api and the worker only;
+    # exposing 5432 would put the run history and every store's revenue on the
+    # host network for the sake of a convenient psql.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-recon} -d ${POSTGRES_DB:-recon}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # Object storage
+  # -------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-recon-root}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    volumes:
+      - objects:/data
+    ports:
+      # The CONSOLE only, on loopback, so an operator can look at a bucket. The S3
+      # API port is deliberately NOT published: uploaded exports are raw client
+      # data and the api is the only thing that should be able to read them.
+      - "127.0.0.1:9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # Creates the two buckets, sets retention on the one holding client data, and
+  # mints a SCOPED service account so neither app ever holds root credentials.
+  #
+  # Two buckets rather than two prefixes because their retention is opposite:
+  # uploads are raw client exports that must expire, artifacts are the deliverable
+  # the team invoiced from and must not. A lifecycle rule is per-bucket, so one
+  # bucket would mean either keeping PII forever or deleting the evidence.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-recon-root}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+      RECON_S3_ACCESS_KEY: ${RECON_S3_ACCESS_KEY:?set RECON_S3_ACCESS_KEY in .env}
+      RECON_S3_SECRET_KEY: ${RECON_S3_SECRET_KEY:?set RECON_S3_SECRET_KEY in .env}
+      UPLOAD_RETENTION_DAYS: ${UPLOAD_RETENTION_DAYS:-30}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb --ignore-existing local/recon-uploads
+        mc mb --ignore-existing local/recon-artifacts
+        # The retention promise docs/04-DATA-FLOW.md has always made and never had
+        # a mechanism for. A bucket lifecycle rule cannot silently stop running,
+        # which an application-side deletion loop can.
+        mc ilm rule add --expire-days "$$UPLOAD_RETENTION_DAYS" local/recon-uploads \
+          || echo "lifecycle rule already present"
+        # Versioning on ARTIFACTS only: a workbook someone invoiced from must be
+        # recoverable. Deliberately NOT on uploads, where it would defeat the
+        # expiry rule above by keeping every version of a PII-bearing export.
+        mc version enable local/recon-artifacts
+        mc admin user add local "$$RECON_S3_ACCESS_KEY" "$$RECON_S3_SECRET_KEY" || true
+        mc admin policy attach local readwrite --user "$$RECON_S3_ACCESS_KEY" || true
+        echo "buckets ready"
+    restart: "no"
+
+  # -------------------------------------------------------------------------
+  # The application
+  # -------------------------------------------------------------------------
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: api
+    environment:
+      RECON_DATABASE_URL: postgresql://${POSTGRES_USER:-recon}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-recon}
+      RECON_S3_ENDPOINT: http://minio:9000
+      RECON_S3_ACCESS_KEY: ${RECON_S3_ACCESS_KEY}
+      RECON_S3_SECRET_KEY: ${RECON_S3_SECRET_KEY}
+    ports:
+      # 127.0.0.1 only. Authenticated since M5, and still not a thing to publish:
+      # the browser reaches the api through `web`, which is the only component
+      # that needs an address.
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # No input mount and no artifacts mount — both are in MinIO now. The
+      # team-owned .xlsb master stays a read-only bind rather than baked into the
+      # image: a stale copy would silently diverge from the team's own fee and VAT
+      # rules (docs/06-DECISIONS.md#d8).
+      - ${RECON_MASTERS_DIR:-./masters}:/app/config/masters:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: worker
+    environment:
+      RECON_DATABASE_URL: postgresql://${POSTGRES_USER:-recon}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-recon}
+      RECON_S3_ENDPOINT: http://minio:9000
+      RECON_S3_ACCESS_KEY: ${RECON_S3_ACCESS_KEY}
+      RECON_S3_SECRET_KEY: ${RECON_S3_SECRET_KEY}
+      RECON_WORKER_ID: worker-1
+      # A lease must outlast the longest SILENT stretch of a run, not the run:
+      # QueueRunLog extends it on every flush and the quietest stage is openpyxl
+      # workbook materialization at 30-39s.
+      RECON_LEASE_SECONDS: "900"
+    volumes:
+      # Scratch only. Each job downloads its window into scratch/job-N/input and
+      # the directory is removed afterwards, so this is genuinely throwaway — it is
+      # a volume rather than the container filesystem only to keep a 650k-cell
+      # workbook write off the overlay driver.
+      - scratch:/data/scratch
+      - ${RECON_MASTERS_DIR:-./masters}:/app/config/masters:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    # 4 GB because that is the number the engine-port memory trigger is defined
+    # against: peak RSS measured 832 MB, 41% of this limit, and the trigger fires
+    # at 50% (docs/10-ROADMAP.md). Change this and the trigger changes meaning.
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+    # Scale with `--scale worker=N`, never with threads inside one worker: the
+    # settings dict carries a mutable VAT back-channel that two concurrent runs
+    # would cross-contaminate. FOR UPDATE SKIP LOCKED is what makes N processes
+    # safe.
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../web
+      dockerfile: Dockerfile
+    environment:
+      # Read at REQUEST time on the server, never baked in at build time — that is
+      # what lets one image be promoted from here to a real deployment
+      # (web/next.config.mjs).
+      RECON_API_URL: http://api:8080
+      NODE_ENV: production
+    ports:
+      # The one address a human uses. Loopback here; behind a real front door in a
+      # deployment, at which point `serverActions.allowedOrigins` has to be set —
+      # see the note in web/next.config.mjs.
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  objects:
+  scratch:
+  # `artifacts` is gone: finished workbooks live in the recon-artifacts bucket and
+  # the api streams them through its own authorization. A leftover volume would be
+  # a place for a second, stale copy of the deliverable to accumulate.

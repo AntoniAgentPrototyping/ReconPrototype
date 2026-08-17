@@ -1,0 +1,936 @@
+{
+  "provenance": {
+    "deps": {
+      "PyYAML": "6.0.3",
+      "openpyxl": "3.1.5",
+      "pandas": "2.3.3",
+      "python-calamine": "0.8.2",
+      "pyxlsb": "1.0.10"
+    },
+    "python": "3.12.10"
+  },
+  "schema": 2,
+  "windows": {
+    "2026-05_l1/lazada": {
+      "fingerprint_digest": "sha256:f9fb47c0a37b073ab64d1efbc4550c294616c3ec13559e6290857bc7cb37e0e7",
+      "partial_roster": false,
+      "rebaselined": {
+        "changed": [
+          "fingerprint_digest",
+          "stage_row_counts",
+          "stores_seen",
+          "variance_count",
+          "variances_digest",
+          "workbook"
+        ],
+        "reason": "Golden coverage broadened: KAO's 2026-05-01..03 weekly export belongs to this settlement window and had never been staged. Window goes 1 -> 2 stores (1,826 -> 1,965 ledger rows). Every digest moves by construction - this is more input, not changed behaviour. Roadmap immediate to-do #2."
+      },
+      "stage_row_counts": {
+        "classify_ledger[0]": 1965,
+        "classify_ledger[1]": 0,
+        "read_ledger": 1965,
+        "revenue_lines": 146
+      },
+      "stores_seen": 2,
+      "used_refs": false,
+      "variance_count": 2,
+      "variances_digest": "sha256:1ed56f07e2a31e3dedf8076da19f1ee75ed2e3dae7053f0b8b8716a7b54d6930",
+      "workbook": {
+        "schema": 1,
+        "sheets": [
+          {
+            "cell_count": 31,
+            "digest": "aae2f135893b8721052e8c66ca0ac987d3e91450a7d2a694adfbad46beec1c58",
+            "index": 0,
+            "max_col": 6,
+            "max_row": 18,
+            "name": "Summary"
+          },
+          {
+            "cell_count": 25,
+            "digest": "2946a9af5d3d2f00de8131dbbf0a6c97289ff0b244ab65d258a74e06aa396a8f",
+            "index": 1,
+            "max_col": 10,
+            "max_row": 6,
+            "name": "1.05 KA used"
+          },
+          {
+            "cell_count": 25,
+            "digest": "0c05d5d87b61db2580388b53c9223e28eaac0efdf62e09617721884ceca95e95",
+            "index": 2,
+            "max_col": 10,
+            "max_row": 6,
+            "name": "1.05"
+          },
+          {
+            "cell_count": 493,
+            "digest": "8f131bfdb62db0a607ed3cafd493dfa57cdb0a2fa487cb59224e6554a1d31ebb",
+            "index": 3,
+            "max_col": 10,
+            "max_row": 84,
+            "name": "1.08 KA used"
+          },
+          {
+            "cell_count": 1047,
+            "digest": "0a965346c4dead31d9a40f97eea8e12d63f37016bf1ab0dc3495fc8c83975774",
+            "index": 4,
+            "max_col": 10,
+            "max_row": 152,
+            "name": "1.08"
+          },
+          {
+            "cell_count": 25,
+            "digest": "2ac4dc0012e3a83aff915080ddfaf8eadb01a83cf3058eb949a64d48e2ef7ce5",
+            "index": 5,
+            "max_col": 10,
+            "max_row": 6,
+            "name": "1.10 KA used"
+          },
+          {
+            "cell_count": 25,
+            "digest": "98006595da3ea73ee7c987fc487f5011d678e7e403e39829f05203dee17e3e4a",
+            "index": 6,
+            "max_col": 10,
+            "max_row": 6,
+            "name": "1.10"
+          },
+          {
+            "cell_count": 9,
+            "digest": "3736ca1c38f1ad672893d0217b827f6aea86b77063bdbde3c04d446520fa3997",
+            "index": 7,
+            "max_col": 6,
+            "max_row": 3,
+            "name": "Curel.xlsx"
+          },
+          {
+            "cell_count": 81,
+            "digest": "513a62c69b2769472bd08b44f5ac01c664ce53b8b8b9ff01221350ff681491a1",
+            "index": 8,
+            "max_col": 6,
+            "max_row": 15,
+            "name": "KAO.xlsx"
+          },
+          {
+            "cell_count": 9,
+            "digest": "73db9b5f4bd949a43e6376cec6490966f753f8bf592259438b88da3e42c9215e",
+            "index": 9,
+            "max_col": 6,
+            "max_row": 3,
+            "name": "Merries.xlsx"
+          },
+          {
+            "cell_count": 405,
+            "digest": "cfed14afddbfff68d04a65158260397e7b32418bf6f2e1daf97eb4bea0832ec6",
+            "index": 10,
+            "max_col": 6,
+            "max_row": 69,
+            "name": "Others"
+          },
+          {
+            "cell_count": 18,
+            "digest": "6f1b576953a0bc984a1e8a184fd3bba450857ce20734e97961e7676ed64a9563",
+            "index": 11,
+            "max_col": 7,
+            "max_row": 3,
+            "name": "Fee buckets"
+          }
+        ]
+      }
+    },
+    "2026-05_l2/lazada": {
+      "fingerprint_digest": "sha256:9957016c0026c6649a9d8d521cb884e8b9e13ff37730a9619dd4b0de60bcf358",
+      "partial_roster": false,
+      "stage_row_counts": {
+        "classify_ledger[0]": 859,
+        "classify_ledger[1]": 0,
+        "read_ledger": 859,
+        "revenue_lines": 114
+      },
+      "stores_seen": 1,
+      "used_refs": false,
+      "variance_count": 1,
+      "variances_digest": "sha256:00bc696fc45024278fefe2da95aa53ec70a69fd5bdafb833ea83e7c37b92d361",
+      "workbook": {
+        "schema": 1,
+        "sheets": [
+          {
+            "cell_count": 31,
+            "digest": "ef260fc1506db69109731ae72e0f283d59e318e61e37af5a070c08e34d0f4728",
+            "index": 0,
+            "max_col": 6,
+            "max_row": 18,
+            "name": "Summary"
+          },
+          {
+            "cell_count": 25,
+            "digest": "97c2419a191ba527249c9c4d0ae8337e67bc29e959039b3d671e26597537850a",
+            "index": 1,
+            "max_col": 10,
+            "max_row": 6,
+            "name": "1.05 KA used"
+          },
+          {
+            "cell_count": 25,
+            "digest": "338dc07d1eb895898c815f47c0481b9714599cce3e0be093c444f2445a82115c",
+            "index": 2,
+            "max_col": 10,
+            "max_row": 6,
+            "name": "1.05"
+          },
+          {
+            "cell_count": 397,
+            "digest": "445de42b892d1554804dc79929f593cfe4064a3c7f35a5ec4cd33ce698e5a0d6",
+            "index": 3,
+            "max_col": 10,
+            "max_row": 68,
+            "name": "1.08 KA used"
+          },
+          {
+            "cell_count": 823,
+            "digest": "702f6c67e148dc4ccb9e0e5828b415ba6e944f6227aa4af333f5909636a54629",
+            "index": 4,
+            "max_col": 10,
+            "max_row": 120,
+            "name": "1.08"
+          },
+          {
+            "cell_count": 25,
+            "digest": "411541372cc06b363e1d18950b1319ef62c474769fe70f4287ee9b0bff0f0de7",
+            "index": 5,
+            "max_col": 10,
+            "max_row": 6,
+            "name": "1.10 KA used"
+          },
+          {
+            "cell_count": 25,
+            "digest": "df13978e775a86172fdd70481d9325707e7377cc529d817f41e6a4c4c513b0b8",
+            "index": 6,
+            "max_col": 10,
+            "max_row": 6,
+            "name": "1.10"
+          },
+          {
+            "cell_count": 9,
+            "digest": "3736ca1c38f1ad672893d0217b827f6aea86b77063bdbde3c04d446520fa3997",
+            "index": 7,
+            "max_col": 6,
+            "max_row": 3,
+            "name": "Curel.xlsx"
+          },
+          {
+            "cell_count": 381,
+            "digest": "27816b68af2db5116f6ab755b3ff4f374dc0582bde7a8c19b725de917a9f5075",
+            "index": 8,
+            "max_col": 6,
+            "max_row": 65,
+            "name": "KAO.xlsx"
+          },
+          {
+            "cell_count": 9,
+            "digest": "73db9b5f4bd949a43e6376cec6490966f753f8bf592259438b88da3e42c9215e",
+            "index": 9,
+            "max_col": 6,
+            "max_row": 3,
+            "name": "Merries.xlsx"
+          },
+          {
+            "cell_count": 9,
+            "digest": "e07d7fb07a026c9eb892a8d3fd4c45a05a8aceefe07df0e975ec466450a28d40",
+            "index": 10,
+            "max_col": 6,
+            "max_row": 3,
+            "name": "Others"
+          },
+          {
+            "cell_count": 8,
+            "digest": "70d1c9ae1b84a549150761960b789ed41c2a3ca054f063dd2252a7f4c501657a",
+            "index": 11,
+            "max_col": 4,
+            "max_row": 2,
+            "name": "Fee buckets"
+          }
+        ]
+      }
+    },
+    "2026-05_l3/lazada": {
+      "fingerprint_digest": "sha256:6639d77916f2287d859db4834295d2f0ef5f90a546afcc8d1844c6b8b2ad02d6",
+      "partial_roster": false,
+      "stage_row_counts": {
+        "classify_ledger[0]": 287,
+        "classify_ledger[1]": 0,
+        "read_ledger": 287,
+        "revenue_lines": 46
+      },
+      "stores_seen": 1,
+      "used_refs": false,
+      "variance_count": 1,
+      "variances_digest": "sha256:809cbc2241486d6570e800eea46f3a8303f6ebcd8fb9508dd93fc909901a8393",
+      "workbook": {
+        "schema": 1,
+        "sheets": [
+          {
+            "cell_count": 31,
+            "digest": "80c07305714b8230026049dd4cc627f51e8d5bf1a60fca97bd84ed8d61427ee8",
+            "index": 0,
+            "max_col": 6,
+            "max_row": 18,
+            "name": "Summary"
+          },
+          {
+            "cell_count": 25,
+            "digest": "0f96741e98e34fd8a2e216a42e89e1f7a545d6a941cee9741fd9a04e44cdc3b0",
+            "index": 1,
+            "max_col": 10,
+            "max_row": 6,
+            "name": "1.05 KA used"
+          },
+          {
+            "cell_count": 25,
+            "digest": "6b5288a250e166ad11583c010ce627773a927669b4463c52b16da68585bcc967",
+            "index": 2,
+            "max_col": 10,
+            "max_row": 6,
+            "name": "1.05"
+          },
+          {
+            "cell_count": 241,
+            "digest": "29aedf9ee23d70db0095a75d24fa44af4a50b2b419c364b40b82241964522fd7",
+            "index": 3,
+            "max_col": 10,
+            "max_row": 42,
+            "name": "1.08 KA used"
+          },
+          {
+            "cell_count": 347,
+            "digest": "1e467a1c264d25dc0b65f577389527a409d7d7a37bcb27820e5deea2a409ebcc",
+            "index": 4,
+            "max_col": 10,
+            "max_row": 52,
+            "name": "1.08"
+          },
+          {
+            "cell_count": 25,
+            "digest": "b2698725c306dd70bd2081716c48a8aafe3da404b5da90144c91cf603d4c3d74",
+            "index": 5,
+            "max_col": 10,
+            "max_row": 6,
+            "name": "1.10 KA used"
+          },
+          {
+            "cell_count": 25,
+            "digest": "037edaa5a16d0ed75e0f5469bccf28fe3fcc909e5b7b5c95d3eeb24f1152d823",
+            "index": 6,
+            "max_col": 10,
+            "max_row": 6,
+            "name": "1.10"
+          },
+          {
+            "cell_count": 9,
+            "digest": "3736ca1c38f1ad672893d0217b827f6aea86b77063bdbde3c04d446520fa3997",
+            "index": 7,
+            "max_col": 6,
+            "max_row": 3,
+            "name": "Curel.xlsx"
+          },
+          {
+            "cell_count": 225,
+            "digest": "ac9833c86a1ebf5e218082ff8a8c81327faff0a7192d1368c3bd7514d2a5b637",
+            "index": 8,
+            "max_col": 6,
+            "max_row": 39,
+            "name": "KAO.xlsx"
+          },
+          {
+            "cell_count": 9,
+            "digest": "73db9b5f4bd949a43e6376cec6490966f753f8bf592259438b88da3e42c9215e",
+            "index": 9,
+            "max_col": 6,
+            "max_row": 3,
+            "name": "Merries.xlsx"
+          },
+          {
+            "cell_count": 9,
+            "digest": "e07d7fb07a026c9eb892a8d3fd4c45a05a8aceefe07df0e975ec466450a28d40",
+            "index": 10,
+            "max_col": 6,
+            "max_row": 3,
+            "name": "Others"
+          },
+          {
+            "cell_count": 8,
+            "digest": "e1d7da36b13e3c9579ac61b1ac4465914890640bcd4f875f8aee6a686fe41a51",
+            "index": 11,
+            "max_col": 4,
+            "max_row": 2,
+            "name": "Fee buckets"
+          }
+        ]
+      }
+    },
+    "2026-05_l4/lazada": {
+      "fingerprint_digest": "sha256:1fd1ac245226e86566a1a3c37e546e42fac0d9c6368347f4bc3e840a9e073dd5",
+      "partial_roster": false,
+      "stage_row_counts": {
+        "classify_ledger[0]": 266,
+        "classify_ledger[1]": 0,
+        "read_ledger": 266,
+        "revenue_lines": 42
+      },
+      "stores_seen": 1,
+      "used_refs": false,
+      "variance_count": 1,
+      "variances_digest": "sha256:ee5b1c0f1a1a9ed4817432268098d5aebac00b00c97cd17f975fc083339077c4",
+      "workbook": {
+        "schema": 1,
+        "sheets": [
+          {
+            "cell_count": 31,
+            "digest": "93c1d5c9a57c2f32e616f54b6bef26b74a8d736b243a58925d0b4f07af1bbc8e",
+            "index": 0,
+            "max_col": 6,
+            "max_row": 18,
+            "name": "Summary"
+          },
+          {
+            "cell_count": 25,
+            "digest": "ac6ce570294c435f09a5016dc63c1a0577f80a06f59715d3fa6ecc775c6d1509",
+            "index": 1,
+            "max_col": 10,
+            "max_row": 6,
+            "name": "1.05 KA used"
+          },
+          {
+            "cell_count": 25,
+            "digest": "60005ae6f8b49db8ba7fe90271358a3c6634396fe67351378d7d38d46066e536",
+            "index": 2,
+            "max_col": 10,
+            "max_row": 6,
+            "name": "1.05"
+          },
+          {
+            "cell_count": 193,
+            "digest": "eceb1c67f5c881d0c225f189c7ab78ed7c9da1f5229ea68385721239a218989c",
+            "index": 3,
+            "max_col": 10,
+            "max_row": 34,
+            "name": "1.08 KA used"
+          },
+          {
+            "cell_count": 319,
+            "digest": "aefb88449bd1644364644406d67628cd62a5b25c87d0d7a9239a6f988443ad6a",
+            "index": 4,
+            "max_col": 10,
+            "max_row": 48,
+            "name": "1.08"
+          },
+          {
+            "cell_count": 25,
+            "digest": "283b0e62500e577e59af4bdce3fd510974cc75b3194f72d61f2d9126646b30c6",
+            "index": 5,
+            "max_col": 10,
+            "max_row": 6,
+            "name": "1.10 KA used"
+          },
+          {
+            "cell_count": 25,
+            "digest": "172481401df23a4e1e3997b7affb35bd81ed78c6f0c2dc14f553cfb66257b655",
+            "index": 6,
+            "max_col": 10,
+            "max_row": 6,
+            "name": "1.10"
+          },
+          {
+            "cell_count": 9,
+            "digest": "3736ca1c38f1ad672893d0217b827f6aea86b77063bdbde3c04d446520fa3997",
+            "index": 7,
+            "max_col": 6,
+            "max_row": 3,
+            "name": "Curel.xlsx"
+          },
+          {
+            "cell_count": 177,
+            "digest": "b032844a7804a5b66f27e1b5a2973f9d585e42d75495e37e3b185936c2b84071",
+            "index": 8,
+            "max_col": 6,
+            "max_row": 31,
+            "name": "KAO.xlsx"
+          },
+          {
+            "cell_count": 9,
+            "digest": "73db9b5f4bd949a43e6376cec6490966f753f8bf592259438b88da3e42c9215e",
+            "index": 9,
+            "max_col": 6,
+            "max_row": 3,
+            "name": "Merries.xlsx"
+          },
+          {
+            "cell_count": 9,
+            "digest": "e07d7fb07a026c9eb892a8d3fd4c45a05a8aceefe07df0e975ec466450a28d40",
+            "index": 10,
+            "max_col": 6,
+            "max_row": 3,
+            "name": "Others"
+          },
+          {
+            "cell_count": 8,
+            "digest": "62979de74470c5f9cd69a6f119807b4cbb35106f21e75d8eb67ef7d86d062ef8",
+            "index": 11,
+            "max_col": 4,
+            "max_row": 2,
+            "name": "Fee buckets"
+          }
+        ]
+      }
+    },
+    "2026-05_s1/shopee": {
+      "fingerprint_digest": "sha256:9d483f8ad3c177f4f8bf409fb08f261a7ff667e3e2cf869f761520ae380e14cc",
+      "partial_roster": true,
+      "rebaselined": {
+        "changed": [
+          "fingerprint_digest",
+          "stage_row_counts",
+          "stores_seen",
+          "variance_count",
+          "variances_digest",
+          "workbook"
+        ],
+        "reason": "Golden coverage broadened: the Xmenforboss 1-10 sub-window (income settled 2026-05-01..10, the same window as Masan) had never been staged. Window goes 1 -> 2 stores. Zero order-id overlap between the two stores' income files, so the window still partitions cleanly. Every digest moves by construction - more input, not changed behaviour. Roadmap immediate to-do #2."
+      },
+      "stage_row_counts": {
+        "apply_settlement_bounds": 119382,
+        "classify_shopee_income": 49138,
+        "compute_sku_columns_shopee": 70203,
+        "derive_brand": 242172,
+        "derive_brand#2": 119382,
+        "explode_to_sku_shopee": 70203,
+        "read_parts": 242172,
+        "read_parts#2": 119382
+      },
+      "stores_seen": 2,
+      "used_refs": false,
+      "variance_count": 2,
+      "variances_digest": "sha256:f70fd66776cc7c8a25b30d95e72b677a04550853bd6fabfb66c381be82fd81b7",
+      "workbook": {
+        "schema": 1,
+        "sheets": [
+          {
+            "cell_count": 48,
+            "digest": "d911c65017c405bab07edb923accf655bc2d22593e594f96641e1afa1151d337",
+            "index": 0,
+            "max_col": 11,
+            "max_row": 8,
+            "name": "PV sum"
+          },
+          {
+            "cell_count": 928575,
+            "digest": "9b3a31706bff83cee844c40fa4330d5c992f6d65c57540de04f83f562e108742",
+            "index": 1,
+            "max_col": 18,
+            "max_row": 69295,
+            "name": "Xuat HD bt"
+          },
+          {
+            "cell_count": 12778,
+            "digest": "a05cfe1095162c2a12d323d0d6d3985055ffb78f0675548914e1ffd95c225436",
+            "index": 2,
+            "max_col": 16,
+            "max_row": 920,
+            "name": "return"
+          },
+          {
+            "cell_count": 8,
+            "digest": "58b79155fb3dfcff3a72f8d424748be0272cbab1e9c329cc2b40be863f5452d3",
+            "index": 3,
+            "max_col": 6,
+            "max_row": 3,
+            "name": "1.05 KA"
+          },
+          {
+            "cell_count": 9,
+            "digest": "f91db5b77d5e4f5b2eb9f2d143cfe90df78460912df304596821e8e714e4abb7",
+            "index": 4,
+            "max_col": 5,
+            "max_row": 4,
+            "name": "Curel"
+          },
+          {
+            "cell_count": 9,
+            "digest": "a5b036b69c8bd8c1058114c493e79f1d237878b9112df08fc5a4e7bd4f5639e4",
+            "index": 5,
+            "max_col": 5,
+            "max_row": 4,
+            "name": "KAO"
+          },
+          {
+            "cell_count": 9,
+            "digest": "65e1a6090dc46ce06423e7b11ef3cc3fa03905caff85e63c72b719a865c17750",
+            "index": 6,
+            "max_col": 5,
+            "max_row": 4,
+            "name": "Merries"
+          },
+          {
+            "cell_count": 9,
+            "digest": "f265c94c162f1e1650929ec279057fd7f95dfec99e55dd40cc5f0c87effc4602",
+            "index": 7,
+            "max_col": 5,
+            "max_row": 4,
+            "name": "Kate"
+          },
+          {
+            "cell_count": 4085,
+            "digest": "1dd93ec18d2085c252cc8791dff09fdfb7d5af8c91ec0f457ec01d5749e41496",
+            "index": 8,
+            "max_col": 5,
+            "max_row": 819,
+            "name": "Others"
+          },
+          {
+            "cell_count": 4899,
+            "digest": "47554611049cf6ddac9f91db15acfef78cce6566bec3fcf89b7575eb89b82b8d",
+            "index": 9,
+            "max_col": 6,
+            "max_row": 818,
+            "name": "1.08 KA"
+          },
+          {
+            "cell_count": 8,
+            "digest": "2e8f95f25e8c2e13ac4f3c928e497a1a28d120b3f947f7910fad9fe74043bd6d",
+            "index": 10,
+            "max_col": 6,
+            "max_row": 3,
+            "name": "1.10 KA"
+          },
+          {
+            "cell_count": 4905,
+            "digest": "efc6072c843e3d22c3f4addf2b4d11ff8c8b23218aa52e9c9e105a9158b7a83d",
+            "index": 11,
+            "max_col": 9,
+            "max_row": 818,
+            "name": "PV xuat HD"
+          }
+        ]
+      }
+    },
+    "2026-05_s2/shopee": {
+      "fingerprint_digest": "sha256:702c1eeb8de8dc1970495394048aef4750bd157e4410b95ee0cc4acf4510569b",
+      "partial_roster": true,
+      "stage_row_counts": {
+        "apply_settlement_bounds": 39691,
+        "classify_shopee_income": 14989,
+        "compute_sku_columns_shopee": 24675,
+        "derive_brand": 76375,
+        "derive_brand#2": 39691,
+        "explode_to_sku_shopee": 24675,
+        "read_parts": 76375,
+        "read_parts#2": 39691
+      },
+      "stores_seen": 1,
+      "used_refs": false,
+      "variance_count": 1,
+      "variances_digest": "sha256:3bb7b04af1eff2290be7d71b30a13c762a395e0e1caa65dd3d25ddc34a9026bd",
+      "workbook": {
+        "schema": 1,
+        "sheets": [
+          {
+            "cell_count": 36,
+            "digest": "30b298299c03ebc8e56582fde5bd494119adf093625222b950f1c33f697cd634",
+            "index": 0,
+            "max_col": 11,
+            "max_row": 6,
+            "name": "PV sum"
+          },
+          {
+            "cell_count": 322763,
+            "digest": "c2e5a25cd4621c8abb2d24554bbc69e0dbce983a51567815dab437c63423ed3b",
+            "index": 1,
+            "max_col": 18,
+            "max_row": 24428,
+            "name": "Xuat HD bt"
+          },
+          {
+            "cell_count": 3498,
+            "digest": "37eac4cd88ae122eeeb55f26e38c74e179fad12f92e3d6da9e59f4d1159141e4",
+            "index": 2,
+            "max_col": 16,
+            "max_row": 259,
+            "name": "return"
+          },
+          {
+            "cell_count": 8,
+            "digest": "58b79155fb3dfcff3a72f8d424748be0272cbab1e9c329cc2b40be863f5452d3",
+            "index": 3,
+            "max_col": 6,
+            "max_row": 3,
+            "name": "1.05 KA"
+          },
+          {
+            "cell_count": 9,
+            "digest": "f91db5b77d5e4f5b2eb9f2d143cfe90df78460912df304596821e8e714e4abb7",
+            "index": 4,
+            "max_col": 5,
+            "max_row": 4,
+            "name": "Curel"
+          },
+          {
+            "cell_count": 9,
+            "digest": "a5b036b69c8bd8c1058114c493e79f1d237878b9112df08fc5a4e7bd4f5639e4",
+            "index": 5,
+            "max_col": 5,
+            "max_row": 4,
+            "name": "KAO"
+          },
+          {
+            "cell_count": 9,
+            "digest": "65e1a6090dc46ce06423e7b11ef3cc3fa03905caff85e63c72b719a865c17750",
+            "index": 6,
+            "max_col": 5,
+            "max_row": 4,
+            "name": "Merries"
+          },
+          {
+            "cell_count": 9,
+            "digest": "f265c94c162f1e1650929ec279057fd7f95dfec99e55dd40cc5f0c87effc4602",
+            "index": 7,
+            "max_col": 5,
+            "max_row": 4,
+            "name": "Kate"
+          },
+          {
+            "cell_count": 1580,
+            "digest": "2e9212e8896e904f0a3e5f660d203fa8b92c23fd4d485d440b62ece4f2cf93e6",
+            "index": 8,
+            "max_col": 5,
+            "max_row": 318,
+            "name": "Others"
+          },
+          {
+            "cell_count": 1893,
+            "digest": "0bf3b5d2e36a25368d721552fe70a26874dac5c0eb5435a6fdc2e1224eeaa667",
+            "index": 9,
+            "max_col": 6,
+            "max_row": 317,
+            "name": "1.08 KA"
+          },
+          {
+            "cell_count": 8,
+            "digest": "2e8f95f25e8c2e13ac4f3c928e497a1a28d120b3f947f7910fad9fe74043bd6d",
+            "index": 10,
+            "max_col": 6,
+            "max_row": 3,
+            "name": "1.10 KA"
+          },
+          {
+            "cell_count": 1899,
+            "digest": "657341f3404bc9210c19e990ae53ff008c9d3c7774bddc6da8e82c6ead78dec7",
+            "index": 11,
+            "max_col": 9,
+            "max_row": 317,
+            "name": "PV xuat HD"
+          }
+        ]
+      }
+    },
+    "2026-05_s3/shopee": {
+      "fingerprint_digest": "sha256:1d5a5cd44700c85411ea78c3d44092d89f1232ab25edb49e8c0f512335265b18",
+      "partial_roster": true,
+      "stage_row_counts": {
+        "apply_settlement_bounds": 44890,
+        "classify_shopee_income": 17080,
+        "compute_sku_columns_shopee": 27772,
+        "derive_brand": 94891,
+        "derive_brand#2": 44890,
+        "explode_to_sku_shopee": 27772,
+        "read_parts": 94891,
+        "read_parts#2": 44890
+      },
+      "stores_seen": 1,
+      "used_refs": false,
+      "variance_count": 1,
+      "variances_digest": "sha256:2444f47c85642cea7e2247183b9714b47aca7cfb4106d9b92d8f5761812ca89d",
+      "workbook": {
+        "schema": 1,
+        "sheets": [
+          {
+            "cell_count": 30,
+            "digest": "06edd859e53902e25ab6f514d7c1e21a33d546e14b3d890c8a2f82c6b865abba",
+            "index": 0,
+            "max_col": 11,
+            "max_row": 5,
+            "name": "PV sum"
+          },
+          {
+            "cell_count": 363327,
+            "digest": "1a53a48eaf4728c599ea8027550fc1c9a8bb949583c12544442a31d660581f6b",
+            "index": 1,
+            "max_col": 18,
+            "max_row": 27468,
+            "name": "Xuat HD bt"
+          },
+          {
+            "cell_count": 4362,
+            "digest": "e3ecdca24a8343c9b79b6591a5d70d1a686c7aee9a930f058bcd70d334ef0929",
+            "index": 2,
+            "max_col": 16,
+            "max_row": 316,
+            "name": "return"
+          },
+          {
+            "cell_count": 8,
+            "digest": "58b79155fb3dfcff3a72f8d424748be0272cbab1e9c329cc2b40be863f5452d3",
+            "index": 3,
+            "max_col": 6,
+            "max_row": 3,
+            "name": "1.05 KA"
+          },
+          {
+            "cell_count": 9,
+            "digest": "f91db5b77d5e4f5b2eb9f2d143cfe90df78460912df304596821e8e714e4abb7",
+            "index": 4,
+            "max_col": 5,
+            "max_row": 4,
+            "name": "Curel"
+          },
+          {
+            "cell_count": 9,
+            "digest": "a5b036b69c8bd8c1058114c493e79f1d237878b9112df08fc5a4e7bd4f5639e4",
+            "index": 5,
+            "max_col": 5,
+            "max_row": 4,
+            "name": "KAO"
+          },
+          {
+            "cell_count": 9,
+            "digest": "65e1a6090dc46ce06423e7b11ef3cc3fa03905caff85e63c72b719a865c17750",
+            "index": 6,
+            "max_col": 5,
+            "max_row": 4,
+            "name": "Merries"
+          },
+          {
+            "cell_count": 9,
+            "digest": "f265c94c162f1e1650929ec279057fd7f95dfec99e55dd40cc5f0c87effc4602",
+            "index": 7,
+            "max_col": 5,
+            "max_row": 4,
+            "name": "Kate"
+          },
+          {
+            "cell_count": 1600,
+            "digest": "61f975671561323540f9deae190bdce4f93444c2f190d50ca60eea88eeabb1de",
+            "index": 8,
+            "max_col": 5,
+            "max_row": 322,
+            "name": "Others"
+          },
+          {
+            "cell_count": 1917,
+            "digest": "ac03464da812df13f49e5c390a50885186ee910704daf5158f9f86961d78a723",
+            "index": 9,
+            "max_col": 6,
+            "max_row": 321,
+            "name": "1.08 KA"
+          },
+          {
+            "cell_count": 8,
+            "digest": "2e8f95f25e8c2e13ac4f3c928e497a1a28d120b3f947f7910fad9fe74043bd6d",
+            "index": 10,
+            "max_col": 6,
+            "max_row": 3,
+            "name": "1.10 KA"
+          },
+          {
+            "cell_count": 1923,
+            "digest": "8cdf74a818836817ac16f6c6da14d34ee35c7f924f15848fff39eb8cb5e05628",
+            "index": 11,
+            "max_col": 9,
+            "max_row": 321,
+            "name": "PV xuat HD"
+          }
+        ]
+      }
+    },
+    "2026-05_w1/tiktok": {
+      "fingerprint_digest": "sha256:9d5df453ddab9515982cb52bdc59acb9671f590689b02bd675a32a0c2988f70d",
+      "partial_roster": true,
+      "rebaselined": {
+        "changed": [
+          "fingerprint_digest",
+          "stage_row_counts",
+          "stores_seen",
+          "variance_count",
+          "variances_digest",
+          "workbook"
+        ],
+        "reason": "Golden coverage broadened: the Mars store's income (settled 2026-05-01..17, the same window) plus its two complementary order exports had never been staged. Window goes 1 -> 2 stores. The two Mars order files were checked for the double-pull class first: 1 shared order in 24,408, and each alone covers only ~half the income orders, so they are parts and not re-pulls. Every digest moves by construction - more input, not changed behaviour. Roadmap immediate to-do #2."
+      },
+      "stage_row_counts": {
+        "apply_settlement_bounds": 65551,
+        "classify_tiktok_income": 65445,
+        "compute_sku_columns_tiktok": 63612,
+        "derive_brand": 126355,
+        "derive_brand#2": 65551,
+        "explode_to_sku_tiktok": 63612,
+        "read_parts": 126355,
+        "read_parts#2": 65551
+      },
+      "stores_seen": 2,
+      "used_refs": false,
+      "variance_count": 2,
+      "variances_digest": "sha256:ac8a07a1c5377b69c15b1885a7bf320c3f6203c99370f1d31234d374bef45152",
+      "workbook": {
+        "schema": 1,
+        "sheets": [
+          {
+            "cell_count": 25,
+            "digest": "97fdb3fe085fdbe3fed8df1e8ab9696e3dd37cc0313e0387b909704e2a88e6a3",
+            "index": 0,
+            "max_col": 8,
+            "max_row": 6,
+            "name": "PV sum"
+          },
+          {
+            "cell_count": 736667,
+            "digest": "a6731f96d802d65fa05f3fd8c5906dc2e70afdb1bf8d601e0f6500a832ed6ae2",
+            "index": 1,
+            "max_col": 16,
+            "max_row": 63618,
+            "name": "Xuat HD bt"
+          },
+          {
+            "cell_count": 11,
+            "digest": "7482aaff368e6e5e49082ca0d8a9aebcf6a7a9acad9b8d09a2a2c03409d44668",
+            "index": 2,
+            "max_col": 6,
+            "max_row": 4,
+            "name": "Merries 8"
+          },
+          {
+            "cell_count": 11,
+            "digest": "cc31ca362aecb496a4e42c96b842d4740359a329557a70266aac022ed5841b56",
+            "index": 3,
+            "max_col": 6,
+            "max_row": 4,
+            "name": "KAO 8"
+          },
+          {
+            "cell_count": 3348,
+            "digest": "c010af850e7adb85f3094a52c31a4debad928fb75192846f185ee907b3f16b10",
+            "index": 4,
+            "max_col": 6,
+            "max_row": 560,
+            "name": "Others 8"
+          },
+          {
+            "cell_count": 3908,
+            "digest": "0a6f0f6f675801321594a3f828c67c4be5c8fbae0aa2b6a2ed449e7b8b1c1774",
+            "index": 5,
+            "max_col": 9,
+            "max_row": 559,
+            "name": "PV xuat HD"
+          }
+        ]
+      }
+    }
+  }
+}

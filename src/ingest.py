@@ -8,6 +8,7 @@ enforces the team's store-count sanity check as a hard stop.
 from __future__ import annotations
 
 import re
+import unicodedata
 from pathlib import Path
 
 import pandas as pd
@@ -70,19 +71,71 @@ def apply_settlement_bounds(income: pd.DataFrame, period: str, settings: dict,
     return income[keep].copy()
 
 
+# Cells that mean "no amount" rather than "a number I could not read". Blank
+# and the accounting-format dash are the whole set: Excel's accounting format
+# renders zero as a dash, and a real Shopee income file writes it in 46,972 of
+# 83,134 rows of seller_ship_support — a column that feeds the discount
+# allocation and therefore revenue. Under the old `errors="coerce"` those
+# landed on NaN, indistinguishable from garbage, and `.fillna(0)` downstream
+# made both 0 VND with no count anywhere (docs/08-KNOWN-DEFECTS.md#16).
+ZERO_TOKENS = ("", "nan", "None", "-", "‐", "–", "—")
+
+
 def to_number(series: pd.Series, style: str) -> pd.Series:
-    """Parse amount strings. 'standard' = 1,234,567.89 · 'vietnamese' = 1.234.567,89"""
+    """Parse amount strings. 'standard' = 1,234,567.89 · 'vietnamese' = 1.234.567,89
+
+    A blank or accounting-dash cell returns **0.0**; only a value that could not
+    be parsed at all returns NaN. That is what makes the two distinguishable to
+    the caller — `read_parts` counts the NaNs and stops the run, because a
+    settlement export never legitimately contains an unparseable amount.
+    """
     t = series.astype(str).str.strip()
-    t = t.replace({"": None, "nan": None, "None": None})
+    zeros = t.isin(ZERO_TOKENS)
+    t = t.mask(zeros)
     if style == "vietnamese":
         t = t.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
     else:
         t = t.str.replace(",", "", regex=False)
-    return pd.to_numeric(t, errors="coerce")
+    return pd.to_numeric(t, errors="coerce").mask(zeros, 0.0)
 
 
-def _read_excel_sheet(path: Path, sheet, header_row: int, engine: str | None = None) -> pd.DataFrame:
+def report_unparseable(unparseable: dict[str, int], where: str, style: str,
+                       settings: dict, log: RunLog) -> None:
+    """A money cell that could not be parsed stops the run by default.
+
+    The old behaviour was to coerce it to NaN and let a downstream `.fillna(0)`
+    turn it into zero revenue — uncounted and unwarned. Hard-stopping matches
+    the pipeline's stated posture ([D3](../docs/06-DECISIONS.md#d3)): a wrong
+    invoice costs more than a late one, and the likeliest cause is a monthly
+    format change (a Vietnamese-styled column, a currency suffix), which is a
+    config fix rather than a data problem. `numeric_coercion: warn` restores
+    the old behaviour for an operator who has looked and decided.
+    """
+    if not unparseable:
+        return
+    detail = ", ".join(f"{c}: {n:,} row(s)" for c, n in sorted(unparseable.items()))
+    message = (
+        f"{where}: {sum(unparseable.values()):,} amount cell(s) could not be parsed "
+        f"under number_style='{style}' — {detail}. A settlement export never "
+        f"legitimately contains an unparseable amount, and every one of these would "
+        f"become 0 VND of revenue with no other signal. Check number_style and the "
+        f"column map against the real export, then re-run. To continue anyway (the "
+        f"old behaviour), set numeric_coercion: warn in settings.yaml."
+    )
+    if str(settings.get("numeric_coercion", "hard_stop")).lower() == "warn":
+        log.warn(message)
+        return
+    raise ReconHardStop(message)
+
+
+def read_excel_sheet(path: Path, sheet, header_row: int, engine: str | None = None) -> pd.DataFrame:
     """Read one xlsx sheet as strings, header on `header_row` (1-based).
+
+    Public since M6: the upload sanitizer rewrites an export before the pipeline
+    reads it, and it must do its read through THIS function. A private copy in
+    `service/` would mean the sanitizer's idea of the file and the pipeline's idea
+    of the file could diverge — including on the broken-`<dimension>` fallback
+    below, which is the difference between reading 63 columns and reading one.
 
     Some exports (June 2026 TikTok order files) ship a broken `<dimension>`
     tag that makes the default openpyxl streaming reader — even after
@@ -102,7 +155,15 @@ def _read_excel_sheet(path: Path, sheet, header_row: int, engine: str | None = N
                          engine="calamine")
 
 
-def _store_from_filename(filename: str, pattern: str) -> str:
+def store_from_filename(filename: str, pattern: str) -> str:
+    """Store identity, derived from the file name (docs/06-DECISIONS.md#d6).
+
+    Public because `service/naming.py` must use *this* function to check that a
+    renamed upload still resolves to the same store. A second copy of the rule
+    living in the service is the failure mode to avoid: the rename would then be
+    validated against a parser that is not the one the pipeline actually runs,
+    which is worse than not checking at all.
+    """
     m = re.match(pattern, filename, flags=re.IGNORECASE)
     if not m or not (m.group(1) or "").strip():
         raise ReconHardStop(
@@ -111,6 +172,11 @@ def _store_from_filename(filename: str, pattern: str) -> str:
             f"column, so the file name must identify the store."
         )
     return m.group(1).strip()
+
+
+# The private name predates M6 and is kept as an alias so a reader grepping for
+# either spelling lands in one place.
+_store_from_filename = store_from_filename
 
 
 def read_parts(
@@ -150,12 +216,18 @@ def read_parts(
                 raise ReconHardStop(
                     f"{f.name}: no sheet matching /{sheet_regex}/ (sheets: {xf.sheet_names})")
             df = pd.concat(
-                [_read_excel_sheet(f, s, header_row, engine) for s in matches], ignore_index=True)
+                [read_excel_sheet(f, s, header_row, engine) for s in matches], ignore_index=True)
         else:
-            df = _read_excel_sheet(f, sheet if sheet else 0, header_row, engine)
+            df = read_excel_sheet(f, sheet if sheet else 0, header_row, engine)
         if skip:
             df = df.iloc[skip:]
-        df.columns = [str(c).strip() for c in df.columns]
+        # NFC-normalize before matching. Shopee ORDER exports deliver Vietnamese
+        # headers in NFD (decomposed) while settings.yaml keys are NFC, so
+        # 'Được Shopee trợ giá' is byte-unequal to the visually identical config
+        # key and silently fails to map — 9 of 63 headers in a real file are
+        # non-NFC. full_run's norm_store had always done this for store names;
+        # ingest never got the same treatment (docs/08-KNOWN-DEFECTS.md#12).
+        df.columns = [unicodedata.normalize("NFC", str(c)).strip() for c in df.columns]
         present = {src: dst for src, dst in colmap.items() if src in df.columns}
         missing = [src for src in colmap if src not in df.columns]
         df = df.rename(columns=present)
@@ -180,7 +252,7 @@ def read_parts(
     # contain two byte-identical SKU lines (e.g. duplicated gift items —
     # Sanofi Shopee May), and the team's Power Query never dedupes; their
     # per-window folder discipline is the overlap protection. The synthetic
-    # sample path (tools/sample_config) still sets dedupe_rows: true because
+    # the legacy synthetic sample path set dedupe_rows: true because
     # its generator bakes overlapping parts.
     if settings.get("dedupe_rows", True):
         data_cols = [c for c in combined.columns if c != "source_file"]
@@ -197,9 +269,14 @@ def read_parts(
 
     style = settings.get("number_style", "standard")
     dayfirst = bool((settings.get("dayfirst") or {}).get(platform, False))
+    unparseable: dict[str, int] = {}
     for col in NUMERIC_COLUMNS[kind]:
         if col in combined.columns:
             combined[col] = to_number(combined[col], style)
+            n_bad = int(combined[col].isna().sum())
+            if n_bad:
+                unparseable[col] = n_bad
+    report_unparseable(unparseable, f"{platform}/{kind}", style, settings, log)
     for col in DATE_COLUMNS[kind]:
         if col in combined.columns:
             combined[col] = pd.to_datetime(combined[col], errors="coerce", dayfirst=dayfirst)

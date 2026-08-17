@@ -2,7 +2,39 @@
 input/
 output/
 
+# M4 service roots. Same rule, different producer: `artifacts/` holds the
+# workbooks a service run produced and `.scratch/` is where the worker writes them
+# before the store takes them. Both are client-derived and neither is a golden
+# (only digests are ever committed — docs/06-DECISIONS.md#d15).
+artifacts/
+.scratch/
+.uploads/
+
+# M5 web app. node_modules must never sync to OneDrive — this folder is synced,
+# and `settings.yaml:31-34` records sync contention causing 45-minute pipeline
+# runs. A node_modules tree is tens of thousands of small files and is a far
+# worse offender; exclude web/node_modules in OneDrive's "Choose folders" too,
+# because .gitignore does not stop OneDrive.
+web/node_modules/
+web/.next/
+web/next-env.d.ts
+web/.env*.local
+web/tsconfig.tsbuildinfo
+
 __pycache__/
 *.pyc
 .venv/
 venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Secrets and credentials — nothing of the sort is committed today, and this
+# is here to keep it that way.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx

@@ -1,0 +1,297 @@
+"""The worker, end to end, on a synthetic Lazada window.
+
+Synthetic because it must run on a machine with no client data — the same reason
+`tools/smoke_test.py` generates its own window, and this reuses that generator
+rather than growing a second one.
+
+The claims here are about the wrapper, not the arithmetic: that a job becomes a
+run, that the run's own conclusion and the worker's success are recorded on
+separate axes, that the log is readable while the run is still going, and that
+nothing leaks between two jobs in one process.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from service.models import JobState
+from service.repository import Repository
+from service.worker import Worker
+from src.pipeline import RunStatus
+
+pytest.importorskip("pandas")
+
+from tools.smoke_test import PERIOD, build_window  # noqa: E402
+
+
+@pytest.fixture
+def window(service_settings):
+    """A believable Lazada weekly export under the worker's input root."""
+    build_window(service_settings.input_root.parent)
+    return PERIOD
+
+
+@pytest.fixture
+def worker(repo, store, service_settings):
+    return Worker(repo, store, service_settings)
+
+
+def test_a_job_becomes_a_run_with_artifacts(repo: Repository, worker: Worker, window):
+    job, _ = repo.enqueue("lazada", window)
+    outcomes = worker.serve(once=True)
+
+    assert len(outcomes) == 1
+    outcome = outcomes[0]
+    assert repo.get_job(job.id).state is JobState.DONE
+
+    run = repo.get_run(outcome.run_id)
+    assert run.status is RunStatus.UNVERIFIED, "no refs were supplied"
+    assert run.exit_code == 2
+    assert not run.in_flight
+
+    # The three files a CLI run leaves behind, all indexed.
+    assert {a.name for a in repo.artifacts(run.id)} >= {
+        "finance_file.xlsx", "run_log.txt", "run_metrics.json"}
+
+
+def test_metrics_reach_the_run_row(repo: Repository, worker: Worker, window):
+    repo.enqueue("lazada", window)
+    run_id = worker.serve(once=True)[0].run_id
+
+    run = repo.get_run(run_id)
+    assert run.wall_s and run.wall_s > 0
+    assert run.io_s and run.io_s > 0
+    assert run.peak_rss_mb and run.peak_rss_mb > 0, (
+        "peak RSS reporting 0 is the silent-zero failure mode from D27 — a metric "
+        "that is always 0 never fires a trigger and never looks broken")
+
+
+def test_the_stored_log_and_the_database_log_are_the_same_log(
+        repo: Repository, worker: Worker, store, window):
+    """Two copies, one producer. If they diverge, QueueRunLog has started
+    formatting its own text."""
+    repo.enqueue("lazada", window)
+    run_id = worker.serve(once=True)[0].run_id
+
+    lines, _, complete = repo.log_lines(run_id, limit=5000)
+    assert complete
+    mirrored = [l.text for l in lines]
+
+    on_disk = store.open(repo.artifact(run_id, "run_log.txt").uri)
+    body = on_disk.read_text(encoding="utf-8").split("\n")
+    # The file adds a timestamp header (2 lines) and a warnings footer (2 lines);
+    # everything between is the mirrored log, in order.
+    assert body[2:2 + len(mirrored)] == mirrored
+
+
+def test_seq_is_gapless_over_a_whole_run(repo: Repository, worker: Worker, window):
+    repo.enqueue("lazada", window)
+    run_id = worker.serve(once=True)[0].run_id
+    lines, _, _ = repo.log_lines(run_id, limit=5000)
+    assert [l.seq for l in lines] == list(range(len(lines)))
+    assert len(lines) > 20, "a real run emits more than a handful of lines"
+
+
+def test_the_log_is_written_before_the_run_finishes(
+        repo: Repository, store, service_settings, window):
+    """The point of mirroring mid-run: an operator can watch a 171-second run
+    progress. A log that lands only at the end is a batch job with extra steps."""
+
+    class Observer(Repository):
+        def __init__(self, inner: Repository) -> None:
+            super().__init__(inner._pool)
+            self.order: list[str] = []
+
+        def append_log(self, run_id, rows):
+            self.order.append("log")
+            return super().append_log(run_id, rows)
+
+        def finish_run(self, *args, **kwargs):
+            self.order.append("finish")
+            return super().finish_run(*args, **kwargs)
+
+    observer = Observer(repo)
+    observer.enqueue("lazada", window)
+    Worker(observer, store, service_settings).serve(once=True)
+
+    assert observer.order.count("log") > 1, "the log went in a single batch at the end"
+    assert observer.order.index("log") < observer.order.index("finish")
+
+
+def test_the_lease_is_extended_by_the_log(repo: Repository, store, service_settings, window):
+    """Liveness is measured by "is this run still saying anything", so a flush is
+    the heartbeat rather than a separate timer that would keep a hung run looking
+    healthy."""
+    beats: list[int] = []
+
+    class Counting(Repository):
+        def heartbeat(self, job_id, worker_id, lease_seconds):
+            beats.append(job_id)
+            return super().heartbeat(job_id, worker_id, lease_seconds)
+
+    counting = Counting(repo._pool)
+    counting.enqueue("lazada", window)
+    Worker(counting, store, service_settings).serve(once=True)
+    assert len(beats) > 1
+
+
+# ---------------------------------------------------------------------------
+# The two axes: did the worker work, and what did the run conclude
+# ---------------------------------------------------------------------------
+
+def test_a_missing_window_is_a_hard_stop_and_a_successful_job(
+        repo: Repository, worker: Worker):
+    """No input staged. `run()` returns HARD_STOP rather than raising, so the job
+    executed correctly and the RUN is what failed — the distinction the schema
+    keeps and a single status column would lose."""
+    job, _ = repo.enqueue("lazada", "2026-05_never_staged")
+    outcome = worker.serve(once=True)[0]
+
+    assert repo.get_job(job.id).state is JobState.DONE
+    assert repo.get_job(job.id).error is None
+    run = repo.get_run(outcome.run_id)
+    assert run.status is RunStatus.HARD_STOP and run.exit_code == 3
+    assert run.error, "the reason must be recorded, not just the status"
+
+    # The log still exists — that is the whole point of write_artifacts running
+    # even on a hard stop (docs/08-KNOWN-DEFECTS.md#17).
+    lines, _, _ = repo.log_lines(run.id, limit=5000)
+    assert any("HARD STOP" in l.text for l in lines)
+
+
+def test_a_hard_stop_is_never_retried(repo: Repository, worker: Worker):
+    """Retrying bad input produces the same answer and hides the input problem."""
+    job, _ = repo.enqueue("lazada", "2026-05_never_staged", max_attempts=3)
+    worker.serve(once=True)
+    assert repo.get_job(job.id).state is JobState.DONE
+    assert worker.serve(once=True) == [], "nothing left to claim"
+
+
+def test_a_worker_failure_is_recorded_against_the_job(
+        repo: Repository, worker: Worker, window, monkeypatch):
+    """Reaching the worker's own except block means the WORKER broke, not the run.
+    That is the one case that marks the job ERROR."""
+    from src import pipeline
+
+    def explode(_ctx):
+        raise MemoryError("container ran out of memory")
+
+    monkeypatch.setattr(pipeline, "run", explode)
+
+    job, _ = repo.enqueue("lazada", window)
+    outcome = worker.serve(once=True)[0]
+
+    failed = repo.get_job(job.id)
+    assert failed.state is JobState.ERROR
+    assert "MemoryError" in failed.error
+    run = repo.get_run(outcome.run_id)
+    assert run.status is RunStatus.HARD_STOP
+    assert "worker failure" in run.error
+    assert "Traceback" in run.error, "an infrastructure failure needs its traceback"
+
+
+def test_scratch_is_cleaned_up_on_success_and_kept_on_a_hard_stop(
+        repo: Repository, worker: Worker, service_settings, window):
+    repo.enqueue("lazada", window)
+    good = worker.serve(once=True)[0]
+    assert good.status is RunStatus.UNVERIFIED
+    assert not (service_settings.scratch_root / f"job-{good.job_id}").exists()
+
+    repo.enqueue("lazada", "2026-05_never_staged")
+    bad = worker.serve(once=True)[0]
+    assert (service_settings.scratch_root / f"job-{bad.job_id}").exists(), (
+        "a failed run's working directory is evidence")
+
+
+# ---------------------------------------------------------------------------
+# Isolation between jobs in one process
+# ---------------------------------------------------------------------------
+
+def test_each_job_gets_its_own_settings_dict(
+        repo: Repository, worker: Worker, window, monkeypatch):
+    """`settings["_vat_sku"]` is a mutable back-channel inside the settings dict.
+    Two runs sharing one dict cross-contaminate VAT rates
+    (docs/02-ARCHITECTURE.md#import-hygiene), so the worker must build a fresh
+    context per job rather than caching one."""
+    from src import pipeline
+
+    seen: list[int] = []
+    real = pipeline.build_context
+
+    def spy(*args, **kwargs):
+        ctx = real(*args, **kwargs)
+        seen.append(id(ctx.settings))
+        assert "_vat_sku" in ctx.settings
+        return ctx
+
+    monkeypatch.setattr(pipeline, "build_context", spy)
+
+    repo.enqueue("lazada", window)
+    worker.serve(once=True)
+    repo.enqueue("lazada", window)
+    worker.serve(once=True)
+
+    assert len(seen) == 2 and seen[0] != seen[1]
+
+
+def test_two_runs_of_one_window_do_not_overwrite_each_others_artifacts(
+        repo: Repository, worker: Worker, window):
+    repo.enqueue("lazada", window)
+    first = worker.serve(once=True)[0]
+    repo.enqueue("lazada", window)
+    second = worker.serve(once=True)[0]
+
+    a = repo.artifact(first.run_id, "finance_file.xlsx")
+    b = repo.artifact(second.run_id, "finance_file.xlsx")
+    assert a.uri != b.uri, "run-scoped paths, so a re-run keeps the evidence"
+
+
+def test_drain_empties_the_queue(repo: Repository, worker: Worker, window):
+    repo.enqueue("lazada", window)
+    repo.enqueue("lazada", "2026-05_never_staged")
+    outcomes = worker.serve(drain=True)
+    assert len(outcomes) == 2
+    assert repo.list_jobs(state=JobState.QUEUED) == []
+
+
+def test_a_cancelled_job_is_never_claimed(repo: Repository, worker: Worker, window):
+    job, _ = repo.enqueue("lazada", window)
+    repo.cancel_job(job.id)
+    assert worker.serve(once=True) == []
+    assert repo.run_for_job(job.id) is None
+
+
+def test_stop_ends_the_loop_without_claiming(repo: Repository, worker: Worker, window):
+    repo.enqueue("lazada", window)
+    worker.stop()
+    assert worker.serve(drain=True) == []
+    assert repo.get_job(1).state is JobState.QUEUED
+
+
+def test_partial_roster_reaches_the_run_and_says_so(
+        repo: Repository, worker: Worker, window):
+    """The relaxation has to be visible in the audit trail, or a subset run's
+    totals get read as the month's (docs/06-DECISIONS.md#d23)."""
+    repo.enqueue("lazada", window, partial_roster=True)
+    outcome = worker.serve(once=True)[0]
+
+    lines, _, _ = repo.log_lines(outcome.run_id, limit=5000)
+    assert any("PARTIAL ROSTER" in l.text for l in lines)
+    assert any(l.kind.value == "warning" and "PARTIAL ROSTER" in l.text for l in lines), (
+        "a roster relaxation is a warning, not a footnote")
+
+
+def test_refs_from_the_job_are_used_for_the_tie_out(repo: Repository, worker: Worker, window):
+    """A run WITH refs must stop reporting UNVERIFIED — otherwise the refs column
+    is decoration."""
+    repo.enqueue("lazada", window)
+    unverified = worker.serve(once=True)[0]
+    assert repo.get_run(unverified.run_id).status is RunStatus.UNVERIFIED
+
+    refs = {"grand": {"pre_vat": 1.0}, "grand_tolerance": 1.0}
+    repo.enqueue("lazada", window, refs=refs)
+    checked = worker.serve(once=True)[0]
+    run = repo.get_run(checked.run_id)
+    assert run.status is RunStatus.VARIANCE, (
+        "a deliberately wrong reference total must be reported as a variance")
+    assert run.variances

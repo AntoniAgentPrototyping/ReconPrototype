@@ -14,15 +14,25 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-DOCS = ["HANDOFF.md", "COMPLETION_REPORT.md", "README.md",
-        "EVALUATION_DOSSIER/PROJECT_OVERVIEW.md",
-        "EVALUATION_DOSSIER/WHAT_WAS_BUILT.md",
-        "EVALUATION_DOSSIER/VERIFICATION_RECORD.md",
-        "EVALUATION_DOSSIER/CHALLENGES_AND_FINDINGS.md",
-        "EVALUATION_DOSSIER/HOW_TO_RUN.md",
-        "EVALUATION_DOSSIER/OPEN_QUESTIONS_FOR_EVALUATOR.md"]
+# The docs/ set replaced HANDOFF.md, COMPLETION_REPORT.md and the
+# EVALUATION_DOSSIER/ pack (see docs/12-CHANGE-HISTORY.md). Kept in reading
+# order so the generated package flows like the documentation does.
+DOCS = ["README.md",
+        "docs/01-ORIENTATION.md",
+        "docs/02-ARCHITECTURE.md",
+        "docs/03-PIPELINE.md",
+        "docs/04-DATA-FLOW.md",
+        "docs/05-DOMAIN-RULES.md",
+        "docs/06-DECISIONS.md",
+        "docs/07-VERIFICATION.md",
+        "docs/08-KNOWN-DEFECTS.md",
+        "docs/09-OPERATIONS.md",
+        "docs/10-ROADMAP.md",
+        "docs/11-OPEN-QUESTIONS.md",
+        "docs/12-CHANGE-HISTORY.md",
+        "ARCHITECTURE_POSITION.md"]
 
-CODE_GLOBS = ["recon.py", "src/*.py", "tools/*.py", "config/settings.yaml",
+CODE_GLOBS = ["src/*.py", "tools/*.py", "config/settings.yaml",
               "config/brand_map.csv", "config/lazada_fee_types.csv",
               "config/lazada_vat_sku.csv", ".gitignore"]
 

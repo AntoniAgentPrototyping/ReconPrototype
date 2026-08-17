@@ -1,0 +1,10 @@
+# Without this the build context is the whole tree — hundreds of MB of client
+# Excel in input/, plus node_modules and .git. Uploading client data into a build
+# context is slow and is the wrong thing to do besides.
+node_modules
+.next
+.env*
+!.env.example
+npm-debug.log*
+Dockerfile
+.dockerignore

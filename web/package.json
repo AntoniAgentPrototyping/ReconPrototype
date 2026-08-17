@@ -1,0 +1,23 @@
+{
+  "name": "recon-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "M5 web app for the settlement reconciliation service. A BFF over service/api.py — it holds the bearer token server-side and the browser never sees it.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "16.3.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,246 @@
+/*
+ * No CSS framework. This is four screens for a handful of internal users, and a
+ * design system would be more dependency surface than the app itself — for a
+ * project whose standing risk is a single maintainer.
+ *
+ * Verdict colours carry meaning and are stated once here: a run's status is the
+ * thing an operator reads first, and it must not be spelled differently on two
+ * screens.
+ */
+
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel-2: #1e222b;
+  --line: #2a2f3a;
+  --text: #e6e8ee;
+  --muted: #99a1b3;
+
+  --ok: #4ade80;
+  --variance: #fbbf24;
+  --unverified: #7dd3fc;
+  --hard-stop: #f87171;
+  --accent: #818cf8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+header.top {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+header.top .brand {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+header.top nav {
+  display: flex;
+  gap: 16px;
+}
+header.top .spacer {
+  flex: 1;
+}
+header.top .who {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+main {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+h1 {
+  font-size: 20px;
+  margin: 0 0 4px;
+}
+h2 {
+  font-size: 15px;
+  margin: 28px 0 10px;
+}
+p.lede {
+  color: var(--muted);
+  margin: 0 0 20px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th,
+td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+th {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid currentColor;
+}
+.badge.ok {
+  color: var(--ok);
+}
+.badge.variance {
+  color: var(--variance);
+}
+.badge.unverified {
+  color: var(--unverified);
+}
+.badge.hard_stop {
+  color: var(--hard-stop);
+}
+.badge.running {
+  color: var(--accent);
+}
+.badge.muted {
+  color: var(--muted);
+}
+
+form.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+}
+label {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+input,
+select,
+textarea {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 10px;
+  font: inherit;
+}
+textarea {
+  width: 100%;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+button {
+  background: var(--accent);
+  color: #0f1115;
+  border: 0;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+button.secondary {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--line);
+}
+button.danger {
+  background: transparent;
+  color: var(--hard-stop);
+  border: 1px solid currentColor;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+pre.log,
+pre.diff {
+  background: #0b0d11;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  overflow: auto;
+  max-height: 60vh;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+pre.log .section {
+  color: var(--accent);
+}
+pre.log .warning {
+  color: var(--variance);
+}
+pre.diff .add {
+  color: var(--ok);
+}
+pre.diff .del {
+  color: var(--hard-stop);
+}
+
+.notice {
+  border-left: 3px solid var(--variance);
+  padding: 8px 12px;
+  background: var(--panel-2);
+  border-radius: 0 6px 6px 0;
+  margin-bottom: 12px;
+}
+.notice.bad {
+  border-left-color: var(--hard-stop);
+}
+.notice.good {
+  border-left-color: var(--ok);
+}
+
+.muted {
+  color: var(--muted);
+}
+.mono {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+.small {
+  font-size: 12px;
+}

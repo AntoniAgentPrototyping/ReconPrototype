@@ -1,0 +1,106 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "recon"
+version = "0.1.0"
+description = "E-commerce marketplace settlement reconciliation pipeline"
+readme = "README.md"
+
+# pandas 2.x has no wheels for 3.14, and the row-level verification predates
+# the pandas 3.0 Copy-on-Write default. Both bounds are deliberate — see the
+# pandas pin below.
+requires-python = ">=3.12,<3.14"
+
+dependencies = [
+    # Upper bound is a control, not laziness. pandas 3.0 makes Copy-on-Write
+    # the default, which changes whether an in-place mutation of a passed-in
+    # frame is visible to the caller (src/finance_template.py::_blank_repeats
+    # does exactly that). Lifting this bound requires re-running the golden
+    # comparison in tests/, not just a green test suite.
+    "pandas>=2.2,<3",
+    "openpyxl>=3.1",
+    "PyYAML>=6.0",
+    # Fallback reader for exports with a broken <dimension> tag (June 2026
+    # TikTok orders); also the fast path for Shopee, where openpyxl took 45+
+    # min per window under OneDrive sync contention.
+    "python-calamine>=0.2",
+    # Reads the team-owned "Lib & VAT rate.xlsb" master.
+    "pyxlsb>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    # Starlette's TestClient, for the api tests. A test-only dependency: nothing
+    # in service/ imports httpx.
+    "httpx>=0.27",
+]
+
+# M4's service wrapper. An EXTRA, not a core dependency: a machine running
+# `tools/devrun.py` to regenerate a golden must not need a web framework, a
+# database driver or a password hasher to produce the invoicing workbook
+# (docs/06-DECISIONS.md#d24), and tests/service/test_service_is_deletable.py
+# checks that this separation holds.
+service = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    # Argon2id for user-chosen passwords (M6). Deliberately NOT the sha256 that
+    # 002_m5.sql argues for: that argument holds only because an api token was 32
+    # bytes from os.urandom and never user-chosen, and a password violates exactly
+    # that premise. See migrations/003_password_auth.sql's header.
+    #
+    # Not passlib: passlib 1.7.4 imports the stdlib `crypt` module, removed in
+    # Python 3.13, and requires-python here allows <3.14.
+    # Not bare bcrypt: no 72-byte silent input truncation to remember, and argon2's
+    # PHC string carries its own parameters, which is what makes rehash-on-login a
+    # library call rather than another schema column.
+    #
+    # Ships manylinux/win cp312 wheels, so python:3.12-slim needs no compiler and
+    # deploy/Dockerfile is unchanged.
+    "argon2-cffi>=23.1",
+    # psycopg 3 with the binary wheel, so a deployment needs no libpq on the host.
+    # [pool] is the ConnectionPool the api serves sync endpoints from.
+    "psycopg[binary,pool]>=3.2",
+    # Round-trip YAML, and NOT interchangeable with PyYAML. settings.yaml's
+    # in-line comments are the audit trail (D2) and PyYAML's load/dump cycle
+    # discards every one of them. The config editor is only defensible because
+    # this library preserves them — tests/service/test_config_editor.py asserts
+    # a byte-identical round trip on the real file.
+    "ruamel.yaml>=0.18",
+    # Multipart form parsing, for the upload boundary. Required by FastAPI's
+    # UploadFile at runtime rather than imported directly.
+    "python-multipart>=0.0.9",
+    # S3 API client for the object store (M6). NOT the `minio` client: S3's
+    # vocabulary is what MinIO, Railway, R2 and S3 itself all speak, so one
+    # implementation reaches a local container and a managed bucket. ~50 MB is
+    # noise next to pandas, and it is a service extra for the usual reason — a
+    # machine regenerating a golden must not need an object-storage client to
+    # produce the invoicing workbook. Imported lazily inside S3Objects, so the
+    # local-directory mode does not pay for it (service/objects.py).
+    "boto3>=1.34",
+]
+
+[tool.hatch.build.targets.wheel]
+# Both packages ship: the container image runs the api and the worker out of
+# service/ and the pipeline out of src/. tools/ and tests/ are deliberately absent
+# from the image, which is why build_context lives in src/pipeline.py.
+packages = ["src", "service"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Surface xfail/xpass in the summary: a strict xfail that unexpectedly PASSES
+# means a gap closed and the marker must go (D22). As of 2026-08-13 there are
+# none left — every pinned control gap is fixed — so the `control_gap` marker
+# was removed with the last of them rather than left declared for nothing.
+# Re-add it here if a new gap ever needs pinning; --strict-markers means an
+# undeclared marker fails loudly rather than silently doing nothing.
+addopts = "-ra --strict-markers"
+markers = [
+    # Reads every raw export in `input/original exports` (~370 MB of xlsx), so
+    # it costs ~195s against a suite that is otherwise ~13s. It is NOT
+    # deselected by default — a gate nobody runs is not a gate — but
+    # `-m "not slow"` gives the fast inner loop while iterating.
+    "slow: data-heavy; skipped automatically where client data is absent",
+]
