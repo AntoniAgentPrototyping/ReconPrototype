@@ -21,7 +21,7 @@ export default function CreateUserForm() {
   return (
     <div className="panel" style={{ maxWidth: 620 }}>
       {state && (
-        <div className={`notice ${state.ok ? "good" : "bad"}`}>
+        <div className={`notice ${state.ok ? "good" : "bad"}`} aria-live="polite">
           {state.message}
           {state.ok && (
             <div className="muted small" style={{ marginTop: 6 }}>

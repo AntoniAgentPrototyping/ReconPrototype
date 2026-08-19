@@ -35,7 +35,10 @@ class RunLog:
         self.add(title)
         self.add("=" * 64)
 
-    def write(self, path: Path) -> None:
+    def write(self, path: Path, *, write_to: Path | None = None) -> None:
+        """`write_to` overrides where the bytes land, for the atomic write staged by
+        `pipeline.write_artifacts`. `path` stays what the run produced."""
         header = [f"Run started: {datetime.now():%Y-%m-%d %H:%M:%S}", ""]
         footer = ["", f"Warnings: {len(self.warnings)}"]
-        path.write_text("\n".join(header + self.lines + footer) + "\n", encoding="utf-8")
+        (write_to or path).write_text(
+            "\n".join(header + self.lines + footer) + "\n", encoding="utf-8")

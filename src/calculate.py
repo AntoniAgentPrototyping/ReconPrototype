@@ -23,7 +23,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .classify import STATUS_OK, STATUS_WRITTEN
 from .runlog import RunLog
 
 # Per-formula verification state for the TikTok chain ported from the team's
@@ -79,16 +78,23 @@ def explode_to_sku_tiktok(income_ok: pd.DataFrame, orders: pd.DataFrame, log: Ru
     return sku_level
 
 
-def compute_sku_columns_tiktok(sku_level: pd.DataFrame, settings: dict, log: RunLog) -> pd.DataFrame:
+def compute_sku_columns_tiktok(sku_level: pd.DataFrame, settings: dict, log: RunLog,
+                               vat_sku: dict[str, float] | None = None) -> pd.DataFrame:
     """The yellow columns, ported formula-by-formula from 'Xuat HĐ' row 4
-    (see TIKTOK_FORMULA_STATUS for the cell evidence per column)."""
+    (see TIKTOK_FORMULA_STATUS for the cell evidence per column).
+
+    `vat_sku` is the per-SKU VAT exception map, passed explicitly. It arrived through
+    `settings["_vat_sku"]` until 2026-08-19 — the config dict used as a data channel
+    (defect 1.9) — which made the single most consequential input to the tax
+    calculation invisible in this signature. Lazada always took it as an argument.
+    """
     df = sku_level.copy()
     # Default-plus-exceptions VAT (confirmed model): one default factor plus
     # per-SKU exceptions from the team's master file. Reverting the 8% tax
     # concession to 10% is the single vat_factors.default config line.
     from .masters import resolve_vat_factors
     df["vat_factor"], _ = resolve_vat_factors(                                      # Q
-        df["sku_id"], settings, settings.get("_vat_sku") or {}, log, label=" (tiktok SKU lines)")
+        df["sku_id"], settings, vat_sku or {}, log, label=" (tiktok SKU lines)")
 
     qty = df["quantity"].fillna(0)
     df["gross_rev"] = df["unit_price_gross"].fillna(0) * qty                        # L = J*K
@@ -167,13 +173,16 @@ def explode_to_sku_shopee(income_orders: pd.DataFrame, orders: pd.DataFrame, log
     return sku_level
 
 
-def compute_sku_columns_shopee(sku_level: pd.DataFrame, settings: dict, log: RunLog) -> pd.DataFrame:
-    """The Shopee yellow columns (cell evidence in SHOPEE_FORMULA_STATUS)."""
+def compute_sku_columns_shopee(sku_level: pd.DataFrame, settings: dict, log: RunLog,
+                               vat_sku: dict[str, float] | None = None) -> pd.DataFrame:
+    """The Shopee yellow columns (cell evidence in SHOPEE_FORMULA_STATUS).
+
+    `vat_sku` passed explicitly — see the TikTok note above (defect 1.9)."""
     df = sku_level.copy()
     # Default-plus-exceptions VAT, same model as TikTok/Lazada (masters.py).
     from .masters import resolve_vat_factors
     df["vat_factor"], _ = resolve_vat_factors(                                      # AA
-        df["sku_id"], settings, settings.get("_vat_sku") or {}, log, label=" (shopee SKU lines)")
+        df["sku_id"], settings, vat_sku or {}, log, label=" (shopee SKU lines)")
 
     qty = df["quantity"].fillna(0)
     df["gross_rev"] = df["unit_price_gross"].fillna(0) * qty                       # S = Q*R

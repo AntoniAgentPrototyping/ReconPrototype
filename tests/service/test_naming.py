@@ -196,8 +196,8 @@ def test_the_preview_hides_an_ordinal_that_is_not_decided_yet():
 def test_the_pipelines_own_pattern_is_used_for_every_platform(settings):
     """Not a copy. Lazada's pattern lives in `src/lazada.py` rather than in YAML —
     a real asymmetry — and this reaches it rather than pretending config covers it."""
-    from src.lazada import STORE_PATTERN
-    assert naming.pattern_for(settings, "lazada") == STORE_PATTERN
+    from _contract import lazada_store_pattern
+    assert naming.pattern_for(settings, "lazada") == lazada_store_pattern(settings)
     assert naming.pattern_for(settings, "tiktok") == settings["store_from_filename"]["tiktok"]
     assert naming.pattern_for(settings, "shopee") == settings["store_from_filename"]["shopee"]
 

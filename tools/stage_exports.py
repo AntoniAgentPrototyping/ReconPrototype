@@ -97,10 +97,15 @@ def lazada_variant(path: Path) -> str | None:
     try:
         sheets = CalamineWorkbook.from_path(path).sheet_names
     except Exception:                                   # noqa: BLE001
-        # Password-protected or otherwise unreadable. Returning None routes it
-        # into the "cannot classify" refusal WITH its name, rather than crashing
-        # with a traceback that names no file — a real case: one of five KAO
-        # weekly exports arrived password-protected (Aug 2026).
+        # Unreadable. Returning None routes it into the "cannot classify" refusal
+        # WITH its name, rather than crashing with a traceback that names no file.
+        #
+        # The real case behind this — one of five KAO weekly exports — was recorded
+        # as "password-protected" from Aug 2026 until 2026-08-19, when the bytes were
+        # actually looked at. It is encrypted by a Microsoft **sensitivity label**,
+        # not a password, and `ingest.rights_protected` now says so. The difference
+        # decides what anyone does about it: a password is something you ask a
+        # colleague for; a label is org policy that no re-save can lift.
         return None
     for sheet, variant in LAZADA_SHEET_TO_VARIANT.items():
         if sheet in sheets:
@@ -140,8 +145,12 @@ def _date_header(platform: str, kind: str, settings: dict) -> str | None:
     """The raw header holding the settlement date, from the column maps — so
     this tool never becomes a second source of truth for a header spelling."""
     if platform == "lazada":
-        from src.lazada import DAILY_MAP, WEEKLY_MAP
-        m = WEEKLY_MAP if kind == "Weekly" else DAILY_MAP
+        # Through the pipeline's own accessor, so this tool never becomes a second
+        # source of truth for a header spelling. Lazada's map moved from constants
+        # in src/lazada.py into the contract in M8/1.7; the accessor is what both
+        # sides read.
+        from src import lazada
+        m = lazada.column_map(settings, "weekly" if kind == "Weekly" else "daily")
         return next((s for s, d in m.items() if d == "transaction_date"), None)
     from src import config
     cmap = config.column_map(settings, platform, kind) or {}
@@ -163,9 +172,9 @@ def _read_dates(path: Path, platform: str, kind: str, settings: dict):
         return None, None, None, f"no settlement-date header configured for {platform}/{kind}"
 
     if platform == "lazada":
-        sheets, header_row, engine = [f"{kind and ''}"], 1, "calamine"
-        from src.lazada import SHEETS
-        sheets = [SHEETS["weekly" if kind == "Weekly" else "daily"]]
+        from src import lazada
+        sheets = [lazada.sheet_name(settings, "weekly" if kind == "Weekly" else "daily")]
+        header_row, engine = 1, "calamine"
     else:
         header_row = int(((settings.get("header_rows") or {}).get(platform) or {}).get(kind, 1))
         eng = ((settings.get("reader_engine") or {}).get(platform) or {}).get(kind)
@@ -200,11 +209,55 @@ def _read_dates(path: Path, platform: str, kind: str, settings: dict):
     if header not in df.columns:
         return len(df), None, None, f"settlement-date column {header!r} absent"
 
+    # Through the pipeline's own accessor, for the same reason `_date_header` is:
+    # this tool must never become a second source of truth for how a settlement
+    # date is spelled. It was one until 2026-08-19 by omission — it read
+    # `dayfirst` directly, so TikTok July's `%Y/%m/%d` income parsed as `%Y/%d/%m`
+    # and every folder's window came out spanning January to September. Windows
+    # could not be derived at all, and the same-named prior-month re-pull in each
+    # folder then collided as a false double-pull.
+    from src.ingest import date_format
+
+    fmt = date_format(settings, platform, "weekly" if kind == "Weekly"
+                      else "daily" if kind == "Daily" else kind)
     dayfirst = bool((settings.get("dayfirst") or {}).get(platform, False))
-    d = pd.to_datetime(df[header], errors="coerce", dayfirst=dayfirst).dropna()
+    if fmt:
+        d = pd.to_datetime(df[header], errors="coerce", format=fmt).dropna()
+    else:
+        d = pd.to_datetime(df[header], errors="coerce", dayfirst=dayfirst).dropna()
     if d.empty:
+        # No date parsed. Before calling that broken, ask whether there is any
+        # DATA here at all: TikTok emits one all-blank row for a store that
+        # settled nothing in a window, and three July 2026 exports are exactly
+        # that (Merries and Reckitt 29-31, Nutifood-Varna-Life 22-28 — one row,
+        # 65 columns, not a single non-blank cell, zero revenue). Reported as
+        # "no parseable dates" they read as a BROKEN export and held their whole
+        # window back; recognised as empty they join Shopee's zero-revenue
+        # "part 2" exports in the self-declared-empty class (`_is_window_member`),
+        # and `check_stores` still fires if the store has genuinely vanished.
+        #
+        # Tested only on this path, and only then, because it is a full
+        # stringify: an income file can be 674,000 rows x 65 columns and paying
+        # for that on every healthy file would dominate staging.
+        if _is_blank(df):
+            return 0, None, None, "no data rows"
         return len(df), None, None, f"no parseable dates in {header!r}"
     return len(df), d.min().date(), d.max().date(), None
+
+
+def _is_blank(df) -> bool:
+    """True when every cell is empty, whitespace or a null marker.
+
+    Whitespace matters: the row that blocked `2026-07_w4` held a single space in
+    each cell, so an `== ""` test called it data.
+    """
+    import pandas as pd
+
+    if df.empty:
+        return True
+    blank = df.apply(lambda s: s.astype(str).str.strip()
+                     .isin(("", "nan", "None", "NaT", "<NA>")))
+    return bool(blank.to_numpy().all())
 
 
 def probe(path: Path, platform: str, settings: dict) -> Probe:
@@ -216,10 +269,9 @@ def probe(path: Path, platform: str, settings: dict) -> Probe:
                      "file name says neither 'order' nor 'income'")
         return p
 
+    # One lookup for all three platforms since M8/1.7 — Lazada's pattern is in the
+    # contract rather than in `src/lazada.py`, so there is no second place to edit.
     pattern = (settings.get("store_from_filename") or {}).get(platform)
-    if platform == "lazada":
-        from src.lazada import STORE_PATTERN
-        pattern = STORE_PATTERN
     if pattern:
         m = re.match(pattern, path.name, flags=re.IGNORECASE)
         if m and (m.group(1) or "").strip():
@@ -345,9 +397,29 @@ def find_duplicates(assignment: list[tuple[Probe, str]], staged_root: Path,
                     platform: str) -> list[str]:
     """The double-pull class, by content digest.
 
-    Two checks: the same bytes headed for two different windows (or twice into
-    one), and the same bytes already sitting in a different staged window. Both
-    double-count revenue and neither is visible in a file name.
+    Two checks, and they are deliberately NOT the same check:
+
+    **Into one window — always a problem, whatever the kind.** The same bytes
+    twice in a window duplicates its rows. For an income export that double-counts
+    revenue directly; for an order export it fans out the SKU explode
+    (`calculate.explode_to_sku_*` joins income to orders on order_id) and
+    double-counts `amount_pre_vat`. Either way the window is wrong.
+
+    **Across two windows — a problem only for the kinds that DEFINE a window.**
+    This was `!=` on the period for every kind until 2026-08-19, and it is why
+    TikTok July could not be staged at all: TikTok ships each store's prior-month
+    order re-pull in *every* weekly folder, byte-identical, because the
+    cross-period stitch needs it (`WINDOW_DEFINING` says the same thing from the
+    other side — order exports deliberately span earlier months and can never
+    define a window). Twenty-three such files were reported as double-pulls in one
+    dump. They cannot double-count revenue: money comes from the income frame,
+    each window's run reads only its own folder, and orders merely supply the SKU
+    lines for order_ids that window's income already selected. Flagging them
+    taught the reader to reach for --pattern until the tool went quiet, which is
+    the failure mode this whole file is written against.
+
+    An income/Weekly/Daily export in two windows is still reported, because that
+    one really is the 5.97B VND shape.
     """
     problems: list[str] = []
     by_sha: dict[str, list[tuple[Probe, str]]] = defaultdict(list)
@@ -360,7 +432,11 @@ def find_duplicates(assignment: list[tuple[Probe, str]], staged_root: Path,
 
     if not staged_root.is_dir():
         return problems
-    planned = {p.sha: (p, period) for p, period in assignment}
+    # Only window-defining kinds can double-count revenue across windows.
+    planned = {p.sha: (p, period) for p, period in assignment
+               if p.kind in WINDOW_DEFINING}
+    if not planned:
+        return problems
     for existing in sorted(staged_root.glob(f"*/{platform}/**/*")):
         if not existing.is_file() or existing.suffix.lower() not in (".xlsx", ".csv"):
             continue

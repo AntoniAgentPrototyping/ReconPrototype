@@ -187,3 +187,77 @@ The generator's first run produced a **real** tie-out breach — off by exactly 
 | stored `run_exceptions` identity values | 0 rows |
 
 So normalising `exceptions._norm` moved **no** existing fingerprint, and `006_exception_nfc.sql` is a recorded no-op that says so. The M6 plan's "0 impact" claim had been measured over *filenames*, which said nothing about `fee_name` — the value that actually comes from Vietnamese Lazada exports. It was audited separately and came back clean.
+
+## The M8 Phase 3 gate — dates, and the July month-end tie (2026-08-19)
+
+### The date formats were measured, not assumed
+
+`date_formats.<platform>.<kind>` ([D54](06-DECISIONS.md#d54)) replaced format
+inference. Every value in it was probed against real exports first, and the bar
+was 100% of non-blank cells in every date column of that platform/kind, in **both**
+month-sets:
+
+| platform / kind | format | files probed (May + July) |
+|---|---|---|
+| tiktok / orders | `%d/%m/%Y %H:%M:%S` | 13 |
+| tiktok / income | `%Y/%m/%d` | 12 |
+| shopee / orders | `%Y-%m-%d %H:%M` | 20 |
+| shopee / income | `%Y-%m-%d` | 17 |
+| lazada / weekly | `%d-%b-%Y` | 66 |
+| lazada / daily | `%d %b %Y` | 14 |
+
+Two findings came out of the measurement rather than out of reasoning. TikTok
+income is `%Y/%m/%d` against `dayfirst.tiktok: true`, and on **July** data that
+inverts day and month: a 1–7 July window derived as `2026-01-07..2026-09-07`. And
+Lazada's two variants do not agree with each other — the separator differs — which
+nothing had ever noticed because inference handled both.
+
+**The gate: all eight golden windows were regenerated with the change in place and
+no cell moved** (`tools/make_golden.py`, zero tolerance, `exit=0` on every window).
+Explicit parsing is stricter than inference, so this was the only thing that made
+the change safe to land.
+
+*Invocation note, because it cost a cycle:* the goldens carry `partial_roster` in
+their provenance — `True` for the Shopee and TikTok windows (they are two-store
+subsets), `False` for the four Lazada ones. Regenerating with the wrong flag
+refuses with `fields that changed: partial_roster`, which is the gate working, not
+a moved cell.
+
+### July, tied against the team's month-end master
+
+The blocker recorded above — "July has not been externally tied; none existed at
+run time" — is closed for **Lazada** and open for the rest at the time of writing.
+
+The team's `ADA marketplace MASTER July 2026.xlsx` is encrypted by a Microsoft
+Purview sensitivity label and cannot be opened here ([16-DATA-REQUEST](16-DATA-REQUEST-MONTH-MASTER.md)).
+The comparison is made against a **per-tab CSV export** of it, supplied 2026-08-19,
+via `tools/compare_master.py`.
+
+**Lazada: exact.** All five windows reproduce the reference to the dong:
+
+| window | ours (with VAT) | reference | diff |
+|---|---|---|---|
+| l1 | 542,192,057 | 542,192,057 | 0 |
+| l2 | 2,983,994,880 | 2,983,994,880 | 0 |
+| l3 | 2,322,957,905 | 2,322,957,905 | 0 |
+| l4 | 1,798,489,504 | 1,798,489,504 | 0 |
+| l5 | 1,528,688,537 | 1,528,688,537 | 0 |
+
+Per storefront, 17 of 18 match exactly and one differs by **1 VND**
+(`unilever ahc`), which is display rounding in the reference export.
+
+**Two limits on this comparison, stated rather than buried.**
+
+- **The reference CSVs are cp1252 and lost their Vietnamese.**
+  `Unilever Chăm Sóc Vẻ Đẹp` exported as `Unilever Ch?m S�c V? ??p`. Those
+  characters were destroyed when the file was written, not when it is read.
+  `compare_master._skeleton` matches a mangled label to our intact one by reducing
+  every non-ASCII character to `?` on both sides. It deliberately does **not**
+  strip diacritics, because `thuan phat` and `thuận phát` are two different rows
+  in the team's own file and folding them would invent agreement.
+- **Window columns are matched by ORDER, not by name.** The team heads columns
+  with day ranges (`01-07`) and we use window ids (`w1`); the only mapping between
+  them is the hardcoded table this phase deleted. Both sides list a platform's
+  windows in settlement order, so the nth is compared with the nth — and the tool
+  refuses to compare a platform at all if the two sides disagree on how many
+  windows it has.

@@ -112,14 +112,11 @@ class PlannedName:
 def pattern_for(settings: dict, platform: str) -> str:
     """The regex the pipeline will actually use on this platform's filenames.
 
-    Lazada's lives in `src/lazada.py` rather than in YAML — a real asymmetry in
-    the codebase (docs/08-KNOWN-DEFECTS.md 1.10), and reaching into the module is
-    the honest way to handle it. Pretending the config covers it would put a
-    second Lazada pattern in a second place.
+    One lookup for all three platforms since M8/1.7. Lazada's pattern was a
+    constant in `src/lazada.py` and this function had to import it, which put a
+    second Lazada pattern in a second place the moment anyone edited either
+    (docs/14-PRODUCTION-READINESS.md D4).
     """
-    if platform == "lazada":
-        from src.lazada import STORE_PATTERN
-        return STORE_PATTERN
     pattern = (settings.get("store_from_filename") or {}).get(platform)
     if not pattern:
         raise NamingError(

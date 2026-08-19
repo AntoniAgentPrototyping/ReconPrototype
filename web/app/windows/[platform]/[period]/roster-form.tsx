@@ -39,9 +39,15 @@ export default function RosterForm({
 
   return (
     <div className="panel" style={{ maxWidth: 720 }}>
-      {state && <div className={`notice ${state.ok ? "good" : "bad"}`}>{state.message}</div>}
+      {state && (
+        <div className={`notice ${state.ok ? "good" : "bad"}`} aria-live="polite">
+          {state.message}
+        </div>
+      )}
       {cleared && (
-        <div className={`notice ${cleared.ok ? "good" : "bad"}`}>{cleared.message}</div>
+        <div className={`notice ${cleared.ok ? "good" : "bad"}`} aria-live="polite">
+          {cleared.message}
+        </div>
       )}
 
       {declaration ? (

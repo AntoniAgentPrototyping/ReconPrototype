@@ -128,6 +128,168 @@ def report_unparseable(unparseable: dict[str, int], where: str, style: str,
     raise ReconHardStop(message)
 
 
+def parse_dates(values: "pd.Series", dayfirst: bool, where: str, column: str,
+                log: RunLog, fmt: str | None = None) -> "pd.Series":
+    """Text to timestamps. With `fmt`, exactly; without it, by inference.
+
+    pandas infers a format from the first non-null element and coerces everything
+    that does not match it to `NaT`. Which format it infers is therefore
+    DATA-DEPENDENT, and `dayfirst` only decides the ambiguous case: measured on
+    pandas 2.3.3, `["2026/05/01", "2026/05/13"]` under `dayfirst=True` yields
+    `2026-01-05` and `NaT` — the first silently transposed, the second dropped —
+    while the same column whose first value is unambiguous parses correctly and
+    pandas emits `Parsing dates in %Y/%m/%d format when dayfirst=True was specified`.
+
+    That warning is the exact signal that the contract and the file disagree, and it
+    went to stderr and died there. It is captured and logged here instead.
+
+    **`fmt` is why that inference is no longer load-bearing (2026-08-19).** The
+    warning above fired on real TikTok income for months without costing anything,
+    because May's first `Order settled time` value was unambiguous and inference
+    quietly overrode the flag. July's first value is `2026/07/07` — ambiguous — so
+    `dayfirst=True` won and the whole column parsed as `%Y/%d/%m`: a window covering
+    1-7 July came out spanning January to September, and staging could not derive a
+    window at all. An explicit format removes the data dependence entirely; see
+    `date_formats` in settings.yaml for the measurements.
+
+    Passing `fmt` is STRICTER, and deliberately so. A cell that does not match
+    becomes `NaT` instead of being rescued by a second guess, and the caller counts
+    and names those through `report_undated`.
+    """
+    import warnings
+
+    if fmt:
+        return pd.to_datetime(values, errors="coerce", format=fmt)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        parsed = pd.to_datetime(values, errors="coerce", dayfirst=dayfirst)
+    for w in caught:
+        text = str(w.message)
+        if "dayfirst" in text or "Could not infer format" in text:
+            log.warn(f"{where}/{column}: {text.strip()} "
+                     f"(dayfirst={dayfirst} comes from the contract; the file's own "
+                     f"format wins where pandas can tell, so the two disagree. Set "
+                     f"date_formats.{where.replace('/', '.')} to parse it exactly.)")
+    return parsed
+
+
+def date_format(settings: dict, platform: str, kind: str) -> str | None:
+    """The measured strptime format for one platform/kind, or None to infer.
+
+    One accessor so `src/`, `service/` and `tools/stage_exports.py` cannot end up
+    with three ideas of how a settlement date is spelled — which is precisely the
+    class of bug this setting exists to close.
+    """
+    return ((settings.get("date_formats") or {}).get(platform) or {}).get(kind)
+
+
+def report_undated(undated: dict[str, int], where: str, dayfirst: bool,
+                   settings: dict, log: RunLog, fmt: str | None = None) -> None:
+    """A date that could not be read is COUNTED and named, not silently dropped.
+
+    The mirror of `report_unparseable`, and deliberately at a lower setting. An
+    amount that will not parse hard-stops by default because a settlement export
+    never legitimately contains one. A *date* can legitimately be blank —
+    `apply_settlement_bounds` already keeps and reports undated income rows — so
+    the default here is `warn`, and `date_coercion: hard_stop` is available to an
+    operator who has decided otherwise.
+
+    What was wrong until M8 was not the leniency, it was the silence: money went
+    through `report_unparseable` while dates went through a bare
+    `errors="coerce"` with no counter (docs/08-KNOWN-DEFECTS.md#16, the date half).
+    An unreadable date does not produce a wrong number — it produces a MISSING one,
+    because `finance_template` groups on `.dt.month` and pandas drops a NaN group
+    key by default. Quieter than a wrong number, and worse.
+    """
+    if not undated:
+        return
+    detail = ", ".join(f"{c}: {n:,} row(s)" for c, n in sorted(undated.items()))
+    # Name the rule that actually parsed, not the one that did not. An explicit
+    # format makes dayfirst irrelevant, and reporting it would send whoever reads
+    # this to the wrong setting.
+    under = f"date format {fmt}" if fmt else f"dayfirst={dayfirst}"
+    message = (
+        f"{where}: {sum(undated.values()):,} date cell(s) could not be read under "
+        f"{under} — {detail}. Rows with no date are kept, but they drop "
+        f"out of any month grouping in the finance workbook, so they leave the "
+        f"invoice quietly rather than loudly. The usual cause is an export whose "
+        f"date format changed. To stop the run on this instead, set "
+        f"date_coercion: hard_stop in settings.yaml."
+    )
+    if str(settings.get("date_coercion", "warn")).lower() == "hard_stop":
+        raise ReconHardStop(message)
+    log.warn(message)
+
+
+# A rights-protected Office file is an OLE2 compound document wrapping the real,
+# encrypted .xlsx. Detected from bytes rather than with a library, because the whole
+# point is to say something useful in a deployment that has no extra dependency and
+# on a machine that cannot open the file anyway.
+_OLE2_SIGNATURE = bytes.fromhex("d0cf11e0a1b11ae1")
+_ENCRYPTED_PACKAGE = "EncryptedPackage".encode("utf-16-le")
+_LABEL_INFO = "LabelInfo".encode("utf-16-le")
+
+
+def rights_protected(path: Path) -> str | None:
+    """Why this file cannot be opened, if the reason is encryption. Else None.
+
+    **Found the hard way, 2026-08-19.** Two files in this tree refuse to open, and
+    both were recorded for months as something they are not — the month-end master as
+    "a legacy .xls with the wrong extension", one Lazada weekly export as
+    "password-protected". Neither is true. Both are genuine `.xlsx` files wrapped in
+    an OLE2 container by a Microsoft Purview **sensitivity label with encryption**,
+    carrying the same label id and the same tenant, applied deliberately
+    (`method="Privileged"`).
+
+    That distinction decides what anyone does next. A password is something you ask a
+    colleague for. A sensitivity label is org policy: the file opens only for an
+    identity the label grants rights to, and **no** amount of re-saving, renaming or
+    reader-swapping changes that. It is also not a per-file accident — it will apply
+    to every labelled file the team ever sends, which makes it a constraint on
+    hosting this system at all (`docs/13-ENTRA-SETUP.md`).
+
+    Cheap by construction: a healthy export is a ZIP, so the signature check rejects
+    every good file on 8 bytes and only a file that is already broken is scanned.
+    """
+    try:
+        with open(path, "rb") as fh:
+            if not fh.read(8).startswith(_OLE2_SIGNATURE):
+                return None
+            fh.seek(0)
+            # Chunked with overlap: the stream directory can sit anywhere, and a
+            # marker must not be missed because it straddles a boundary.
+            tail = b""
+            found = set()
+            while chunk := fh.read(1 << 20):
+                window = tail + chunk
+                for marker, name in ((_ENCRYPTED_PACKAGE, "encrypted"),
+                                     (_LABEL_INFO, "labelled")):
+                    if marker in window:
+                        found.add(name)
+                if len(found) == 2:
+                    break
+                tail = window[-64:]
+    except OSError:                                             # pragma: no cover
+        return None
+
+    if "encrypted" not in found:
+        # OLE2 without an encrypted package: a genuine legacy .xls, or another
+        # Office format renamed. Different problem, different answer.
+        return (f"{path.name} is not a modern Excel file despite its name — it is an "
+                f"OLE2 document (the legacy .xls/.doc container). Re-save it from "
+                f"Excel as 'Excel Workbook (*.xlsx)'; renaming it is not enough.")
+    if "labelled" in found:
+        return (f"{path.name} is encrypted by a Microsoft sensitivity label, so "
+                f"nothing can open it without rights to that label — not this "
+                f"system, and not a colleague the label does not cover. Re-saving "
+                f"or renaming will not help. Either supply a copy with the label "
+                f"removed, or have the label grant rights to the identity this "
+                f"service runs as.")
+    return (f"{path.name} is an encrypted Office file (password or rights "
+            f"protection). Supply an unprotected copy.")
+
+
 def read_excel_sheet(path: Path, sheet, header_row: int, engine: str | None = None) -> pd.DataFrame:
     """Read one xlsx sheet as strings, header on `header_row` (1-based).
 
@@ -145,6 +307,12 @@ def read_excel_sheet(path: Path, sheet, header_row: int, engine: str | None = No
     read); otherwise the openpyxl fast path runs and calamine is a
     single-column safety-net fallback. Well-formed sources keep the exact
     openpyxl path, so verified May behaviour is untouched."""
+    # Checked before any reader sees it: openpyxl says "File is not a zip file" and
+    # calamine says "Cannot detect file format", and neither tells a person that the
+    # file is encrypted or what to do about it.
+    protection = rights_protected(path)
+    if protection:
+        raise ReconHardStop(protection)
     if engine == "calamine":
         return pd.read_excel(path, dtype=str, sheet_name=sheet, header=header_row - 1,
                              engine="calamine")
@@ -153,6 +321,22 @@ def read_excel_sheet(path: Path, sheet, header_row: int, engine: str | None = No
         return df
     return pd.read_excel(path, dtype=str, sheet_name=sheet, header=header_row - 1,
                          engine="calamine")
+
+
+def sheet_names(path: Path, engine: str | None = None) -> list[str]:
+    """The workbook's sheet names, through the same boundary as its cells.
+
+    `read_excel_sheet` needs to be told WHICH sheet, and a caller that must first
+    ask "which tabs are in here" would otherwise open the file itself — putting a
+    second `pd.ExcelFile` outside the boundary this module exists to be. Same
+    rights-protection check first, for the same reason: openpyxl's "File is not a
+    zip file" tells nobody that the file is encrypted.
+    """
+    protection = rights_protected(path)
+    if protection:
+        raise ReconHardStop(protection)
+    return list(pd.ExcelFile(path, engine="calamine" if engine == "calamine"
+                             else None).sheet_names)
 
 
 def store_from_filename(filename: str, pattern: str) -> str:
@@ -240,7 +424,12 @@ def read_parts(
         # downstream uses them, it strips PII columns immediately (the
         # team's own Shopee M code does the same), and it keeps full-
         # platform runs within memory.
-        if settings.get("drop_unmapped_columns", False):
+        # Default TRUE since M8/2.4: a settings dict that forgets to say now
+        # STRIPS rather than retains. The old False meant the fail-open direction
+        # was the PII-leaking one — a caller that built its own settings (a test,
+        # a script, a future entry point) kept `Recipient`, `Phone #` and
+        # `Detail Address` in the frame and in anything that frame reached.
+        if settings.get("drop_unmapped_columns", True):
             keep = set(colmap.values()) | {"store", "source_file"}
             df = df[[c for c in df.columns if c in keep]]
         log.add(f"  {f.name}: {len(df)} rows" + (f" (headers not found: {missing})" if missing else ""))
@@ -277,9 +466,17 @@ def read_parts(
             if n_bad:
                 unparseable[col] = n_bad
     report_unparseable(unparseable, f"{platform}/{kind}", style, settings, log)
+    undated: dict[str, int] = {}
+    fmt = date_format(settings, platform, kind)
     for col in DATE_COLUMNS[kind]:
         if col in combined.columns:
-            combined[col] = pd.to_datetime(combined[col], errors="coerce", dayfirst=dayfirst)
+            before_bad = int(combined[col].isna().sum())
+            combined[col] = parse_dates(combined[col], dayfirst, f"{platform}/{kind}",
+                                        col, log, fmt=fmt)
+            n_bad = int(combined[col].isna().sum()) - before_bad
+            if n_bad:
+                undated[col] = n_bad
+    report_undated(undated, f"{platform}/{kind}", dayfirst, settings, log, fmt=fmt)
     combined["store"] = combined["store"].astype(str).str.strip()
     combined["order_id"] = combined["order_id"].astype(str).str.strip()
 

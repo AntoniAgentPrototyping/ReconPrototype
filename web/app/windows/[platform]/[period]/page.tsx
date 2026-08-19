@@ -1,12 +1,24 @@
-import { redirect } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 
-import { api, whoami, KINDS_BY_PLATFORM, type WindowPlan } from "@/lib/api";
+import {
+  api,
+  ApiError,
+  whoami,
+  KINDS_BY_PLATFORM,
+  type WindowDetail,
+  type WindowPlan,
+} from "@/lib/api";
+import { currentLang } from "@/lib/lang";
+import { t } from "@/lib/words";
 
+import ReferencesForm from "./references-form";
 import RosterForm from "./roster-form";
 import UploadForm from "./upload-form";
 import FileRow from "./file-row";
 
 export const dynamic = "force-dynamic";
+
+export const metadata = { title: "Kỳ đối soát" };
 
 /**
  * One settlement window: what is in it, what it will be called, what is missing.
@@ -33,14 +45,34 @@ export default async function WindowPage({
 }: {
   params: Promise<{ platform: string; period: string }>;
 }) {
-  const me = await whoami();
+  const [me, lang] = await Promise.all([whoami(), currentLang()]);
+  const vi = lang === "vi";
   if (!me) redirect("/login");
   if (me.must_change_password) redirect("/account/password");
 
   const { platform, period } = await params;
-  const plan = await api<WindowPlan>(
-    `/uploads/plan?platform=${encodeURIComponent(platform)}&period=${encodeURIComponent(period)}`,
-  );
+  let plan: WindowPlan;
+  let detail: WindowDetail;
+  try {
+    [plan, detail] = await Promise.all([
+      api<WindowPlan>(
+        `/uploads/plan?platform=${encodeURIComponent(platform)}&period=${encodeURIComponent(period)}`,
+      ),
+      // A3: the team's own totals live on the window, not on a job, so a re-run is
+      // checked against the same figures the first run was.
+      api<WindowDetail>(
+        `/windows/${encodeURIComponent(platform)}/${encodeURIComponent(period)}`,
+      ),
+    ]);
+  } catch (error) {
+    // B2: 422 is what the API returns for an unknown platform or a period that
+    // fails `_safe_period` — an address that is not a window, which is a 404 to
+    // the person looking at it. Everything else still reaches `error.tsx`.
+    if (error instanceof ApiError && (error.status === 404 || error.status === 422)) {
+      notFound();
+    }
+    throw error;
+  }
 
   const kinds = KINDS_BY_PLATFORM[platform] ?? [];
   const total = kinds.reduce((n, k) => n + (plan.files[k]?.length ?? 0), 0);
@@ -53,22 +85,30 @@ export default async function WindowPage({
         <span className="mono">{platform}</span> · <span className="mono">{period}</span>
       </h1>
       <p className="lede">
-        {total} file{total === 1 ? "" : "s"} uploaded
+        {vi ? `Đã tải lên ${total} file` : `${total} file${total === 1 ? "" : "s"} uploaded`}
         {plan.expected_store_count > 0 && (
           <>
             {" "}
-            · {plan.stores_present.length} of {plan.expected_store_count} expected stores
-            present
+            ·{" "}
+            {vi
+              ? `có ${plan.stores_present.length}/${plan.expected_store_count} cửa hàng dự kiến`
+              : `${plan.stores_present.length} of ${plan.expected_store_count} expected stores present`}
           </>
         )}
-        . Customer names, phone numbers and addresses are stripped as each file
-        arrives, using the pipeline&apos;s own column map — the file kept here is
-        already reduced to the columns the reconciliation reads.
+        .{" "}
+        {vi
+          ? "Tên, số điện thoại và địa chỉ khách hàng được loại bỏ ngay khi file được tải lên, theo đúng danh sách cột mà hệ thống dùng — file lưu ở đây chỉ còn các cột phục vụ đối soát."
+          : "Customer names, phone numbers and addresses are removed as each file arrives, using the same column list the run uses — the file kept here is already reduced to the columns the reconciliation reads."}
       </p>
 
       {plan.problems.length > 0 && (
         <div className="notice bad">
-          <strong>These files cannot be named yet.</strong> A run would stop on them.
+          <strong>
+            {vi
+              ? "Chưa xác định được các file này."
+              : "These files cannot be identified yet."}
+          </strong>{" "}
+          {vi ? "Chạy bây giờ sẽ dừng ở đây." : "A run would stop on them."}
           <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
             {plan.problems.map((p) => (
               <li key={p}>{p}</li>
@@ -79,35 +119,47 @@ export default async function WindowPage({
 
       {plan.unexpected_stores.length > 0 && (
         <div className="notice bad">
-          {plan.unexpected_stores.length} store(s) here are not on the {platform} roster:{" "}
-          <span className="mono">{plan.unexpected_stores.join(", ")}</span>. A run will stop
-          on this — add them through a config change rather than working around it.
+          {vi
+            ? `${plan.unexpected_stores.length} cửa hàng ở đây không có trong danh sách ${platform}:`
+            : `${plan.unexpected_stores.length} store(s) here are not on the ${platform} list:`}{" "}
+          <span className="mono">{plan.unexpected_stores.join(", ")}</span>.{" "}
+          {vi
+            ? "Chạy sẽ dừng ở đây — hãy thêm cửa hàng vào quy tắc thay vì tìm cách đi vòng."
+            : "A run will stop on this — add them in the rules rather than working around it."}
         </div>
       )}
 
       {plan.missing_stores.length > 0 ? (
         <div className={`notice ${declaration?.roster_declared_partial ? "" : "bad"}`}>
           <strong>
-            {plan.missing_stores.length} expected store
-            {plan.missing_stores.length === 1 ? "" : "s"} ha
-            {plan.missing_stores.length === 1 ? "s" : "ve"} no file:
+            {vi
+              ? `${plan.missing_stores.length} cửa hàng dự kiến chưa có file:`
+              : `${plan.missing_stores.length} expected store${plan.missing_stores.length === 1 ? " has" : "s have"} no file:`}
           </strong>{" "}
           <span className="mono">{plan.missing_stores.join(", ")}</span>
           <div className="muted small" style={{ marginTop: 6 }}>
             {declaration?.roster_declared_partial
-              ? `Declared partial by ${declaration.declared_by} — “${declaration.reason}”. The run will proceed and its totals are a subset of the month.`
-              : "Without a declaration the run will stop here. That is deliberate: a window quietly missing a store produces a workbook that looks complete and under-invoices."}
+              ? vi
+                ? `${declaration.declared_by} đã xác nhận kỳ này chỉ có một phần cửa hàng — “${declaration.reason}”. Hệ thống sẽ chạy tiếp, và tổng số ở đây chỉ là một phần của tháng.`
+                : `Declared partial by ${declaration.declared_by} — “${declaration.reason}”. The run will proceed and its totals are only part of the month.`
+              : vi
+                ? "Nếu không có xác nhận, hệ thống sẽ dừng ở đây. Đó là cố ý: một kỳ thiếu cửa hàng mà không ai biết sẽ cho ra file trông đầy đủ nhưng xuất thiếu hoá đơn."
+                : "Without a declaration the run will stop here. That is deliberate: a period quietly missing a store produces a file that looks complete and under-invoices."}
           </div>
         </div>
       ) : (
         plan.ready && (
           <div className="notice good">
-            Every expected store has at least one file. This window is ready to run.
+            {vi
+              ? "Mọi cửa hàng dự kiến đều đã có ít nhất một file. Kỳ này sẵn sàng chạy."
+              : "Every expected store has at least one file. This period is ready to run."}
           </div>
         )
       )}
 
-      {canEdit && <UploadForm platform={platform} period={period} kinds={kinds} />}
+      {canEdit && (
+        <UploadForm platform={platform} period={period} kinds={kinds} lang={lang} />
+      )}
 
       {kinds.map((kind) => {
         const files = plan.files[kind] ?? [];
@@ -115,17 +167,19 @@ export default async function WindowPage({
           <section key={kind}>
             <h2>{kind}</h2>
             {files.length === 0 ? (
-              <div className="panel muted">Nothing uploaded for {kind} yet.</div>
+              <div className="panel muted">
+                {vi ? `Chưa có file ${kind} nào.` : `Nothing uploaded for ${kind} yet.`}
+              </div>
             ) : (
               <div className="panel" style={{ padding: 0 }}>
                 <table>
                   <thead>
                     <tr>
-                      <th>Uploaded as</th>
-                      <th>The pipeline will read it as</th>
-                      <th>Store</th>
-                      <th className="num">Size</th>
-                      <th>By</th>
+                      <th>{t(lang, "uploadedAs")}</th>
+                      <th>{t(lang, "readAs")}</th>
+                      <th>{t(lang, "store")}</th>
+                      <th className="num">{t(lang, "size")}</th>
+                      <th>{t(lang, "uploadedBy")}</th>
                       <th />
                     </tr>
                   </thead>
@@ -147,9 +201,39 @@ export default async function WindowPage({
         );
       })}
 
+      {!detail.references && (
+        <div className="notice">
+          {vi ? (
+            <>
+              <strong>Kỳ này chưa có số của team.</strong> Chạy vẫn xong, nhưng kết quả
+              sẽ là <em>chưa đối chiếu</em> — không phải sai, chỉ là chưa có gì bên ngoài
+              hệ thống xác nhận.{" "}
+              {canEdit ? "Nhập số của team ở bên dưới." : "Nhờ người có quyền nhập số của team."}
+            </>
+          ) : (
+            <>
+              <strong>No figures from the team for this period.</strong> A run will
+              still finish, but its result will be <em>not checked</em> — not wrong,
+              just unconfirmed by anything outside this system.{" "}
+              {canEdit ? "Enter the team's totals below." : "Ask someone to enter the team's totals."}
+            </>
+          )}
+        </div>
+      )}
+
       {canEdit && (
         <>
-          <h2>Roster</h2>
+          <h2>{vi ? "Đối chiếu với số của team" : "Checking against the team's numbers"}</h2>
+          <ReferencesForm
+            platform={platform}
+            period={period}
+            fields={detail.reference_fields}
+            references={detail.references}
+            summary={vi ? detail.references_summary_vi : detail.references_summary}
+            lang={lang}
+          />
+
+          <h2>{vi ? "Danh sách cửa hàng" : "Store list"}</h2>
           <RosterForm
             platform={platform}
             period={period}

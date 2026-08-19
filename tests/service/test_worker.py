@@ -170,7 +170,16 @@ def test_a_hard_stop_is_never_retried(repo: Repository, worker: Worker):
 def test_a_worker_failure_is_recorded_against_the_job(
         repo: Repository, worker: Worker, window, monkeypatch):
     """Reaching the worker's own except block means the WORKER broke, not the run.
-    That is the one case that marks the job ERROR."""
+    That is the one case that marks the job ERROR.
+
+    **Changed in M8/4.5 (B1), deliberately.** This test used to assert
+    `"worker failure" in run.error` and `"Traceback" in run.error` — it pinned the
+    behaviour where the run record carried the formatted traceback, which the run
+    page renders directly to whoever opens it. The traceback did not disappear; it
+    moved to the run log, and `test_a_worker_failure_reaches_the_run_as_a_sentence_
+    and_the_log_as_a_traceback` asserts both halves. `jobs.error` stays technical
+    because the job record is the operator's view, not the finance user's.
+    """
     from src import pipeline
 
     def explode(_ctx):
@@ -186,8 +195,10 @@ def test_a_worker_failure_is_recorded_against_the_job(
     assert "MemoryError" in failed.error
     run = repo.get_run(outcome.run_id)
     assert run.status is RunStatus.HARD_STOP
-    assert "worker failure" in run.error
-    assert "Traceback" in run.error, "an infrastructure failure needs its traceback"
+    assert "ran out of memory" in run.error, "MemoryError has its own sentence"
+    assert "Traceback" not in run.error
+    lines = "\n".join(l.text for l in repo.log_lines(outcome.run_id, limit=5000)[0])
+    assert "Traceback" in lines, "an infrastructure failure needs its traceback SOMEWHERE"
 
 
 def test_scratch_is_cleaned_up_on_success_and_kept_on_a_hard_stop(
@@ -209,10 +220,23 @@ def test_scratch_is_cleaned_up_on_success_and_kept_on_a_hard_stop(
 
 def test_each_job_gets_its_own_settings_dict(
         repo: Repository, worker: Worker, window, monkeypatch):
-    """`settings["_vat_sku"]` is a mutable back-channel inside the settings dict.
-    Two runs sharing one dict cross-contaminate VAT rates
-    (docs/02-ARCHITECTURE.md#import-hygiene), so the worker must build a fresh
-    context per job rather than caching one."""
+    """Two runs must not share mutable per-run state, so the worker builds a fresh
+    context per job rather than caching one.
+
+    **What this test was originally guarding, and what changed.** Until 2026-08-19
+    the per-SKU VAT map travelled as `settings["_vat_sku"]` — the config contract
+    used as a data channel (defect 1.9) — and a shared dict would have
+    cross-contaminated VAT rates between windows. That back-channel is gone: the map
+    is now `RunContext.vat_sku`, a field on a frozen dataclass, alongside
+    `masters_source` / `masters_searched` which had been a second copy of the same
+    pattern.
+
+    The isolation assertion stays, because it is about the *dict*, which is still
+    mutable and still per-run (`apply_partial_roster` writes into it). The added
+    assertions are the ones that keep the fix from silently reverting: a future
+    `settings["_vat_sku"] = ...` would restore the channel while every other test
+    still passed.
+    """
     from src import pipeline
 
     seen: list[int] = []
@@ -221,7 +245,12 @@ def test_each_job_gets_its_own_settings_dict(
     def spy(*args, **kwargs):
         ctx = real(*args, **kwargs)
         seen.append(id(ctx.settings))
-        assert "_vat_sku" in ctx.settings
+        assert "_vat_sku" not in ctx.settings, (
+            "the VAT map is back in the settings dict — defect 1.9 reintroduced")
+        assert not [k for k in ctx.settings if str(k).startswith("_")], (
+            f"settings carries back-channel keys: "
+            f"{[k for k in ctx.settings if str(k).startswith('_')]}")
+        assert isinstance(ctx.vat_sku, dict), "the VAT map must reach the run as a field"
         return ctx
 
     monkeypatch.setattr(pipeline, "build_context", spy)
@@ -250,7 +279,12 @@ def test_drain_empties_the_queue(repo: Repository, worker: Worker, window):
     repo.enqueue("lazada", window)
     repo.enqueue("lazada", "2026-05_never_staged")
     outcomes = worker.serve(drain=True)
-    assert len(outcomes) == 2
+    # THREE, not two: the window that produced a workbook queues its month's
+    # master, and drain means drain — a queue that refills while it is being
+    # emptied must still end empty (M8 Phase 3, docs/06-DECISIONS.md#d55).
+    # The never-staged window hard-stops and chains nothing.
+    assert len(outcomes) == 3
+    assert [o.job_id for o in outcomes] == [1, 2, 3]
     assert repo.list_jobs(state=JobState.QUEUED) == []
 
 
@@ -295,3 +329,65 @@ def test_refs_from_the_job_are_used_for_the_tie_out(repo: Repository, worker: Wo
     assert run.status is RunStatus.VARIANCE, (
         "a deliberately wrong reference total must be reported as a variance")
     assert run.variances
+
+
+# ---------------------------------------------------------------------------
+# The unstick path (M8/4.5)
+# ---------------------------------------------------------------------------
+
+def test_a_worker_failure_reaches_the_run_as_a_sentence_and_the_log_as_a_traceback(
+        repo: Repository, worker: Worker, window, monkeypatch):
+    """**B1.** `runs.error` carried `worker failure: TypeError: …` followed by the
+    whole formatted traceback, and the run page renders that field directly. A
+    finance user opening a failed run got a Python stack.
+
+    Both halves are asserted. Dropping the traceback entirely would be the easy
+    way to pass the first assertion and would make the failure undiagnosable.
+    """
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("connection to postgresql://recon:hunter2@db/recon lost")
+
+    monkeypatch.setattr(worker, "_materialize", explode)
+    repo.enqueue("lazada", window)
+    outcome = worker.serve(once=True)[0]
+
+    run = repo.get_run(outcome.run_id)
+    assert run.status is RunStatus.HARD_STOP
+    assert "Traceback" not in (run.error or "")
+    assert "hunter2" not in (run.error or ""), (
+        "an unrecognised exception's own text is not shown — it is not written for "
+        "this reader and routinely contains a path or a connection string")
+
+    lines = "\n".join(l.text for l in repo.log_lines(outcome.run_id, limit=5000)[0])
+    assert "Traceback" in lines, "the detail has to survive somewhere"
+    assert "RuntimeError" in lines
+
+
+def test_a_hard_stop_message_is_not_prefixed_with_its_class_name(
+        repo: Repository, worker: Worker, window, monkeypatch):
+    """A `ReconHardStop` message is already written for a human and
+    `docs/09-OPERATIONS.md` quotes these strings. The `ReconHardStop: ` prefix in
+    front of one was jargon, not information."""
+    from src.errors import ReconHardStop
+
+    def refuse(*_args, **_kwargs):
+        raise ReconHardStop("Store-count check FAILED for lazada/ledger.")
+
+    monkeypatch.setattr("src.lazada.read_ledger", refuse)
+    repo.enqueue("lazada", window)
+    outcome = worker.serve(once=True)[0]
+
+    run = repo.get_run(outcome.run_id)
+    assert run.status is RunStatus.HARD_STOP
+    assert (run.error or "").startswith("Store-count check FAILED")
+
+
+def test_the_worker_reports_itself_alive_between_jobs(
+        repo: Repository, worker: Worker, service_settings):
+    """**C2.** The worker had no healthcheck at all, so a wedged one looked exactly
+    like a busy one and Docker would never restart it. It has no HTTP server, so
+    the signal is a file touched at the top of each loop turn."""
+    assert not worker.heartbeat_path().exists()
+    worker.serve(once=True)          # no jobs queued: one turn, then out
+    assert worker.heartbeat_path().exists()
+    assert worker.heartbeat_path().read_text(encoding="utf-8") == service_settings.worker_id

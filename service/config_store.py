@@ -1,4 +1,4 @@
-"""Reading, versioning and editing `config/settings.yaml` — with its comments.
+"""Reading, versioning and resolving `config/settings.yaml` — with its comments.
 
 This file is the domain contract, and **its in-line comments are the audit
 trail** ([D2](docs/06-DECISIONS.md#d2)): an alias entry cites the order-ID-overlap
@@ -13,10 +13,21 @@ So two rules hold everywhere in this module:
 * **`ruamel.yaml` in round-trip mode, never `PyYAML`.** PyYAML's `safe_load` +
   `dump` cycle silently discards every comment, reorders keys and rewrites
   quoting. Reaching for it here is the single most damaging shortcut available.
-* **Git stays canonical.** The database holds *proposals* and the *audit trail*;
-  the file on disk remains the source of truth. Moving the source of truth into
-  Postgres would make month end depend on the app being up, which is exactly what
-  [D24](docs/06-DECISIONS.md#d24) forbids.
+* **The file is rendered, not hand-edited — since M8** ([D50](docs/06-DECISIONS.md#d50)).
+  The contract lives in the `config_*` tables and `service/config_render.py` turns
+  it back into this text, comments and all; `config/settings.yaml` in git is the
+  seed and the CLI's input. That reverses what this module said through M6 ("git
+  stays canonical") for one reason: `config/` is baked into each image and no volume
+  joins them, so an edit applied in the browser wrote a file the worker never read.
+  Month end did **not** newly acquire a dependency on the app being up — the worker
+  already cannot claim a job without Postgres, and `service.admin config export`
+  writes the rows back to this file, so the CLI and the golden gate still run with
+  the service switched off ([D24](docs/06-DECISIONS.md#d24)).
+
+Editing moved out of this module in M8/1.6: an edit is a row operation on the
+config tables (`service/config_rows.py`), so `apply_edit` and the whole dotted-path
+model are gone. What stays here is the round trip, evidence extraction, the diff,
+the git commit, and `resolve_for_window`.
 
 The approval model is no longer a setting: see the note where `ApprovalPolicy`
 used to be.
@@ -25,6 +36,7 @@ used to be.
 from __future__ import annotations
 
 import difflib
+import functools
 import io
 import subprocess
 from dataclasses import dataclass
@@ -107,39 +119,6 @@ def diff(before: str, after: str, *, label: str = SETTINGS_FILENAME) -> str:
         fromfile=f"a/{label}", tofile=f"b/{label}", n=3))
 
 
-def apply_edit(content: str, path: list[str], value: Any) -> str:
-    """Set one dotted path to a value, leaving the rest of the file untouched.
-
-    Structured rather than free-text on purpose: accepting a whole YAML document
-    from a browser makes the api a way to replace the domain contract wholesale,
-    and no diff review reliably catches a subtle change in a 300-line file.
-
-    Creating new keys is refused. Every key in this file exists because something
-    reads it; inventing one through a UI produces config the pipeline ignores,
-    which then looks like a bug in the pipeline.
-    """
-    if not path:
-        raise ConfigEditError("an empty path edits the whole document; refused")
-
-    data = parse(content)
-    node = data
-    for i, key in enumerate(path[:-1]):
-        if not isinstance(node, dict) or key not in node:
-            raise ConfigEditError(
-                f"no such config path: {'.'.join(path[:i + 1])}. This editor "
-                f"changes existing settings; it does not invent them.")
-        node = node[key]
-
-    leaf = path[-1]
-    if not isinstance(node, dict) or leaf not in node:
-        raise ConfigEditError(
-            f"no such config path: {'.'.join(path)}. This editor changes "
-            f"existing settings; it does not invent them.")
-
-    node[leaf] = value
-    return dump(data)
-
-
 # ---------------------------------------------------------------------------
 # Evidence: the comment block belonging to a key
 # ---------------------------------------------------------------------------
@@ -159,6 +138,26 @@ def _line_of(data: Any, path: list[str]) -> int | None:
     except Exception:                                           # noqa: BLE001
         # Not every node carries position data — a flow-style mapping does not.
         return None
+
+
+@functools.lru_cache(maxsize=4)
+def _parsed_for_reading(content: str):
+    """A parsed document for READING line numbers out of. Never mutate the result.
+
+    `evidence_for` needs ruamel's `.lc` to find the line a key sits on, and parsing
+    the real 400-line contract costs ~35ms. `service/config_import.py` asks for
+    evidence roughly 140 times per import — once per column map, storefront, alias
+    and tolerance — so re-parsing per call made seeding a contract cost **~5
+    seconds**, paid again by every test that needs one. Measured: 4.8s → 0.2s.
+
+    Cached on the content string, so a different document is a different entry and
+    an edited one can never be served stale. Small `maxsize` because the entries are
+    whole documents: this is a loop-level cache, not a store.
+
+    `parse()` stays uncached — it is the one callers mutate, and handing two of them
+    the same document would let one caller's edit appear in another's.
+    """
+    return parse(content)
 
 
 def evidence_for(content: str, path: list[str]) -> list[str]:
@@ -190,7 +189,7 @@ def evidence_for(content: str, path: list[str]) -> list[str]:
     `expected_stores`.
     """
     lines = content.splitlines()
-    index = _line_of(parse(content), path)
+    index = _line_of(_parsed_for_reading(content), path)
     if index is None or not 0 <= index < len(lines):
         return _parent_evidence(content, path)
 
@@ -325,6 +324,24 @@ def resolve_for_window(repo, config_dir: Path, platform: str, period: str) -> Re
     if pinned is not None:
         return ResolvedConfig(content=pinned["content"], version_id=pinned["id"],
                               pinned=True, sha256=pinned["sha256"])
+
+    # Unpinned: the CURRENT contract. Since M8 that is rendered from the config
+    # tables rather than read off this process's filesystem, and the difference is
+    # the whole point — the api and the worker are separate containers, each with
+    # its own baked copy of `config/`, and no volume between them. Applying an edit
+    # wrote settings.yaml into the API's writable layer while the worker went on
+    # reading its own untouched copy, so a rate change approved in the browser never
+    # reached the process that computes the money
+    # (docs/14-PRODUCTION-READINESS.md A1).
+    #
+    # Disk remains the fallback, and it is not a legacy path: it is how a fresh
+    # deployment seeds itself from the image, and how the CLI and the golden gate
+    # run with no service at all (D24).
+    rendered = repo.render_config() if hasattr(repo, "render_config") else None
+    if rendered is not None:
+        version = repo.record_config_version(rendered, source="rendered")
+        return ResolvedConfig(content=rendered, version_id=version["id"],
+                              pinned=False, sha256=version["sha256"])
 
     content = read_text(config_dir)
     version = repo.record_config_version(

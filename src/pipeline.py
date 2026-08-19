@@ -24,6 +24,7 @@ and are deliberate; both are marked `PARITY:`.
 from __future__ import annotations
 
 import enum
+import os
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -114,6 +115,16 @@ class RunContext:
     settings: dict
     log: "Any"                     # duck-typed: RunLog, QueueRunLog, RecordingLog
     refs: dict = field(default_factory=dict)
+    # Facts discovered while building the context, carried as FIELDS rather than
+    # stuffed into `settings` (defect 1.9). They are not configuration: `vat_sku` is
+    # reference data the money math reads, and the two `masters_*` values are an
+    # OUTCOME a finance user has to see, because a run on stale snapshots looks
+    # exactly like a run on the live file. Lazada already threaded its VAT map
+    # explicitly, so this is the shape that was already right for one of three
+    # platforms.
+    vat_sku: dict = field(default_factory=dict)
+    masters_source: str | None = None
+    masters_searched: tuple = ()
 
     @property
     def input_dir(self) -> Path:
@@ -156,8 +167,10 @@ def build_context(platform: str, period: str, *, root: Path | None = None,
     it there: `src/` is the deployable unit and the container image ships it
     without `tools/` (tests/test_io_boundary.py::test_src_never_imports_tools_or_tests).
     Duplicating it was the alternative, and the thing that would have been
-    duplicated is the `_vat_sku` back-channel below, which silently changes
-    numbers if it diverges.
+    duplicated is the masters load below — which decides per-SKU VAT rates, so a
+    diverged copy silently changes numbers. (Through M8 it was worse than a
+    duplicate: the map travelled as `settings["_vat_sku"]`, invisible in every
+    signature that read it. See `RunContext.vat_sku`.)
 
     Roots are separately overridable because the worker needs exactly that: the
     same `config_dir` and `input_root` as the CLI, and a per-job scratch
@@ -183,12 +196,23 @@ def build_context(platform: str, period: str, *, root: Path | None = None,
 
     settings = (config.parse_settings(settings_text) if settings_text is not None
                 else config.load_settings(config_dir))
-    # settings["_vat_sku"] is a data channel, not configuration: calculate.py
-    # reads it. Building it per call is what keeps two concurrent runs from
-    # cross-contaminating each other's VAT rates — a worker that cached one
-    # settings dict across jobs would reintroduce exactly that
-    # (docs/02-ARCHITECTURE.md#import-hygiene).
-    settings["_vat_sku"] = masters.load_masters(config_dir, settings, log)["vat_sku"]
+    # Masters are loaded here and carried on the CONTEXT as fields.
+    #
+    # Until 2026-08-19 these three values were written into the settings dict as
+    # `_vat_sku`, `_masters_source` and `_masters_searched` — the configuration
+    # contract used as a data channel (defect 1.9). Nothing was broken by it: the
+    # containment was that `build_context` runs per job, so two runs never shared a
+    # dict, pinned by test_worker.py::test_each_job_gets_its_own_settings_dict. But
+    # the containment was the only thing standing between the pattern and
+    # cross-contaminated VAT rates, and a leading underscore in a dict is not a
+    # signature — it cannot be type-checked, cannot be seen by a reader of
+    # `compute_sku_columns_*`, and had already been copied once for the masters
+    # provenance. It is now three fields and an explicit parameter.
+    #
+    # One-job-per-process still holds. It was never only about this dict: memory is
+    # the binding constraint (a window peaks well into the GBs) and concurrency comes
+    # from more worker processes, which is what FOR UPDATE SKIP LOCKED is for.
+    loaded = masters.load_masters(config_dir, settings, log)
 
     if partial_roster:
         count = apply_partial_roster(settings, platform)
@@ -200,6 +224,9 @@ def build_context(platform: str, period: str, *, root: Path | None = None,
         platform=platform, period=period,
         input_root=input_root, output_root=output_root, config_dir=config_dir,
         settings=settings, log=log, refs=refs or {},
+        vat_sku=loaded["vat_sku"],
+        masters_source=loaded.get("source"),
+        masters_searched=tuple(loaded.get("searched") or ()),
     )
 
 
@@ -221,6 +248,12 @@ class RunResult:
 
     context: RunContext
     workbook: Any | None = None                 # openpyxl Workbook, unwritten
+    # What `write_artifacts` calls the workbook. A settlement window's deliverable
+    # is `finance_file.xlsx` and always has been; the month-end master is the same
+    # shape of thing under a different name (M8 Phase 3). Overriding the NAME is
+    # what lets the master go through the one declared writer instead of the
+    # worker growing a second one, which is the whole of D31.
+    workbook_name: str = "finance_file.xlsx"
     checks: list = field(default_factory=list)
     tieout: Any | None = None                   # the tie-out results frame
     exceptions: dict[str, Any] = field(default_factory=dict)
@@ -289,7 +322,7 @@ class RunResult:
 
     @property
     def workbook_path(self) -> Path:
-        return self.context.output_dir / "finance_file.xlsx"
+        return self.context.output_dir / self.workbook_name
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +422,15 @@ def _run_tiktok(ctx: RunContext, out: RunResult) -> None:
         income = ingest.derive_brand(income, settings, log)
     with m.stage("apply_settlement_bounds", "compute", rows_out=lambda: len(income)):
         income = ingest.apply_settlement_bounds(income, ctx.period, settings, log)
+    # M8/2.3: the roster is checked against the ORDERS file too, not income alone.
+    # An orders export missing for a rostered store under-reports that storefront's
+    # lines while its income still ties, which is the quietest of the shapes this
+    # check exists to catch. Measured across all four rostered golden windows before
+    # landing: the store set derived from orders is IDENTICAL to the one derived from
+    # income on every one of them (symmetric difference 0), so this adds no hard stop
+    # to any window that runs clean today. It can only ever ADD one, which is why it
+    # was measured rather than reasoned about.
+    ingest.check_stores(orders, "orders", "tiktok", settings, log)
     ingest.check_stores(income, "income", "tiktok", settings, log)
 
     with m.stage("classify", "compute", rows_out=lambda: len(cl)):
@@ -399,11 +441,14 @@ def _run_tiktok(ctx: RunContext, out: RunResult) -> None:
 
     # Reference captured HERE — from the income frame, before the money math —
     # so everything compute_sku_columns does is inside the checked span.
+    sku_keys = tieout.pairs(sku)
     reference, unmatched_money, unmatched_orders = tieout.partition(
-        good, money_col=TIKTOK_MONEY, present_order_ids=sku["order_id"])
+        good, money_col=TIKTOK_MONEY, present_keys=sku_keys)
+    coverage = tieout.coverage_by_store(good, money_col=TIKTOK_MONEY,
+                                        present_keys=sku_keys)
 
     with m.stage("compute_sku_columns", "compute", rows_out=lambda: len(sku)):
-        sku = calculate.compute_sku_columns_tiktok(sku, settings, log)
+        sku = calculate.compute_sku_columns_tiktok(sku, settings, log, ctx.vat_sku)
     out.frames.update(classified=cl, good=good, sku=sku)
 
     with m.stage("build_workbook", "serialize"):
@@ -414,7 +459,8 @@ def _run_tiktok(ctx: RunContext, out: RunResult) -> None:
     with m.stage("tieout", "compute"):
         out.tieout = tieout.run_checks_tiktok(
             sku, reference, settings, log, money_col=TIKTOK_MONEY,
-            unmatched_money=unmatched_money, unmatched_orders=unmatched_orders)
+            unmatched_money=unmatched_money, unmatched_orders=unmatched_orders,
+            coverage=coverage)
     out.consume_tieout()
 
     per_store = {
@@ -429,8 +475,16 @@ def _run_tiktok(ctx: RunContext, out: RunResult) -> None:
         per_store.setdefault(s, {})["raw_settlement"] = float(g["net_revenue"].fillna(0).sum())
         per_store[s]["raw_revenue"] = float(g["gross_revenue"].fillna(0).sum())
 
-    out.exceptions["unmatched_orders"] = good[~good["order_id"].astype(str).isin(
-        sku["order_id"].astype(str))]
+    # Same (store, order_id) identity as the tie-out, for the same reason: keyed on
+    # the id alone this sheet omitted an order whose id another store happened to
+    # carry — the row an operator needs most, missing from the record of what left
+    # the invoice (2.9).
+    out.exceptions["unmatched_orders"] = good[
+        ~tieout.pair_series(good).isin(tieout.pairs(sku))]
+    # Per store, so the reconciling total stops being one anonymous number. The whole
+    # ~21% on this platform's golden window is a SINGLE store, which is why a window
+    # total could not distinguish ordinary traffic from defect 2.12.
+    out.exceptions["order_coverage"] = coverage
     out.exceptions["tieout_breaches"] = out.tieout[out.tieout["result"] == "BREACH"]         if out.tieout is not None else None
 
     _tie(per_store, ctx.refs, log, out)
@@ -458,6 +512,15 @@ def _run_shopee(ctx: RunContext, out: RunResult) -> None:
 
     # Armed in M2. A 17-store roster had been configured and never checked,
     # so a Shopee run with 1 of 17 expected stores completed without complaint.
+    # M8/2.3: the roster is checked against the ORDERS file too, not income alone.
+    # An orders export missing for a rostered store under-reports that storefront's
+    # lines while its income still ties, which is the quietest of the shapes this
+    # check exists to catch. Measured across all four rostered golden windows before
+    # landing: the store set derived from orders is IDENTICAL to the one derived from
+    # income on every one of them (symmetric difference 0), so this adds no hard stop
+    # to any window that runs clean today. It can only ever ADD one, which is why it
+    # was measured rather than reasoned about.
+    ingest.check_stores(orders, "orders", "shopee", settings, log)
     ingest.check_stores(income, "income", "shopee", settings, log)
 
     # Captured from the INCOME frame before any money math, so the whole
@@ -472,7 +535,7 @@ def _run_shopee(ctx: RunContext, out: RunResult) -> None:
     with m.stage("explode_to_sku", "compute", rows_out=lambda: len(sku)):
         sku = calculate.explode_to_sku_shopee(cl, orders, log)
     with m.stage("compute_sku_columns", "compute", rows_out=lambda: len(sku)):
-        sku = calculate.compute_sku_columns_shopee(sku, settings, log)
+        sku = calculate.compute_sku_columns_shopee(sku, settings, log, ctx.vat_sku)
     out.frames.update(orders=orders, income=income, classified=cl, sku=sku)
 
     with m.stage("build_workbook", "serialize"):
@@ -483,13 +546,16 @@ def _run_shopee(ctx: RunContext, out: RunResult) -> None:
     out.frames["ok"] = ok
 
     log.section("TIE-OUT")
+    sku_keys = tieout.pairs(sku)
     reference, unmatched_money, unmatched_orders = tieout.partition(
-        cl, money_col="net_revenue", present_order_ids=sku["order_id"])
+        cl, money_col="net_revenue", present_keys=sku_keys)
+    coverage = tieout.coverage_by_store(cl, money_col="net_revenue",
+                                        present_keys=sku_keys)
     with m.stage("tieout", "compute"):
         out.tieout = tieout.run_checks_shopee(
             sku, reference, settings, log, money_col=SHOPEE_MONEY,
             unmatched_money=unmatched_money, unmatched_orders=unmatched_orders,
-            crossing=revenue_crossing)
+            crossing=revenue_crossing, coverage=coverage)
     out.consume_tieout()
     per_store = {
         s: {"ok_pre_vat": float(g["amount_pre_vat"].sum()),
@@ -497,6 +563,16 @@ def _run_shopee(ctx: RunContext, out: RunResult) -> None:
         for s, g in ok.groupby("store")
     }
     out.exceptions["tieout_breaches"] = out.tieout[out.tieout["result"] == "BREACH"]         if out.tieout is not None else None
+    # Shopee had NO per-order record of settlement that reached no SKU line, while
+    # TikTok has had one since M2 (`_run_tiktok`). So the platform whose worst July
+    # cell was a 2,106,036,476 VND understatement — `masan` in `s4`, matching 33% of
+    # its income against the orders staged with it — was the one where nothing named
+    # the affected orders (defect 2.12). The INFO row gave a total and no identities,
+    # and `service/exceptions.py` keys this sheet on (store, order_id), which is what
+    # turns "the door's traffic changed this month" into a query rather than a memory.
+    out.exceptions["unmatched_orders"] = cl[
+        ~tieout.pair_series(cl).isin(tieout.pairs(sku))]
+    out.exceptions["order_coverage"] = coverage
 
     _tie(per_store, ctx.refs, log, out)
     _tie_grand([("pre_vat", "GRAND pre_vat", float(ok["amount_pre_vat"].sum())),
@@ -512,6 +588,13 @@ def _run_lazada(ctx: RunContext, out: RunResult) -> None:
         vat_sku = lazada.load_vat_sku(ctx.config_dir, log)
     with m.stage("read_ledger", "io", rows_out=lambda: len(ledger)):
         ledger = lazada.read_ledger(ctx.input_dir, settings, log)
+    # The roster check runs on all three platforms since M8/1.7. Lazada never
+    # called it at all, so adding a roster alone would have changed nothing
+    # (docs/14-PRODUCTION-READINESS.md A6). `expected_stores.lazada` is a BUSINESS
+    # question and is still unanswered, and `check_stores` self-skips with a
+    # warning while it is — so the wiring lands first and stays behaviour-neutral
+    # until somebody populates the roster.
+    ingest.check_stores(ledger, "ledger", "lazada", settings, log)
     with m.stage("classify_ledger", "compute", rows_out=lambda: len(cl)):
         cl, unmapped = lazada.classify_ledger(ledger, fee_types, vat_sku, settings, log)
     with m.stage("revenue_lines", "compute", rows_out=lambda: len(rev)):
@@ -549,6 +632,31 @@ _RUNNERS = {"tiktok": _run_tiktok, "shopee": _run_shopee, "lazada": _run_lazada}
 # The seam
 # ---------------------------------------------------------------------------
 
+def _masters_finding(ctx: RunContext, out: RunResult) -> None:
+    """Falling back to the CSV snapshots is a FINDING, not a log line.
+
+    `config/Lib & VAT rate.xlsb` is a live file the team edits; the committed CSVs
+    are point-in-time ports of it. A run that could not find the live file used
+    whatever the snapshots last said about fee buckets and per-SKU VAT — and
+    produced a workbook indistinguishable from one that read the current master.
+    Until 2026-08-18 that was a single `log.warn` in a log nobody reads after a
+    green run, and in the containerised deployment it fired on EVERY run because
+    the mount and the lookup path disagreed (A11).
+
+    Emitted before the platform runner so its position in `RunResult.findings` is
+    fixed: the list is ordered and its interleaving is committed inside
+    `variances.json`'s digest, so a finding that could appear at different points
+    would move a golden depending on what else happened.
+    """
+    if ctx.masters_source != "csv":
+        return
+    searched = list(ctx.masters_searched)
+    out.add_variance(
+        "the team-owned master file was not found, so this run used the committed "
+        "CSV snapshots — fee buckets and per-SKU VAT rates may be out of date"
+        + (f" (looked in: {', '.join(searched)})" if searched else ""))
+
+
 def run(ctx: RunContext) -> RunResult:
     """Execute one settlement window. **Writes nothing.**
 
@@ -560,6 +668,7 @@ def run(ctx: RunContext) -> RunResult:
     out = RunResult(context=ctx)
     try:
         ctx.log.section(f"FULL RUN {ctx.platform} {ctx.period}")
+        _masters_finding(ctx, out)
         _RUNNERS[ctx.platform](ctx, out)
     except BaseException as exc:      # noqa: BLE001 — recorded, then re-raised by choice of caller
         out.error = exc
@@ -594,12 +703,44 @@ def log_result(result: RunResult) -> None:
     log.add(f"  status: {result.status.name}")
 
 
+def _write_atomically(path: Path, write) -> None:
+    """Write through a sibling temp file, then `os.replace`. Never a partial artifact.
+
+    **What this buys.** A crash, a full disk or a killed worker mid-write leaves the
+    temp file, not a truncated `finance_file.xlsx`. That mattered more than it
+    looks: a half-written workbook still opens in Excel, so the failure mode being
+    removed is a finance file that looks current and is short some tabs.
+
+    **What it does NOT buy, and this is the honest half** (docs/08-KNOWN-DEFECTS.md#17,
+    register D10): on Windows `os.replace` *also* raises `PermissionError` when the
+    destination is held open — a finance file left open in Excel, which is routine
+    operator behaviour. The difference is that the previous artifact now survives
+    intact and the run reports the failure, instead of the file being clobbered
+    halfway. `service/failures.py` already translates `PermissionError` into a
+    sentence naming the file.
+
+    The temp file is a SIBLING deliberately: `os.replace` is only atomic within one
+    filesystem, so a temp directory elsewhere would silently degrade to copy-then-
+    delete. `.tmp` lands in an already-gitignored output dir.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        write(tmp)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def write_artifacts(result: RunResult) -> list[Path]:
     """The only writer in the codebase. Returns what it wrote.
 
     Kept deliberately dumb: it makes no decisions about what a run *meant*, so
     a worker can substitute an object-store variant without re-implementing any
     judgement.
+
+    Every write goes through `_write_atomically`, so composing writes stays this
+    function's job — the four writers it calls each take a `write_to` override and
+    none of them decides for itself where the bytes land.
     """
     ctx = result.context
     written: list[Path] = []
@@ -611,8 +752,8 @@ def write_artifacts(result: RunResult) -> list[Path]:
         # understated io_s and correspondingly overstated compute_share — the
         # exact number the engine-port trigger reads (docs/06-DECISIONS.md#d27).
         with result.metrics.stage("write_workbook", "io"):
-            finance_template.write_workbook(result.workbook, result.workbook_path,
-                                            result.checks, ctx.log)
+            _write_atomically(result.workbook_path, lambda p: finance_template.write_workbook(
+                result.workbook, result.workbook_path, result.checks, ctx.log, write_to=p))
         written.append(result.workbook_path)
 
     # exceptions.xlsx — computed since the beginning and never written, so
@@ -623,7 +764,13 @@ def write_artifacts(result: RunResult) -> list[Path]:
     if populated:
         from . import export
         path = ctx.output_dir / "exceptions.xlsx"
-        rows = export.write_exceptions_file(path, populated, ctx.log)
+        rows = 0
+
+        def _write_exceptions(p: Path) -> None:
+            nonlocal rows
+            rows = export.write_exceptions_file(path, populated, ctx.log, write_to=p)
+
+        _write_atomically(path, _write_exceptions)
         written.append(path)
         ctx.log.add(f"  exceptions -> {path.name} ({rows:,} row(s) across "
                     f"{len(populated)} sheet(s))")
@@ -637,11 +784,14 @@ def write_artifacts(result: RunResult) -> list[Path]:
         for line in result.metrics.summary_lines():
             ctx.log.add(line)
         path = ctx.output_dir / "run_metrics.json"
-        path.write_text(json.dumps(result.metrics.to_dict(), indent=2) + "\n",
-                        encoding="utf-8")
+        payload = json.dumps(result.metrics.to_dict(), indent=2) + "\n"
+        _write_atomically(path, lambda p: p.write_text(payload, encoding="utf-8"))
         written.append(path)
 
+    # run_log.txt LAST and atomically, for the reason 1.7 exists: a failed run must
+    # still leave a complete log. A partially written one is worse than none — it is
+    # an audit trail that stops mid-sentence and looks like the run did too.
     log_path = ctx.output_dir / "run_log.txt"
-    ctx.log.write(log_path)
+    _write_atomically(log_path, lambda p: ctx.log.write(log_path, write_to=p))
     written.append(log_path)
     return written

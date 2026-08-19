@@ -221,7 +221,8 @@ cd deploy && cp .env.example .env && $EDITOR .env && docker compose up --build
 | `401` | Not authenticated — no token, or one that is unknown, revoked or expired. Deliberately one message for all three. |
 | `403` | Authenticated, but the role is too low. The message names the role required. |
 | `409` on `POST /uploads` | These exact bytes were uploaded before — the double-pull guard. |
-| `409` on applying a config proposal | `settings.yaml` moved since the proposal was made. Withdraw and re-propose; this will not merge a file whose comments are evidence. |
+| `409` on applying a config proposal | The contract moved since the proposal was made. Rebase it — that replays the recorded intent against the current rows into a fresh proposal — or withdraw and propose again. This will not merge a change nobody reviewed. |
+| `503` from the config editor | The `config_*` tables have never been seeded in this deployment. Run `python -m service.config_import`. The api seeds them on first boot, so this means the tables were emptied afterwards. |
 | `rules: pinned` on the board | The run used the config an earlier run of that window used, not today's. |
 
 ## Monthly cadence
@@ -273,6 +274,12 @@ A run without `--refs` now exits **2**, not 1. Variances and unchecked stores ar
 | Reader sees only one column | A broken `<dimension>` tag. Force `calamine` for that platform/kind in `reader_engine`. |
 | Run is extremely slow | Cloud-sync contention on the data folder, and/or the default Excel reader. `calamine` is configured for the known-slow paths. |
 | `No fee-type mapping available` | The `.xlsb` master is missing *and* the CSV snapshots are absent. |
+| A window shows as **running** and never finishes | Its worker died mid-run, so the lease expired with nobody left to sweep it. `python -m service.admin job list` shows whether the lease is live or `EXPIRED`. If expired, `job reclaim` closes it out — or an admin presses *A run appears stuck* on the board. It does **not** re-run the window: `max_attempts` is 1 because an automatic retry of a settlement run is a second write of the same money ([D30](06-DECISIONS.md#d30)). Check nothing is progressing first — on a slow-but-live worker this ends a run that would have finished. |
+| A failed run says only *"the service itself hit an error"* | That is the deliberate answer for an infrastructure failure (M8/4.1). The type, message and traceback are in the **run log** on the same page. `service/failures.py` holds the mapping; an unrecognised exception gets a fixed sentence rather than its own text, because that text routinely contains a path or a connection string. |
+| A run reports **UNVERIFIED** | It ran clean and had nothing to check against. Supply the team's totals on the window page (*The team's figures*); the next run compares against them. Not a failure — exit code 2 means exactly this. |
+| `predates the M8/2.5 integrity check` on a run | The upload was recorded before `object_sha256` existed, so nothing can establish that the materialised file is the file that was uploaded. Re-upload the export. The digest is deliberately not recomputed from the store — that would certify the store against itself ([D52](06-DECISIONS.md#d52)). |
+| `date cell(s) could not be read` | A date format changed. The dates are kept as blank, which means those rows drop out of the month grouping in the workbook — quiet, so this is a warning worth acting on. Check the export against `dayfirst`; `date_coercion: hard_stop` makes it stop instead ([D53](06-DECISIONS.md#d53)). |
+| `Parsing dates in %Y/%m/%d format when dayfirst=True` | The file's own format contradicts the contract. **Do not flip `dayfirst` on this alone** — it fires on real TikTok income today and those dates are correct. It means the setting is not what is deciding the parse. |
 | Golden digests changed unexpectedly | An edit to `src/` or `config/` moved a cell. That is the gate working. Find the cell with the differ before deciding whether the change was intended; if it was, re-baseline deliberately ([D26](06-DECISIONS.md#d26)). Never widen a tolerance to make it pass ([D17](06-DECISIONS.md#d17)). |
 
 ## Safety rules

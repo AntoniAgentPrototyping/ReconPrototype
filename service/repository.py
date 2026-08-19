@@ -88,8 +88,9 @@ class Repository:
     def enqueue(self, platform: str, period: str, *, refs: dict | None = None,
                 partial_roster: bool = False, priority: int = 0,
                 max_attempts: int = 1, requested_by: str | None = None,
-                idempotency_key: str | None = None) -> tuple[Job, bool]:
-        """Queue one settlement window. Returns (job, created).
+                idempotency_key: str | None = None,
+                kind: str = "window") -> tuple[Job, bool]:
+        """Queue one settlement window, or a month master. Returns (job, created).
 
         Two distinct guards, doing different things:
 
@@ -99,9 +100,15 @@ class Repository:
           under a different key, raising ActiveJobExists. This is the guard that
           matters: two concurrent runs of one window is the double-invoicing
           shape (docs/06-DECISIONS.md#d9).
+
+        `kind='month_master'` reuses both, with `platform='all'` and the MONTH in
+        `period` — so "at most one master in flight per month" needs no new index
+        (migration 013). The caller that wants a second master because another
+        window has since finished must wait for the queued one, which is correct:
+        it will read the newer window when it runs.
         """
         params = {
-            "platform": platform, "period": period,
+            "platform": platform, "period": period, "kind": kind,
             "partial_roster": partial_roster,
             "refs": Jsonb(refs) if refs else None,
             "priority": priority, "max_attempts": max_attempts,
@@ -110,11 +117,12 @@ class Repository:
         try:
             with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
                 cur.execute("""
-                    insert into jobs (platform, period, partial_roster, refs, priority,
-                                      max_attempts, requested_by, idempotency_key)
-                    values (%(platform)s, %(period)s, %(partial_roster)s, %(refs)s,
-                            %(priority)s, %(max_attempts)s, %(requested_by)s,
-                            %(idempotency_key)s)
+                    insert into jobs (platform, period, kind, partial_roster, refs,
+                                      priority, max_attempts, requested_by,
+                                      idempotency_key)
+                    values (%(platform)s, %(period)s, %(kind)s, %(partial_roster)s,
+                            %(refs)s, %(priority)s, %(max_attempts)s,
+                            %(requested_by)s, %(idempotency_key)s)
                     on conflict (idempotency_key) do nothing
                     returning *
                 """, params)
@@ -129,7 +137,8 @@ class Repository:
                 return self.enqueue(
                     platform, period, refs=refs, partial_roster=partial_roster,
                     priority=priority, max_attempts=max_attempts,
-                    requested_by=requested_by, idempotency_key=idempotency_key)
+                    requested_by=requested_by, idempotency_key=idempotency_key,
+                    kind=kind)
             raise ActiveJobExists(existing) from exc
 
         # `do nothing` fired: the idempotency key is already in the table.

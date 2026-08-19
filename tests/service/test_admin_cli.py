@@ -151,9 +151,10 @@ def test_the_role_aliases_match_the_enum(admin_cli):
 # ---------------------------------------------------------------------------
 
 def _propose(client, value=1.09):
-    return client.post("/config/proposals",
-                       json={"path": ["vat_factors", "default"], "value": value,
-                             "summary": "a change to withdraw later"})
+    return client.post("/config/proposals", json={
+        "edits": [{"table": "config_scalars", "op": "upsert",
+                   "key": {"key": "vat_factors.default"}, "values": {"value": value}}],
+        "summary": "a change to withdraw later"})
 
 
 def test_a_user_may_withdraw_their_own_proposal(editor_client):

@@ -27,7 +27,9 @@ export function QueueForm() {
   return (
     <div className="panel">
       {state && (
-        <div className={`notice ${state.ok ? "good" : "bad"}`}>{state.message}</div>
+        <div className={`notice ${state.ok ? "good" : "bad"}`} aria-live="polite">
+          {state.message}
+        </div>
       )}
       <form className="row" action={action}>
         <div>

@@ -99,6 +99,28 @@ def repo(pool):
         # missing table here is an immediate hard error in every DB test.
         cur.execute("truncate jobs, users, user_sessions, config_versions, "
                     "config_proposals, uploads restart identity cascade")
+        # Per-window state. `window_references` was added in M8/2.1 and its absence
+        # here was caught immediately and unmistakably: a test in another file
+        # supplied reference totals for the smoke window, and three worker tests
+        # that assert UNVERIFIED started reporting VARIANCE. `windows` is truncated
+        # alongside it because it is the same shape of leak waiting to happen —
+        # both are keyed on (platform, period), and every worker test reuses one
+        # synthetic window name.
+        cur.execute("truncate window_references, windows")
+        # `config_pin_events` (migration 014) is per-window too, and append-only, so
+        # it accumulates across a session that reuses one window name — which is
+        # exactly how the `window_references` leak above was found. Note
+        # `period_config` needs no entry: `config_versions` is truncated with cascade,
+        # which takes its rows with it.
+        cur.execute("truncate config_pin_events")
+        # The normalized config tables (migration 007). Truncated with the rest so
+        # a test that imports a contract cannot leak it into the next one — and so
+        # `render_config()` correctly reports "empty, seed me from the file" for
+        # every test that has not deliberately imported.
+        cur.execute("truncate config_scalars, config_platforms, config_reading, "
+                    "config_column_maps, config_stores, config_store_aliases, "
+                    "config_store_brands, config_tolerances, "
+                    "config_settlement_bounds, config_fee_types, config_vat_sku")
     return M5Repository(pool)
 
 
@@ -242,9 +264,27 @@ def sandbox_settings(service_settings, tmp_path):
 
 
 @pytest.fixture
-def editor_client(repo, store, sandbox_settings, issue_session):
+def seeded_config(repo, sandbox_settings):
+    """The config tables, loaded from the sandboxed contract.
+
+    Since M8/1.6 the tables ARE the editable contract — an editor test against
+    empty tables would be testing the "seed me first" refusal rather than the
+    editor. Seeded from the sandbox copy, not the real `config/`, so the two agree
+    about what the base contract is when a test compares a rendered diff.
+    """
+    from service import config_import
+    with repo._conn() as conn:                                  # noqa: SLF001
+        config_import.import_settings(conn, sandbox_settings.config_dir,
+                                      changed_by="test", source="seed")
+        conn.commit()
+    return repo
+
+
+@pytest.fixture
+def editor_client(repo, store, sandbox_settings, issue_session, seeded_config):
     """Like `make_client`, but pointed at a sandboxed copy of settings.yaml so an
-    applied proposal cannot rewrite the real one."""
+    applied proposal cannot rewrite the real one, and with the config tables
+    seeded from that copy."""
     pytest.importorskip("httpx")
     from fastapi.testclient import TestClient
 

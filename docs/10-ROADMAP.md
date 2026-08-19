@@ -21,11 +21,15 @@ The gate that orders everything: **controls must work before automation hides th
 | **M2.5** | Staging normalizer | Replaces the hand-written monthly script; Lazada schema by sheet content; SHA-256 dedupe catches the double-pull class | ✅ done |
 | **M4** | Service skeleton | FastAPI + worker + Postgres; job queue; streaming run log | ✅ done |
 | **M5** | Web app v1 | Month board · staging · run view · exception queue · config editor | ✅ done |
-| **M6** | Exception queue depth | Dispositions persist across runs on a fingerprint, not a run | |
-| **M7** | Hardening | Runbook, CLI-only path, restore drill | |
+| **M6** | **Browser-only for users** | Passwords + sessions · uploads to object storage under a uniform naming scheme · per-window roster declaration · sectioned config editor · deterministic demo window. **No committed golden digest moved** | ✅ done |
+| **M7** | Hardening | Runbook, CLI-only path, restore drill | not started |
+| **M8** | Production readiness | The register in [14-PRODUCTION-READINESS](14-PRODUCTION-READINESS.md) worked down: config into the database, the month-end master as a deliverable, failure made legible, the UI de-jargoned and translated | in progress — **Phases 1–5 done (2026-08-19)**. Phase 3 landed once July's exports and the master arrived; it tied Lazada exactly and found [defect 2.12](08-KNOWN-DEFECTS.md) on TikTok. **Phase 6 is the only one left** |
+| — | Exception queue depth | Dispositions persist across runs on a fingerprint, not a run. **This was M6's original scope**; the schema is ready and the work is not done | not started |
 | — | Engine port (polars) | **Not scheduled.** Trigger-gated — see below | |
 
 M3 is intentionally unused: the old M3′ became M2, and M4–M7 keep their numbers so existing references stay valid.
+
+> **M6 was re-scoped and this table was not updated.** It read "Exception queue depth" with a blank status until 2026-08-18, while the milestone that shipped was the browser-only cutover. Exception dispositions are still unbuilt, so the row moved rather than being deleted — recorded as [E6](14-PRODUCTION-READINESS.md) and [D1](14-PRODUCTION-READINESS.md).
 
 ## M1 in brief
 
@@ -133,7 +137,7 @@ Three bugs it found in itself while being built, each written up in [12-CHANGE-H
 ### Earlier items, all now closed
 
 1. ~~**Close the Shopee money crossing**~~ — **done 2026-08-13**, once the team's June consolidated file arrived. Their `Net revenue` formula reproduces to **0.000000 VND on all 82,714 rows**, and rearranged it gives a pure order-file-vs-income-file crossing that ties at **0.00 VND on 17.5B across 80,239 May orders**, with refund orders held out as a named class. Seven revenue-loss mutations must BREACH. Full detail in [08-KNOWN-DEFECTS](08-KNOWN-DEFECTS.md#shopees-money-crossing--closed-2026-08-13). **Every platform now has a working money crossing.**
-2. ~~**Broaden golden coverage**~~ — **done 2026-08-13**, once the raw exports arrived. **3 windows → 8**, and one store per platform → **two on each platform's primary window**. Detail and what it bought is in [07-VERIFICATION](07-VERIFICATION.md#current-gate-status). Still `partial_roster: true` on TikTok (2 of 25) and Shopee (2 of 17) — a full roster needs the remaining stores' exports. One Lazada week (`_l5`, settled 05-25..31) could not be staged: **its export is password-protected**.
+2. ~~**Broaden golden coverage**~~ — **done 2026-08-13**, once the raw exports arrived. **3 windows → 8**, and one store per platform → **two on each platform's primary window**. Detail and what it bought is in [07-VERIFICATION](07-VERIFICATION.md#current-gate-status). Still `partial_roster: true` on TikTok (2 of 25) and Shopee (2 of 17) — a full roster needs the remaining stores' exports. One Lazada week (`_l5`, settled 05-25..31) could not be staged: **its export is encrypted by a Microsoft sensitivity label** — recorded as "password-protected" until 2026-08-19, which pointed at a fix (ask for the password) that does not exist.
 3. ~~**The four remaining pinned defects**~~ — **done 2026-08-13.** [1.4](08-KNOWN-DEFECTS.md#14-unmapped-sku-silently-receives-the-default-vat-factor--fixed-m25-2026-08-13) silent VAT default, [1.5](08-KNOWN-DEFECTS.md#15-joins-key-on-order_id-alone--fixed-m25-2026-08-13) `order_id` fan-out ×2, [1.6](08-KNOWN-DEFECTS.md#16-silent-numeric-and-date-coercion--fixed-m25-2026-08-13-numeric-date-part-still-open) silent coercion. See below.
 
 ### Completed 2026-08-13 — the last of the pinned defects
@@ -182,7 +186,9 @@ Class B — one change, delta stated in advance and confirmed exactly:
 
 Selected design decisions carried forward:
 
-The `api`, `db` and `worker` boxes exist as of M4; `web` and `store` do not. `deploy/Dockerfile` and `deploy/docker-compose.yml` describe how the three are meant to be assembled and **have never been built** ([defect 2.2](08-KNOWN-DEFECTS.md#22-deploydockerfile-and-deploydocker-composeyml-have-never-been-built--open)).
+**Every box now exists.** `api`, `db` and `worker` arrived in M4, `web` in M5, `store` in M6. `deploy/Dockerfile` and `deploy/docker-compose.yml` were built and the whole stack brought up and exercised end to end on Docker 29.7.2, 2026-08-17 — defects [2.2](08-KNOWN-DEFECTS.md#22-deploydockerfile-and-deploydocker-composeyml-have-never-been-built--fixed-m5-2026-08-14) and [2.4](08-KNOWN-DEFECTS.md#24-artifacts-are-local-filesystem-only--fixed-m6-2026-08-17) are closed. Sign-in is passwords rather than Entra ID, which remains blocked on a tenant app registration.
+
+> *This paragraph asserted the opposite until 2026-08-18 — that `web` and `store` did not exist and the compose file had never been built. It was stale by two milestones, in the page an operator reads for orientation. Recorded as [E6](14-PRODUCTION-READINESS.md) rather than quietly corrected.*
 
 - **Job queue in Postgres** (`FOR UPDATE SKIP LOCKED`), not Redis/Celery — ~14 jobs a month does not justify a second stateful service, and the jobs table doubles as the audit record finance will ask for. **Built in M4** and verified against a real server ([D29](06-DECISIONS.md#d29)).
 - **Polling before streaming.** Log lines carry a monotonic sequence so `?after_seq=N` serves polling now and server-sent events later with no schema change. Streaming dies silently through corporate proxies and is miserable to debug at month-end. **Built in M4** ([D32](06-DECISIONS.md#d32)).

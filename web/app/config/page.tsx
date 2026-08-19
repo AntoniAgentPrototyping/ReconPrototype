@@ -1,17 +1,20 @@
 import { redirect } from "next/navigation";
 
 import { ProposalActions } from "./proposal-actions";
-import Sections from "./sections";
+import Tables from "./tables";
 import {
   api,
   whoami,
   type ConfigPin,
-  type ConfigSchema,
+  type ConfigTables,
   type ConfigVersion,
   type Proposal,
+  type VerificationCapability,
 } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
+
+export const metadata = { title: "Quy tắc" };
 
 /**
  * The config editor.
@@ -44,10 +47,10 @@ export default async function ConfigPage() {
   if (!me) redirect("/login");
   if (me.must_change_password) redirect("/account/password");
 
-  const [config, schema, proposalsResponse, pinsResponse, versionsResponse] =
+  const [config, editable, proposalsResponse, pinsResponse, versionsResponse] =
     await Promise.all([
       api<{ content: string; sha256: string; git_commit: string | null }>("/config"),
-      api<ConfigSchema>("/config/schema"),
+      api<ConfigTables>("/config/tables"),
       api<{ proposals: Proposal[] }>("/config/proposals"),
       api<{ pins: ConfigPin[] }>("/config/pins"),
       api<{ versions: ConfigVersion[] }>("/config/versions"),
@@ -61,10 +64,10 @@ export default async function ConfigPage() {
     <>
       <h1>Configuration</h1>
       <p className="lede">
-        <span className="mono">config/settings.yaml</span> is the contract the money math
-        runs on. Git stays canonical — this proposes structured edits and commits them
-        with their comments intact. Every field below shows the note from the file that
-        explains its current value.
+        This is the contract the money math runs on — the same rules the worker
+        computes under, not a copy of them. Nothing here changes anything on its own:
+        an edit becomes a proposal, an admin approves it, and applying it is a third,
+        separate act. Every entry below shows the reason it is there.
       </p>
 
       <div className="panel">
@@ -108,11 +111,9 @@ export default async function ConfigPage() {
         </table>
       </div>
 
-      <Sections
-        sections={schema.sections}
-        canonicalFields={schema.canonical_fields}
-        canEdit={me.role !== "recon.viewer"}
-      />
+      <VerificationNotice capability={editable.verification} />
+
+      <Tables tables={editable.tables} canEdit={me.role !== "recon.viewer"} />
 
       <h2>Pending proposals</h2>
       {pending.length === 0 ? (
@@ -204,12 +205,12 @@ export default async function ConfigPage() {
         </>
       )}
 
-      <h2>The file</h2>
+      <h2>The whole contract</h2>
       <div className="panel">
         <p className="small muted" style={{ marginTop: 0 }}>
-          Still shown verbatim, comments included. The form above does not replace
-          this — it extracts each value&apos;s comment block and puts it next to the
-          control that changes it.
+          Still shown in full, reasons included — this is the exact text a run is
+          pinned to. The form above does not replace it; it puts each entry&apos;s
+          reason next to the control that changes it.
         </p>
         <pre className="diff">{config.content}</pre>
       </div>
@@ -228,8 +229,38 @@ function VerificationBadge({ version }: { version: ConfigVersion }) {
   }
   if (state === "cells_moved") return <span className="badge variance">cells moved</span>;
   if (state === "failed") return <span className="badge hard_stop">check failed</span>;
-  if (state === "unavailable") return <span className="badge muted">not verified</span>;
+  // NOT muted. "unavailable" means no claim could be made about whether this change
+  // moved money, which is a warning, not a neutral status — and until A2 it was the
+  // only outcome any container could produce (M8/2.2).
+  if (state === "unavailable") return <span className="badge variance">NOT checked</span>;
   return <span className="badge muted">no check needed</span>;
+}
+
+/**
+ * Said BEFORE an edit, not discovered after it.
+ *
+ * The verdict states have always been honest once a change was applied. The failure
+ * this closes is one of sequence: an operator proposed and applied a change to a
+ * column map believing a golden comparison stood behind it, and only afterwards saw
+ * a muted "not verified" chip. On a container that was guaranteed from the start.
+ */
+function VerificationNotice({ capability }: { capability: VerificationCapability }) {
+  if (capability.can_verify && capability.strong) return null;
+  const heading = capability.can_verify
+    ? "Changes here are checked against a SYNTHETIC window"
+    : "Changes here cannot be checked against a known-good workbook";
+  return (
+    <div className={`panel ${capability.can_verify ? "warn" : "variance"}`}>
+      <strong>{heading}</strong>
+      <p className="small">{capability.detail}</p>
+      <p className="small">
+        Editing is not blocked. Settings marked as affecting the workbook will
+        still be applied and recorded — but nothing here will tell you whether a
+        number moved, so treat those edits the way you would treat a change made
+        directly to a spreadsheet.
+      </p>
+    </div>
+  );
 }
 
 async function ProposalCard({
@@ -257,9 +288,14 @@ async function ProposalCard({
         <ul className="small" style={{ paddingLeft: 18 }}>
           {(full.edits ?? []).map((edit, index) => (
             <li key={index} className="muted">
-              {edit.op.replace(/_/g, " ")} · {edit.path.join(" → ")}
-              {edit.key ? ` → ${edit.key}` : ""}
-              {edit.value !== undefined ? ` = ${JSON.stringify(edit.value)}` : ""}
+              {edit.op === "delete" ? "remove" : "set"}{" "}
+              {Object.values(edit.key ?? {})
+                .filter((v) => v !== null && v !== undefined && v !== "")
+                .map(String)
+                .join(" · ")}
+              {Object.entries(edit.values ?? {}).map(([name, value]) => (
+                <span key={name}> · {name.replace(/_/g, " ")} = {String(value)}</span>
+              ))}
             </li>
           ))}
         </ul>

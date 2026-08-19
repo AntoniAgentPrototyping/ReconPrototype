@@ -35,6 +35,14 @@ IDENTITY_COLUMNS: dict[str, tuple[str, ...]] = {
     "unmapped_fees": ("store", "fee_name"),
     # One row per failing check, so the check name IS the identity.
     "tieout_breaches": ("check",),
+    # One row per store per run: how much of its settled money reached no SKU line
+    # in this window. The store IS the identity, because the question this sheet
+    # answers is month-over-month — "did this storefront's coverage change?" — and
+    # that is the only thing that distinguishes ordinary traffic through the ~21%
+    # door from defect 2.12. A window TOTAL cannot answer it: on the TikTok golden
+    # window the entire 21% is one store, so the total looks the same whether the
+    # cause is legitimate or an order export that does not cover its own window.
+    "order_coverage": ("store",),
 }
 
 # Rows whose identity columns are all missing fall back to hashing the whole

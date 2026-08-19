@@ -31,7 +31,10 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font: 14px/1.5 ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  /* B9: 14px -> 15px, and 1.5 -> 1.55. Vietnamese carries stacked diacritics
+     (ế, ộ, ữ) that are the first thing to disappear at small sizes and tight
+     leading, and the interface renders in Vietnamese by default since Phase 5. */
+  font: 15px/1.55 ui-sans-serif, system-ui, "Segoe UI", sans-serif;
 }
 
 a {
@@ -73,11 +76,11 @@ main {
 }
 
 h1 {
-  font-size: 20px;
+  font-size: 22px;
   margin: 0 0 4px;
 }
 h2 {
-  font-size: 15px;
+  font-size: 17px;
   margin: 28px 0 10px;
 }
 p.lede {
@@ -106,10 +109,13 @@ td {
 }
 th {
   color: var(--muted);
-  font-weight: 500;
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  font-weight: 600;
+  /* B9: 12px -> 13px, and `text-transform: uppercase` dropped. Uppercasing is
+     actively harmful here: Vietnamese column headers carry diacritics that the
+     transform renders on capitals where they are cramped and easy to misread, and
+     the labels were already short enough not to need the visual shorthand. */
+  font-size: 13px;
+  letter-spacing: 0.01em;
 }
 td.num {
   text-align: right;
@@ -120,7 +126,8 @@ td.num {
   display: inline-block;
   padding: 2px 8px;
   border-radius: 999px;
-  font-size: 12px;
+  /* B9: the verdict badges are the most-read words in the product. */
+  font-size: 13px;
   font-weight: 500;
   border: 1px solid currentColor;
 }
@@ -151,8 +158,10 @@ form.row {
 }
 label {
   display: block;
-  font-size: 12px;
-  color: var(--muted);
+  /* B9: a form label at 12px in the muted colour was the least readable text in
+     the app, and it is the text that says what to type. */
+  font-size: 13px;
+  color: var(--text);
   margin-bottom: 4px;
 }
 input,
@@ -241,6 +250,28 @@ pre.diff .del {
 .mono {
   font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
 }
+/* B9: 12px -> 13px. About half this interface used `.small`, which put most of
+   its explanatory text — the part that does the actual explaining — below the size
+   usually treated as a floor for sustained reading. */
 .small {
-  font-size: 12px;
+  font-size: 13px;
+}
+
+/* A2 (M8/2.2): the config page says BEFORE an edit whether this deployment can
+   check one against a known-good workbook. Two weights, borrowing the run-status
+   colours so the page keeps one vocabulary: `warn` when only the synthetic demo
+   window is available, `variance` when nothing here can be checked at all — which
+   is every container, since no image ships tests/goldens/manifest.json. */
+.panel.warn {
+  border-color: var(--unverified);
+  border-left-width: 4px;
+}
+.panel.variance {
+  border-color: var(--variance);
+  border-left-width: 4px;
+}
+.panel.warn > strong,
+.panel.variance > strong {
+  display: block;
+  margin-bottom: 6px;
 }

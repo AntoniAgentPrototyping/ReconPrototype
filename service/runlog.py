@@ -102,12 +102,17 @@ class QueueRunLog(RunLog):
         finally:
             self._kind = previous
 
-    def write(self, path: Path) -> None:
+    def write(self, path: Path, *, write_to: Path | None = None) -> None:
         """`pipeline.write_artifacts` calls this last, so it is the natural
         final flush: after it returns, the database holds every line the file
-        does."""
+        does.
+
+        `write_to` is passed straight through — it is the atomic-write temp path and
+        has nothing to do with the database mirror. The signature has to match
+        `RunLog.write` or the subclass silently stops being substitutable, which is
+        the whole point of subclassing rather than reimplementing (D34)."""
         self.flush()
-        super().write(path)
+        super().write(path, write_to=write_to)
 
     # -- flushing -----------------------------------------------------------
 

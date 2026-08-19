@@ -38,9 +38,9 @@ from pydantic import BaseModel, Field, field_validator
 
 from src.pipeline import EXIT_CODES, RunStatus
 
-from . import (auth, config_edits, config_schema, config_store, materialize, naming,
-               objects as object_lib, passwords, ratelimit, uploads as upload_lib,
-               verification)
+from . import (artifacts, auth, config_rows, config_store, materialize, naming,
+               objects as object_lib, passwords, ratelimit, references,
+               uploads as upload_lib, verification)
 from .artifacts import ArtifactStore
 from .auth import (AuthPolicy, Forbidden, PasswordChangeRequired, Principal, Role,
                    Unauthenticated)
@@ -48,6 +48,7 @@ from .config import ServiceSettings
 from .models import Job, JobState, Run, payload
 from .repository import ActiveJobExists, NotFound, Repository
 from .repository_identity import DuplicateUser, LastAdminProtected
+from .repository_m5 import ProposalConflict
 from .repository_m5 import DuplicateUpload
 
 # One constant, so the four call sites that reject a sign-in cannot drift into
@@ -176,12 +177,30 @@ class RosterDeclarationRequest(BaseModel):
         return _safe_period(v)
 
 
+class ReferencesRequest(BaseModel):
+    """The team's own totals for a window, as named fields (A3).
+
+    Deliberately not a free `refs` blob even though that is the shape the pipeline
+    reads. The keys are a small closed set per platform defined in
+    `service/references.py`, and `references.parse` refuses a name nothing compares
+    against — a figure someone typed in believing it was checked, and which was
+    silently ignored, is worse than no figure at all.
+
+    `supplied_by` is NOT here: it comes from the session, like every other author
+    field in this api.
+    """
+
+    values: dict = Field(default_factory=dict)
+    note: str | None = Field(default=None, max_length=500)
+
+
 class ProposalRequest(BaseModel):
-    """Structured edits, not a document.
+    """Structured row edits, not a document.
 
     Accepting a whole YAML body would make this endpoint a way to replace the
     domain contract wholesale, and no diff review reliably catches a subtle change
-    in a 400-line file. So: named operations on named paths, with a stated reason.
+    in a 400-line file. So: named operations on named rows of named tables, with a
+    stated reason.
 
     **A list since M6, and that is not a convenience.** With one edit per proposal,
     adding a store to the roster and its alias in the same breath was two proposals,
@@ -189,21 +208,14 @@ class ProposalRequest(BaseModel):
     and the audit trail would record nothing. A form that shows a section has to be
     able to submit a section.
 
-    `path` and `value` are still accepted for a single edit, so the twelve existing
-    canary tests keep testing the same thing through the same shape.
+    Since M8/1.6 an edit names a TABLE and a ROW rather than a dotted path into a
+    file. `service/config_rows.py` says why; the short version is that a row can
+    carry its own evidence and its own "this can move a cell" flag, and a comment
+    above a line cannot.
     """
 
-    edits: list[dict] | None = None
-    path: list[str] | None = Field(default=None, max_length=8)
-    value: Any = None
+    edits: list[dict] = Field(min_length=1)
     summary: str = Field(min_length=8, max_length=500)
-
-    def resolved_edits(self) -> list[dict]:
-        if self.edits:
-            return self.edits
-        if self.path:
-            return [{"op": "set", "path": self.path, "value": self.value}]
-        raise ValueError("send either `edits` or a single `path` and `value`")
 
 
 class DecisionRequest(BaseModel):
@@ -220,6 +232,53 @@ class PinRequest(BaseModel):
     @classmethod
     def _check_period(cls, v: str) -> str:
         return _safe_period(v)
+
+
+class UnpinRequest(BaseModel):
+    """A reason, and it is not optional.
+
+    `PinRequest.reason` is nullable because an automatic pin by the worker carries
+    its own generated string. Unpinning is only ever a person's deliberate act, and
+    it is the one that needs explaining: afterwards the window's rules are whatever
+    today's config says, so a re-run may not reproduce the invoice.
+    """
+
+    reason: str = Field(min_length=1, max_length=500)
+
+
+def _verify_artifact(art, actual: str) -> None:
+    """The bytes about to be served ARE the bytes the run wrote.
+
+    The mirror of `materialize.verify_digest`, in the opposite direction. M8/2.5
+    closed the inbound half — an object the pipeline reads is checked against
+    `object_sha256` before anything parses it — and left this one open: the worker
+    records a `sha256` per artifact and nothing ever compared it, so a truncated or
+    replaced workbook would reach a finance user looking authoritative. Same failure
+    shape, same digest already stored, opposite direction of travel (defect 2.4).
+
+    **`502`, not `500`.** The api did its job; the storage layer returned something
+    other than what was recorded. And **no warning tier**: a differing digest has no
+    benign cause, and the artifact in question is the file the team invoices from.
+
+    A NULL or empty recorded digest is REFUSED rather than trusted. Recomputing it
+    now would certify the store against itself and pass even if the bytes had already
+    been replaced — the [D26](../docs/06-DECISIONS.md#d26) argument that
+    `010_object_digest.sql` made for uploads, applied here. The consequence is
+    deliberate and stated: artifacts from runs predating the digest column stop being
+    downloadable, and a re-run regenerates them.
+    """
+    expected = (getattr(art, "bytes_sha256", None) or "").strip().lower()
+    if not expected:
+        raise HTTPException(
+            502, f"{art.name!r} was recorded before artifact digests existed, so "
+                 f"nothing can establish that the stored bytes are the bytes this run "
+                 f"produced. Re-run the window to regenerate it. (Hashing the file "
+                 f"now would only prove the store agrees with itself.)")
+    if actual.lower() != expected:
+        raise HTTPException(
+            502, f"{art.name!r} does NOT match what this run wrote: recorded "
+                 f"{expected[:12]}…, found {actual[:12]}… in the artifact store. The "
+                 f"file is not what was produced, so it must not be invoiced from.")
 
 
 # ---------------------------------------------------------------------------
@@ -629,10 +688,19 @@ def create_app(repo: Repository, store: ArtifactStore, *,
     @app.get("/board")
     def board(month: str | None = Query(default=None, max_length=16),
               principal: Principal = viewer) -> dict:
-        """One row per settlement window — its latest job, run and verdict."""
+        """One row per settlement window — its latest job, run and verdict.
+
+        The month-end master is a job like any other and comes back from the same
+        query, but it is not a window and must not be rendered as one: its
+        `platform` is 'all' and its `period` is the month. Split here rather than
+        in the browser, so every client gets the same answer.
+        """
         if month is not None:
             _safe_period(month)
-        return {"month": month, "windows": repo.board(month)}
+        rows = repo.board(month)
+        windows = [r for r in rows if (r.get("kind") or "window") == "window"]
+        masters = [r for r in rows if (r.get("kind") or "window") == "month_master"]
+        return {"month": month, "windows": windows, "month_masters": masters}
 
     # -- jobs ---------------------------------------------------------------
 
@@ -673,6 +741,42 @@ def create_app(repo: Repository, store: ArtifactStore, *,
             return _job_payload(repo, repo.cancel_job(job_id))
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/jobs/reclaim")
+    def reclaim_jobs(principal: Principal = admin) -> dict:
+        """Close out jobs whose worker died (**C1**).
+
+        The sweep runs at the top of every worker loop turn already. The hole it
+        cannot cover is the one that matters: when the worker that died is the only
+        worker, nothing sweeps, the job sits `leased` forever and the board shows it
+        as running. This is the same call, reachable without a worker.
+
+        **Admin, not user.** It closes out someone else's in-flight work, and if a
+        lease has expired while the worker is in fact alive but slow, this ends a
+        run that was going to finish. `service/admin.py job list` shows the leases
+        first for exactly that reason.
+
+        Requeues only while attempts remain, which with the default
+        `max_attempts=1` means never: an automatic retry of a settlement run is a
+        second write of the same money ([D30](../docs/06-DECISIONS.md#d30)).
+        """
+        result = repo.reclaim_expired()
+        requeued = result.get("requeued", [])
+        # The repository calls these `dead`. Renamed once, here, on the way out:
+        # "dead" is the queue's word for the row and "failed" is what the person
+        # reading the button's answer is asking about. Getting this key wrong is a
+        # silent no-op — the call succeeds and reports nothing — which is exactly
+        # what happened on the first write of this endpoint.
+        failed = result.get("dead", [])
+        return {
+            "requeued": requeued, "failed": failed,
+            "message": (
+                "Nothing to reclaim — every lease is still live."
+                if not requeued and not failed else
+                f"Reclaimed {len(requeued) + len(failed)} job(s): "
+                f"{len(requeued)} requeued, {len(failed)} marked failed. Their runs "
+                f"are closed, so the board no longer shows them running."),
+        }
 
     # -- runs ---------------------------------------------------------------
 
@@ -718,7 +822,12 @@ def create_app(repo: Repository, store: ArtifactStore, *,
         art = repo.artifact(run_id, name)
         local = store.open(art.uri)
         if local is not None:
+            _verify_artifact(art, artifacts.sha256_of(local))
             return FileResponse(local, filename=art.name)
+
+        probe = store.stream(art.uri)
+        if probe is not None:
+            _verify_artifact(art, artifacts.sha256_of_chunks(probe))
 
         chunks = store.stream(art.uri)
         if chunks is None:
@@ -887,6 +996,13 @@ def create_app(repo: Repository, store: ArtifactStore, *,
                      f"(check_stores), so it is refused here instead: propose "
                      f"adding it to expected_stores.{platform}, or add an alias if "
                      f"it is an existing store under a new spelling.")
+        # No roster means nothing checked this storefront — not that it is known
+        # to be right. `check_stores` self-skips on an empty roster too, so a run
+        # will not catch it either, and Lazada has no roster at all
+        # (docs/14-PRODUCTION-READINESS.md A6). Reported rather than refused: a
+        # 422 here would make every Lazada upload impossible, and reported rather
+        # than silent because "accepted" and "unchecked" must not look the same.
+        roster_checked = bool(expected)
 
         # The uniform name cannot be computed yet — its ordinal is a property of
         # the whole window and is assigned per run (service/naming.py). The key is
@@ -902,13 +1018,18 @@ def create_app(repo: Repository, store: ArtifactStore, *,
         try:
             result = upload_lib.sanitize(incoming, sanitized_path, settings=domain,
                                          platform=platform, kind=kind)
-            ref = uploads_objects.put(key, sanitized_path.read_bytes())
+            sanitized_bytes = sanitized_path.read_bytes()
+            ref = uploads_objects.put(key, sanitized_bytes)
             record = repo.record_upload(
                 filename=filename, sha256=digest, bytes_=len(raw),
                 uploaded_by=principal.subject, platform=platform, period=period,
                 kind=kind, pii_columns_dropped=result.dropped_columns,
                 sanitized=True, uri=ref.uri, object_key=key, state="stored",
-                store=declared, store_canonical=canonical)
+                store=declared, store_canonical=canonical,
+                # The digest of what went INTO the store, not of what arrived. The
+                # run reads this file, so this is the value worth checking
+                # (010_object_digest.sql).
+                object_sha256=object_lib.digest_of(sanitized_bytes))
         except DuplicateUpload as exc:
             return JSONResponse(
                 {"detail": str(exc), "existing": payload(exc.existing)}, status_code=409)
@@ -925,6 +1046,13 @@ def create_app(repo: Repository, store: ArtifactStore, *,
                 "sheets_read": result.sheets_read,
                 "store_derived_from_filename": derived,
                 "store_corrected": declared != derived,
+                "roster_checked": roster_checked,
+                "roster_note": (
+                    "" if roster_checked else
+                    f"No storefront roster is configured for {platform}, so nothing "
+                    f"verified that {canonical!r} is a real storefront — and the run "
+                    f"will not check it either. Until a roster exists, a typo here "
+                    f"invoices under a storefront nobody expects."),
                 # Greyed in the UI: the real ordinal is decided at run time.
                 "uniform_name_preview": naming.preview_name(platform, kind, canonical)}
 
@@ -1061,8 +1189,22 @@ def create_app(repo: Repository, store: ArtifactStore, *,
             raise HTTPException(422, f"unknown platform {platform!r}")
         _safe_period(period)
         declaration = repo.window_declaration(platform, period)
+        record = (repo.window_references(platform, period)
+                  if hasattr(repo, "window_references") else None)
+        refs = (record or {}).get("refs") or {}
         return {"platform": platform, "period": period,
-                "roster_declaration": payload(declaration) if declaration else None}
+                "roster_declaration": payload(declaration) if declaration else None,
+                # A3: the team's own totals, and the fields that exist to hold them.
+                # The spec is served rather than duplicated in TypeScript, so a key
+                # the pipeline stopped reading cannot leave a form field collecting a
+                # number nothing compares (service/references.py).
+                "reference_fields": references.payload_for(platform),
+                "references": payload(record) if record else None,
+                # Both languages, because the api has no notion of who is reading and
+                # a `?lang=` parameter would put a display concern in the wire format.
+                # The BFF picks (M8/5.3).
+                "references_summary": references.summarise(platform, refs),
+                "references_summary_vi": references.summarise(platform, refs, "vi")}
 
     @app.post("/windows/roster", status_code=201)
     def declare_roster(req: RosterDeclarationRequest,
@@ -1099,52 +1241,125 @@ def create_app(repo: Repository, store: ArtifactStore, *,
             raise HTTPException(404, f"{platform} {period} has no roster declaration")
         return {"platform": platform, "period": period, "roster_declaration": None}
 
+    @app.put("/windows/{platform}/{period}/references")
+    def set_references(platform: str, period: str, req: ReferencesRequest,
+                       principal: Principal = user) -> dict:
+        """Record the team's own totals for this window.
+
+        **What this buys.** A run with no references exits UNVERIFIED — it ran clean
+        and nothing corroborated it. Since M6 that has been every browser-driven run,
+        because the api accepted `refs` on a job and no screen ever sent any. This is
+        the screen.
+
+        Stored against the WINDOW, so a re-run compares against the same figures the
+        first run did. `supplied_by` comes from the session, never the body.
+
+        Nothing is recomputed and nothing is coerced to zero: a blank field means the
+        team did not give us that number, and `_tie_grand` skips a key it does not
+        find. A zero would compare the window against 0 VND and report all of it as a
+        variance.
+        """
+        if platform not in PLATFORMS:
+            raise HTTPException(422, f"unknown platform {platform!r}")
+        _safe_period(period)
+        if not hasattr(repo, "set_window_references"):
+            raise HTTPException(501, "this deployment cannot record reference totals")
+        try:
+            refs = references.parse(platform, req.values)
+        except references.ReferenceError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        record = repo.set_window_references(
+            platform, period, refs=refs, supplied_by=principal.subject,
+            note=(req.note or "").strip() or None)
+        return {"platform": platform, "period": period,
+                "references": payload(record),
+                "references_summary": references.summarise(platform, refs),
+                "references_summary_vi": references.summarise(platform, refs, "vi")}
+
+    @app.delete("/windows/{platform}/{period}/references")
+    def clear_references(platform: str, period: str,
+                         principal: Principal = user) -> dict:
+        """Withdraw the figures, so runs of this window report UNVERIFIED again."""
+        if platform not in PLATFORMS:
+            raise HTTPException(422, f"unknown platform {platform!r}")
+        _safe_period(period)
+        if not repo.clear_window_references(platform, period):
+            raise HTTPException(404, f"{platform} {period} has no reference totals")
+        return {"platform": platform, "period": period, "references": None,
+                "references_summary": references.summarise(platform, {}),
+                "references_summary_vi": references.summarise(platform, {}, "vi")}
+
     # -- config -------------------------------------------------------------
+
+    def _current_contract() -> str:
+        """The contract as it stands, rendered from the config tables.
+
+        Every config route reads through here rather than off this process's
+        filesystem. That is the A1 fix restated at the editor: the api and the
+        worker are separate containers with their own baked copies of `config/`,
+        so a route that diffed against its own disk copy would show an operator a
+        change against a file the worker never reads.
+        """
+        rendered = repo.render_config() if hasattr(repo, "render_config") else None
+        if rendered is not None:
+            return rendered
+        if settings is None:
+            raise HTTPException(501, "this deployment has no config directory")
+        # Empty tables: a deployment that has never been seeded. Falling back to
+        # the file keeps the page readable, and `POST /config/proposals` refuses
+        # rather than editing something that is not the source of truth.
+        return config_store.read_text(settings.config_dir)
 
     @app.get("/config")
     def get_config(principal: Principal = viewer) -> dict:
-        """The live `settings.yaml`, verbatim — comments and all.
+        """The contract as a whole file, verbatim — comments and all.
 
-        Still verbatim, and still returned in full: the comments ARE the audit trail
-        (docs/06-DECISIONS.md#d2) and the page shows the whole file underneath the
-        form. What changed in M6 is that showing ONLY the file is no longer the
-        answer — see GET /config/schema.
+        Still verbatim and still returned in full: it is what a run is pinned to,
+        and the page shows it underneath the form. Since M8 it is RENDERED from the
+        config tables rather than read off disk, which is what makes it the same
+        bytes the worker will compute under.
         """
-        if settings is None:
-            raise HTTPException(501, "this deployment has no config directory")
-        content = config_store.read_text(settings.config_dir)
+        content = _current_contract()
         return {"content": content,
                 "sha256": repo.content_digest(content),
-                "git_commit": config_store.git_commit_of(settings.config_dir)}
+                "git_commit": (config_store.git_commit_of(settings.config_dir)
+                               if settings is not None else None)}
 
-    @app.get("/config/schema")
-    def get_config_schema(principal: Principal = viewer) -> dict:
-        """The file as editable sections, each field carrying its own evidence.
+    @app.get("/config/tables")
+    def get_config_tables(principal: Principal = viewer) -> dict:
+        """The contract as editable tables, each ROW carrying its own evidence.
 
         **This is the answer to the objection the old config page raised against
         itself** — "a form would show values stripped of the evidence for them".
-        Correct, and so evidence is EXTRACTED rather than dropped: every field
-        carries the comment block from the same bytes the form edits, so the
-        four-line VAT block renders directly above the box you type `1.10` into.
-        That is strictly more evidence at the point of decision than a `<pre>` in
-        which the same comment sits 400 lines down and nobody scrolls.
+        Correct, and so evidence is a column: one alias's justification travels with
+        that alias and is deleted with it, where a comment block above a line could
+        only ever caption the top-level key and would be left describing its
+        neighbour when the entry it documented was removed.
 
-        No dotted path is ever rendered — it exists only in the wire format — and
-        `widget` tells the UI which purpose-built control to draw, because a bare
-        text input is the wrong affordance for two thirds of this file.
+        No table name, column name or dotted path is ever rendered — those exist in
+        the wire format because the API has to name what is changing. `kind` tells
+        the UI which purpose-built control to draw, because a bare text input is the
+        wrong affordance for two thirds of this contract.
         """
-        if settings is None:
-            raise HTTPException(501, "this deployment has no config directory")
-        content = config_store.read_text(settings.config_dir)
-        parsed = config_store.parse(content)
+        if not hasattr(repo, "config_tables_payload"):
+            raise HTTPException(501, "this deployment has no configuration tables")
+        content = _current_contract()
         return {
-            "sections": config_schema.payload(parsed, content),
+            "tables": repo.config_tables_payload(),
             "sha256": repo.content_digest(content),
-            # The closed set of names a column map may target. The single biggest
-            # usability win here: mapping a drifted header stops requiring anyone to
-            # know the pipeline's internal vocabulary.
-            "canonical_fields": config_schema.canonical_fields(parsed),
-            "operations": list(config_edits.OPS),
+            "operations": list(config_rows.OPS),
+            # A2: whether this deployment can verify a goldens-affecting change at
+            # all, answered BEFORE anyone makes one. In a container the answer is
+            # always no — no image ships tests/goldens/manifest.json — and the editor
+            # used to present the gate as working right up until it silently could
+            # not run. Told here rather than discovered afterwards.
+            "verification": (
+                verification.capability(repo, _repo_root(settings))
+                if settings is not None else
+                {"can_verify": False, "reason": "no_digests",
+                 "detail": "This deployment has no config directory, so no canary "
+                           "window can be run and no config change can be checked "
+                           "against a known-good workbook."}),
         }
 
     @app.post("/config/preview")
@@ -1153,26 +1368,29 @@ def create_app(repo: Repository, store: ArtifactStore, *,
         """The diff a set of edits would produce, committing nothing.
 
         Exists because the whole justification for a form over a text box is that
-        the operator sees the change in the file's own terms before proposing it.
-        Same code path as `POST /config/proposals` up to the point of insertion, so
-        the preview cannot differ from what would be proposed.
+        the operator sees the change in the contract's own terms before proposing
+        it. It is produced by APPLYING the edits and rolling back, so the preview
+        cannot differ from what would be proposed — a simulation would be a second
+        implementation of the write, free to disagree with the real one.
         """
-        if settings is None:
-            raise HTTPException(501, "this deployment has no config directory")
-        before = config_store.read_text(settings.config_dir)
-        try:
-            edits = config_edits.parse_all(req.resolved_edits())
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
-        after = config_edits.apply_edits(before, edits)
-        parsed = config_store.parse(before)
+        edits = config_rows.parse_all(req.edits)
+        before = _rendered_or_refuse()
+        after = repo.render_config_after(edits)
         return {
             "diff": config_store.diff(before, after),
             "changed": after != before,
-            "summary": config_edits.summarise(edits),
-            "invalidates_goldens": config_schema.invalidates_goldens(
-                parsed, config_edits.paths_touched(edits)),
+            "summary": config_rows.summarise(edits),
+            "invalidates_goldens": repo.config_invalidating(edits),
         }
+
+    def _rendered_or_refuse() -> str:
+        rendered = repo.render_config() if hasattr(repo, "render_config") else None
+        if rendered is None:
+            raise HTTPException(
+                503, "the configuration tables are empty, so there is nothing to "
+                     "edit yet. Seed them from the committed contract first: "
+                     "`python -m service.config_import`.")
+        return rendered
 
     @app.get("/config/versions")
     def config_versions(principal: Principal = viewer) -> dict:
@@ -1184,12 +1402,19 @@ def create_app(repo: Repository, store: ArtifactStore, *,
 
     @app.get("/config/pins")
     def config_pins(principal: Principal = viewer) -> dict:
-        """Which windows are frozen to which config.
+        """Which windows are frozen to which config, and the pin/unpin history.
 
         A pinned window re-runs under the rules it originally ran under, so an
         August rate change cannot alter a re-run of May.
+
+        `events` is the append-only history and is deliberately part of the same
+        response rather than a second endpoint: an unpinned window has no `pins` row
+        at all, so a caller reading only current state cannot tell "never pinned"
+        from "pinned and released" — which is exactly the question the history exists
+        to answer (migration `014`).
         """
-        return {"pins": [payload(p) for p in repo.list_pins()]}
+        return {"pins": [payload(p) for p in repo.list_pins()],
+                "events": [payload(e) for e in repo.pin_events()]}
 
     @app.post("/config/pins", status_code=201)
     def pin_config(req: PinRequest, principal: Principal = admin) -> dict:
@@ -1199,13 +1424,19 @@ def create_app(repo: Repository, store: ArtifactStore, *,
             pinned_by=principal.subject, reason=req.reason))
 
     @app.delete("/config/pins/{platform}/{period}")
-    def unpin_config(platform: str, period: str, principal: Principal = admin) -> dict:
+    def unpin_config(platform: str, period: str, req: UnpinRequest,
+                     principal: Principal = admin) -> dict:
         """Unpin, so the next run reads today's config again.
 
         Rare and deliberate: the next re-run of this window may then produce
-        different numbers than the run it was invoiced from.
+        different numbers than the run it was invoiced from. **A reason is required**
+        — this was a bare delete until 2026-08-19, which left no record that the
+        window had ever been pinned (defect 2.5). The reason and the released version
+        go to `config_pin_events`, and the actor comes from the session, never the
+        body.
         """
-        if not repo.unpin_period_config(platform, period):
+        if not repo.unpin_period_config(platform, period,
+                                        actor=principal.subject, reason=req.reason):
             raise HTTPException(404, f"{platform} {period} is not pinned")
         return {"platform": platform, "period": period, "pinned": False}
 
@@ -1219,27 +1450,23 @@ def create_app(repo: Repository, store: ArtifactStore, *,
         than a configurable placeholder: open question 13 is answered
         (docs/11-OPEN-QUESTIONS.md), which closes defect 2.7.
 
-        The edits themselves are stored, not just the resulting file. That is what
-        lets a proposal made against a file which has since moved be REBASED —
-        replayed against current bytes — instead of retyped from memory.
+        The edits themselves are stored, not just the resulting contract. That is
+        what lets a proposal made against a contract which has since moved be
+        REBASED — replayed against the current rows — instead of retyped from
+        memory.
         """
-        if settings is None:
-            raise HTTPException(501, "this deployment has no config directory")
-
-        before = config_store.read_text(settings.config_dir)
-        try:
-            edits = config_edits.parse_all(req.resolved_edits())
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
-        after = config_edits.apply_edits(before, edits)
+        edits = config_rows.parse_all(req.edits)
+        before = _rendered_or_refuse()
+        after = repo.render_config_after(edits)
         if after == before:
             raise HTTPException(
                 422, "that change is already the current value, so there is nothing "
                      "to propose")
         return payload(repo.create_proposal(
-            base_sha256=repo.content_digest(before), content=after, summary=req.summary,
-            diff=config_store.diff(before, after), proposed_by=principal.subject,
-            edits=[e.__dict__ | {"path": list(e.path)} for e in edits]))
+            base_sha256=repo.content_digest(before), content=after,
+            summary=req.summary, diff=config_store.diff(before, after),
+            proposed_by=principal.subject,
+            edits=[e.as_json() for e in edits], edit_model="row"))
 
     @app.get("/config/proposals")
     def list_proposals(state: str | None = None, principal: Principal = viewer) -> dict:
@@ -1275,32 +1502,69 @@ def create_app(repo: Repository, store: ArtifactStore, *,
 
     @app.post("/config/proposals/{proposal_id}/apply")
     def apply_proposal(proposal_id: int, principal: Principal = admin) -> dict:
-        """Write an approved change to disk and commit it.
+        """Write an approved change into the config tables.
 
-        Refuses if the file moved since the proposal was made. A three-way merge
-        of a file whose comments are evidence would produce something nobody
-        wrote and everybody would later have to defend.
+        Refuses if the contract moved since the proposal was made. A three-way
+        merge of a contract whose evidence is part of it would produce something
+        nobody wrote and everybody would later have to defend.
+
+        The rows are the source of truth, so this applies the recorded EDITS rather
+        than the recorded text: replaying the intent against the rows is what makes
+        the tables and the rendered contract the same thing. The rendered result is
+        checked against the text the proposal was reviewed as — a difference there
+        means the rows moved in a way the concurrency check did not catch, and it
+        stops rather than applying something nobody read.
         """
-        if settings is None:
-            raise HTTPException(501, "this deployment has no config directory")
         proposal = repo.proposal(proposal_id)
+        if proposal.get("edit_model") != "row":
+            raise HTTPException(
+                422, f"proposal {proposal_id} was made by an earlier editor that "
+                     f"changed the settings file directly. The contract now lives "
+                     f"in the configuration tables, so this cannot be applied — "
+                     f"make the change again.")
+        edits = config_rows.parse_all(list(proposal["edits"] or []))
 
-        current = config_store.read_text(settings.config_dir)
+        current = _rendered_or_refuse()
         if repo.content_digest(current) != proposal["base_sha256"]:
             raise HTTPException(
-                409, "settings.yaml has changed since this proposal was made. Withdraw "
-                     "it and propose the change again against the current file — this "
-                     "will not merge a file whose comments are evidence.")
+                409, "the configuration has changed since this proposal was made. "
+                     "Withdraw it and propose the change again against the current "
+                     "contract — this will not merge a change nobody reviewed.")
 
-        commit = config_store.write_and_commit(
-            settings.config_dir, proposal["content"],
-            message=f"config: {proposal['summary']}\n\n"
-                    f"Proposed by {proposal['proposed_by']}, approved by {principal.subject}.\n"
-                    f"Applied through the recon config editor (proposal {proposal_id}).",
-            author=principal.subject)
+        # Measured BEFORE the write: a delete removes the row that carries the
+        # flag, and re-reading afterwards would fall back to the table's default
+        # for exactly the edit whose answer was most specific.
+        invalidating = repo.config_invalidating(edits)
+
+        # `expect` makes the write conditional on producing the text that was
+        # reviewed. Checking afterwards would report a conflict for a change that
+        # had already landed — the one message that must never be wrong.
+        try:
+            content = repo.apply_config_rows(
+                edits, who=principal.subject, expect=proposal["content"])
+        except ProposalConflict as exc:                             # pragma: no cover
+            raise HTTPException(409, str(exc)) from exc
+
+        # Still written to disk and committed where a git checkout exists. That is
+        # not how the change reaches the worker any more — the tables are — but it
+        # is what keeps `config/settings.yaml` a usable seed and keeps the CLI and
+        # the golden gate runnable with the service switched off (D24). In a
+        # container there is no `.git` and this quietly writes only the file; the
+        # database row is the audit record that matters (C11 decides the rest).
+        commit = None
+        if settings is not None:
+            commit = config_store.write_and_commit(
+                settings.config_dir, content,
+                message=f"config: {proposal['summary']}\n\n"
+                        f"Proposed by {proposal['proposed_by']}, approved by "
+                        f"{principal.subject}.\n"
+                        f"Applied through the recon config editor "
+                        f"(proposal {proposal_id}).",
+                author=principal.subject)
         version = repo.record_config_version(
-            proposal["content"], source="proposal", git_commit=commit,
+            content, source="rendered", git_commit=commit,
             created_by=principal.subject)
+
         try:
             applied = repo.mark_proposal_applied(proposal_id, version["id"])
         except ValueError as exc:
@@ -1312,19 +1576,20 @@ def create_app(repo: Repository, store: ArtifactStore, *,
         # the change has already landed, and this reports what it did.
         verdict = verification.Verdict(state=verification.State.NOT_APPLICABLE)
         try:
+            if settings is None:
+                raise RuntimeError("this deployment has no config directory, so no "
+                                   "canary window can be run")
             verdict = verification.verify(
-                repo, settings, settings_text=proposal["content"],
-                # An M5 proposal records no edits. Treating that as "touches
-                # nothing" would be the oracle_rev failure again — an unknown
-                # counting as safe — so it is treated as touching everything.
-                touched_paths=[list(e.get("path") or ())
-                               for e in (proposal.get("edits") or [])]
-                              or [["<unknown: pre-M6 proposal>"]],
+                repo, settings, settings_text=content,
+                # Read off the rows, not inferred from a path. An empty list means
+                # every row touched DECLARES that it cannot move a cell — a claim
+                # the row makes, which is the point of migration 008.
+                invalidating=invalidating,
                 root=_repo_root(settings))
             repo.record_config_verification(version["id"], verdict)
         except Exception as exc:                                    # noqa: BLE001
-            # A verification failure must never undo an applied change. The config
-            # is on disk and in git by now; claiming success is the one unacceptable
+            # A verification failure must never undo an applied change. The change
+            # is in the tables by now; claiming success is the one unacceptable
             # outcome, so the failure is RECORDED and returned.
             verdict = verification.Verdict(
                 state=verification.State.FAILED,
@@ -1347,36 +1612,40 @@ def create_app(repo: Repository, store: ArtifactStore, *,
         """Replay a stale proposal's edits against the current file.
 
         **Not a merge.** [D38](docs/06-DECISIONS.md#d38) refuses a three-way merge of
-        a file whose comments are evidence, and it is right: a merge produces
+        a contract whose evidence is part of it, and it is right: a merge produces
         something nobody wrote and everybody would later have to defend. This re-runs
         the stated INTENT and produces a fresh diff for a fresh review — which is
         only possible because `config_proposals.edits` records what was asked for
-        rather than only what the file became.
+        rather than only what the contract became.
         """
-        if settings is None:
-            raise HTTPException(501, "this deployment has no config directory")
         stale = repo.proposal(proposal_id)
         if not stale.get("edits"):
             raise HTTPException(
-                422, f"proposal {proposal_id} was created before M6 and records only "
-                     f"its resulting file, not the edits that produced it. There is "
-                     f"nothing to replay — propose the change again.")
+                422, f"proposal {proposal_id} records only its resulting file, not "
+                     f"the edits that produced it. There is nothing to replay — "
+                     f"propose the change again.")
+        if stale.get("edit_model") != "row":
+            raise HTTPException(
+                422, f"proposal {proposal_id} was made by an earlier editor that "
+                     f"changed the settings file directly. Its operations do not "
+                     f"mean anything against the configuration tables, so it cannot "
+                     f"be replayed — make the change again.")
         if (stale["proposed_by"] != principal.subject
                 and not principal.can(Role.ADMIN)):
             raise Forbidden(f"proposal {proposal_id} belongs to {stale['proposed_by']}")
 
-        before = config_store.read_text(settings.config_dir)
-        edits = config_edits.parse_all(list(stale["edits"]))
-        after = config_edits.apply_edits(before, edits)
+        edits = config_rows.parse_all(list(stale["edits"]))
+        before = _rendered_or_refuse()
+        after = repo.render_config_after(edits)
         if after == before:
             raise HTTPException(
-                422, "replaying those edits against the current file changes "
+                422, "replaying those edits against the current contract changes "
                      "nothing — the change has already been made another way.")
         created = repo.create_proposal(
             base_sha256=repo.content_digest(before), content=after,
             summary=f"{stale['summary']} (rebased from proposal {proposal_id})",
             diff=config_store.diff(before, after), proposed_by=principal.subject,
-            edits=list(stale["edits"]), rebased_from=proposal_id)
+            edits=list(stale["edits"]), rebased_from=proposal_id, edit_model="row")
         return payload(created)
 
     @app.post("/config/proposals/{proposal_id}/withdraw")
@@ -1399,6 +1668,31 @@ def create_app(repo: Repository, store: ArtifactStore, *,
             raise HTTPException(409, str(exc)) from exc
 
     return app
+
+
+def seed_config_tables(repo, settings: ServiceSettings) -> int:
+    """Seed the config tables from `config/settings.yaml`, if they are empty.
+
+    A deployment's first boot. Since 1.6 the tables ARE the editable contract, so a
+    deployment that has never run `python -m service.config_import` would have an
+    editor with nothing in it — and `resolve_for_window` would go on falling back to
+    each container's own baked copy of `config/`, which is defect A1 exactly.
+    Seeding here makes the committed file do what it says it does: be the seed.
+
+    Only ever runs against empty tables. It is not a re-import and it never
+    overwrites edited rows — the file in the image is older than any edit made
+    through the browser, and losing an applied change on a restart is the failure
+    this whole phase exists to remove.
+    """
+    from . import config_import
+
+    if not hasattr(repo, "render_config") or repo.render_config() is not None:
+        return 0
+    with repo._conn() as conn:                                      # noqa: SLF001
+        counts = config_import.import_settings(
+            conn, settings.config_dir, changed_by="seed", source="seed")
+        conn.commit()
+    return sum(counts.values())
 
 
 def _repo_root(settings: ServiceSettings) -> Path:
@@ -1437,11 +1731,16 @@ def build_app() -> FastAPI:
     pool = db.make_pool(settings.database_url)
     with pool.connection() as conn:
         db.migrate(conn)
+    repo = M5Repository(pool)
+    # First boot: the committed contract becomes rows, because since M8/1.6 the
+    # rows are what is edited and what an unpinned run renders from. A no-op on
+    # every boot after the first.
+    seed_config_tables(repo, settings)
     # `build_artifact_store`, not a literal choice here: the worker calls the same
     # function, so the two cannot end up writing and reading different stores —
     # which is exactly the failure the shared-volume assumption produced.
-    return create_app(M5Repository(pool), build_artifact_store(settings),
-                      settings=settings, policy=AuthPolicy(enabled=settings.auth_enabled))
+    return create_app(repo, build_artifact_store(settings), settings=settings,
+                      policy=AuthPolicy(enabled=settings.auth_enabled))
 
 
 def main(argv: list[str] | None = None) -> int:

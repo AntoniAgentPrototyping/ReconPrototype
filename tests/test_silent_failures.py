@@ -24,7 +24,7 @@ import pytest
 pytest.importorskip("pandas", reason="pandas is a hard dependency; guard is vestigial")
 
 import pandas as pd  # noqa: E402
-from src import calculate, ingest, masters, stitch  # noqa: E402
+from src import calculate, ingest, masters, stitch, tieout  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -194,6 +194,168 @@ def test_shared_order_id_does_not_borrow_another_stores_date(log):
         f"Store B's income was dated {store_b['order_created_at'].date()}, "
         f"which is Store A's order date"
     )
+
+
+# The same collision, one layer further on: the JOINS key on (store, order_id),
+# but the TIE-OUT's coverage reference does not. Carried from M2.5 as a named
+# residual and registered as defect 2.9. Pinned 2026-08-19.
+#
+# Why it matters more on Shopee than the wording suggests: `SHOPEE_MONEY` is
+# None, so the per-order and per-store conservation checks never run there.
+# Order coverage is Shopee's ONLY order-population control, and this is the
+# defect in it.
+
+def _tiktok_checks(sku, income, settings, log):
+    """The production call sequence, so the pin exercises what runs."""
+    reference, unmatched_money, unmatched_orders = tieout.partition(
+        income, money_col="subtotal_after_seller_discounts",
+        present_keys=tieout.pairs(sku))
+    return tieout.run_checks_tiktok(
+        sku, reference, settings, log,
+        money_col="subtotal_after_seller_discounts",
+        unmatched_money=unmatched_money, unmatched_orders=unmatched_orders)
+
+
+def _collision_masking_a_missing_order():
+    """Store A settles two orders; only one of them has SKU lines.
+
+    The missing one shares its id with an order Store B *does* have lines for.
+    Store A survives store coverage (its other order is present), so nothing
+    backstops the order-coverage check — which is the point of the fixture.
+    """
+    income = pd.DataFrame({
+        "store": ["Store A", "Store A", "Store B"],
+        "order_id": ["A-ONLY-1", "SHARED-001", "SHARED-001"],
+        "subtotal_after_seller_discounts": [100_000.0, 250_000.0, 400_000.0],
+    })
+    orders = pd.DataFrame({                     # NOTE: no Store A / SHARED-001 row
+        "store": ["Store A", "Store B"],
+        "order_id": ["A-ONLY-1", "SHARED-001"],
+        "sku_id": ["SKU-A", "SKU-B"],
+        "sku_name": ["product A", "product B"],
+        "unit_price_gross": [100_000.0, 400_000.0],
+        "quantity": [1, 1],
+        "sku_seller_discount": [0.0, 0.0],
+        "order_created_at": pd.to_datetime(["2026-05-01", "2026-05-02"]),
+    })
+    return income, orders
+
+
+def test_order_coverage_notices_a_settled_order_with_no_lines_of_its_own(settings, log):
+    """`Store A / SHARED-001` is in the reference and reaches no SKU line.
+
+    Check 1 guards the span *after* the reference is captured — rows lost between
+    capture and the checks — so the reference here is built from the full income
+    frame rather than through `partition`, which by construction only ever
+    references orders it already matched. (That `partition` builds its reference
+    from the matched subset, so the ~21% door cannot alarm, is a *different*
+    defect: 2.12.)
+
+    Keyed on `order_id` alone this passed: Store B's row carries the same
+    `SHARED-001`, so the id counted as present. The discriminator below asserts
+    that directly, which is stronger than an xfail marker — it keeps the proof
+    that the old keying was blind, permanently, in the test itself.
+
+    **An accidental backstop exists and does not make this safe.** TikTok's
+    `rebuilt total == referenced total` row also breaches here, and Shopee's
+    crossing was composite from the start. But a total variance names no order and
+    no store, which is exactly what this check is for — and on Shopee
+    `SHOPEE_MONEY` is None, so conservation never runs at all and order coverage
+    is the only order-population control there is.
+    """
+    income, orders = _collision_masking_a_missing_order()
+    sku = calculate.explode_to_sku_tiktok(income, orders, log)
+    sku = sku.assign(amount_with_vat=sku["subtotal_after_seller_discounts"])
+    reference = tieout.SourceReference.from_income(
+        income, money_col="subtotal_after_seller_discounts")
+
+    results = tieout.run_checks_tiktok(
+        sku, reference, settings, log, money_col="subtotal_after_seller_discounts")
+    store_coverage = results[results["check"].str.startswith("Store coverage")]
+    order_coverage = results[results["check"].str.startswith("Order coverage")]
+
+    # Guard: the fixture must not let store coverage do this check's work.
+    assert (store_coverage["result"] == "PASS").all(), (
+        "fixture error: store coverage fired, so this would pass for the wrong reason")
+
+    assert (order_coverage["result"] == "BREACH").any(), (
+        "250,000 VND settled under an order with no SKU lines of its own, and "
+        f"order coverage passed: {order_coverage[['check', 'detail']].to_dict('records')}"
+    )
+    assert "Store A" in order_coverage.iloc[0]["detail"], (
+        "the breach must name the store that lost an order; a count alone sends "
+        "an operator back to the raw exports")
+
+    # The discriminator: the pre-fix comparison, spelled out. If this ever starts
+    # breaching, the fixture has stopped exercising the collision and the test
+    # above is passing for a different reason.
+    id_only_missing = ({o for _, o in reference.order_keys}
+                       - set(sku["order_id"].astype(str)))
+    assert not id_only_missing, (
+        "fixture no longer reproduces defect 2.9: differencing bare order ids "
+        "already finds the missing order, so the composite key is not what is "
+        "being tested")
+
+
+def test_the_reconciling_item_counts_an_order_whose_lines_belong_to_another_store(settings, log):
+    """The quieter half, and arguably the worse one.
+
+    `partition` decides which settlement is "matched" using bare ids, so Store
+    A's line-less order is filed as matched on the strength of Store B's id. Its
+    250,000 VND is added to the reference total (which then cannot be rebuilt)
+    and, more insidiously, is *removed* from the ~21%-unmatched reconciling item
+    that a reviewer is told to watch for changes in. The money leaves the invoice
+    through a door that reports less traffic than it carried.
+    """
+    income, orders = _collision_masking_a_missing_order()
+    sku = calculate.explode_to_sku_tiktok(income, orders, log)
+
+    _, unmatched_money, unmatched_orders = tieout.partition(
+        income, money_col="subtotal_after_seller_discounts",
+        present_keys=tieout.pairs(sku))
+
+    assert unmatched_orders == 1 and unmatched_money == 250_000.0, (
+        f"expected Store A's line-less order reported as 1 unmatched order worth "
+        f"250,000 VND; got {unmatched_orders} order(s) / {unmatched_money:,.0f} VND"
+    )
+
+    # The discriminator: bare-id matching would have called every row matched and
+    # reported an empty reconciling item.
+    id_only_unmatched = income[~income["order_id"].astype(str).isin(
+        sku["order_id"].astype(str))]
+    assert id_only_unmatched.empty, (
+        "fixture no longer reproduces defect 2.9: bare-id matching already reports "
+        "this order as unmatched")
+
+
+def test_a_shared_order_id_does_not_fake_a_conservation_variance(settings, log):
+    """The other half, and it fails the opposite way — noisily.
+
+    Check 3 does `groupby("order_id")` with `settled=(money, "first")`. Under a
+    collision it sums BOTH stores' rebuilt revenue and compares it against ONE
+    store's settlement, manufacturing a variance out of correct data. A control
+    that fires on clean input is how the original tie-outs became worthless.
+    """
+    income, orders = _two_stores_sharing_an_order_id()
+    sku = calculate.explode_to_sku_tiktok(income, orders, log)
+    sku = sku.assign(amount_with_vat=sku["subtotal_after_seller_discounts"])
+
+    results = _tiktok_checks(sku, income, settings, log)
+    conservation = results[results["kind"] == "conservation"]
+
+    assert not (conservation["result"] == "BREACH").any(), (
+        "both stores' lines are present and correct, yet conservation reported a "
+        f"variance: {conservation[['check', 'variance', 'detail']].to_dict('records')}"
+    )
+
+    # The discriminator: grouping on the id alone collapses two stores into one
+    # row, so `first()` keeps one settlement against both stores' rebuild.
+    collapsed = sku.groupby("order_id").agg(
+        rebuilt=("amount_with_vat", "sum"),
+        settled=("subtotal_after_seller_discounts", "first"))
+    assert (collapsed["rebuilt"] - collapsed["settled"]).abs().max() > 1.0, (
+        "fixture no longer reproduces defect 2.9: id-only grouping no longer "
+        "manufactures a variance, so this test proves nothing")
 
 
 def test_stitch_flags_unmatched_income_rather_than_dropping_it(log):

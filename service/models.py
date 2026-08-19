@@ -47,12 +47,31 @@ class LogKind(enum.Enum):
     SECTION = "section"
 
 
+class JobKind(enum.Enum):
+    """What the worker should DO with this job.
+
+    Two values, and the worker branches on this and nothing else. `WINDOW` is
+    everything before M8 Phase 3 and stays the default, so a job enqueued by an
+    older api is still a settlement run.
+    """
+
+    WINDOW = "window"
+    MONTH_MASTER = "month_master"
+
+
+# The `platform` a month master carries. Not NULL: the double-run guard is a
+# unique index on (platform, period) and NULLs do not compare equal, so two
+# concurrent masters for one month would both slip through.
+ALL_PLATFORMS = "all"
+
+
 @dataclass(frozen=True)
 class Job:
     id: int
     platform: str
     period: str
     state: JobState
+    kind: JobKind = JobKind.WINDOW
     partial_roster: bool = False
     refs: dict = field(default_factory=dict)
     attempts: int = 0
@@ -73,6 +92,10 @@ class Job:
         known = {f for f in cls.__dataclass_fields__}
         data = {k: v for k, v in row.items() if k in known}
         data["state"] = JobState(row["state"])
+        # Defaulted rather than required: an M4-era test double builds rows by
+        # hand, and a missing `kind` means the job predates the column, which is
+        # exactly a window run.
+        data["kind"] = JobKind(row.get("kind") or JobKind.WINDOW.value)
         data["refs"] = row.get("refs") or {}
         return cls(**data)
 

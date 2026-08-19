@@ -30,6 +30,7 @@ The important structural fact: **file I/O is confined to four modules** — `ing
 | `src/masters.py` | Live `.xlsb` master read, CSV snapshot fallback, drift report | Only 1 line touches pandas. |
 | `src/tieout.py` | Coverage + conservation checks against a `SourceReference` captured upstream | Rebuilt in M2 so a check crosses a file boundary and can fail. Shopee's money crossing is still unverified. |
 | `src/finance_template.py` | **The only deliverable exporter.** Team invoicing-template shape | Also a second compute layer — see below. |
+| `src/master_summary.py` | The **month-end master**: every window of a month by brand and by storefront (M8 Phase 3) | Pure compute + workbook build; returns an unwritten `Workbook`, so `pipeline.write_artifacts` stays the only writer. Reads finance files through `ingest`, the declared boundary, so it needs no I/O grant. |
 | `src/config.py` | YAML/CSV config loading | Raw dict access, no schema validation. |
 | `src/runlog.py` | The audit log | Duck-typed; see "Substitutable logger". |
 | `src/errors.py` | `ReconHardStop` | 6 lines, one exception class, raised in 14 places. |
@@ -60,13 +61,14 @@ Added in M5:
 | `service/auth.py` | `Principal` · `Role` · session minting and checking | The seam OIDC substitutes into ([D35](06-DECISIONS.md#d35)). No database import. Since M6 the credential is an opaque session, not a pasted token, and `Role` has three values. |
 | `service/repository_m5.py` | SQL for config versions, proposals, uploads, windows, exceptions | Subclasses `IdentityRepository` (which subclasses `Repository`), so callers still hold one object. The token methods are gone. |
 | `service/repository_identity.py` | SQL for `users` and `user_sessions` | Every session-liveness condition in one `UPDATE … WHERE`, and the role resolved by **join** — never copied onto the session row, so a demotion bites on the next request. |
-| `service/config_store.py` | `ruamel.yaml` round-trip, structured edit, diff, git commit | **Never `PyYAML`** — it discards the comments that are the audit trail. |
+| `service/config_store.py` | `ruamel.yaml` round-trip, evidence extraction, diff, git commit, per-window resolution | **Never `PyYAML`** — it discards the comments that are the audit trail. `resolve_for_window` prefers a pin, then the rendered contract, then disk. |
 | `service/uploads.py` | Filename checks, the PII strip, `.csv`/`.xls` dispatch | Strips using the pipeline's own column map ([D40](06-DECISIONS.md#d40)) and reads through `ingest.read_excel_sheet`, never a copy. **Preserves the file's shape** — band rows, junk rows, multi-sheet income — because `read_parts` applies those to whatever it writes. |
 | `service/objects.py` | `ObjectStore` protocol + `S3Objects` + `LocalDirObjects` | Five operations, no more. `LocalDirObjects` is the single-machine mode, not a test double ([D43](06-DECISIONS.md#d43)). |
 | `service/naming.py` | The uniform upload naming scheme | `validate_roundtrip` re-runs the pipeline's own store parser on every generated name ([D44](06-DECISIONS.md#d44)). |
 | `service/materialize.py` | Assembles a window's input from its uploads | In `service/`, not `src/`, so `run()` still writes nothing and the I/O lint needs no new grant. Reports which mode it used. |
-| `service/config_schema.py` | What `settings.yaml` contains, per field | Widget, reader, `invalidates_goldens`, and whether a container accepts new keys. |
-| `service/config_edits.py` | Five edit operations, applied as one change | Parse once, mutate one document, dump once — which is what preserves byte-identity under N edits. |
+| `service/config_rows.py` | The eleven config tables, and the two operations on them | Replaced `config_schema.py` + `config_edits.py` in M8/1.6. A table that refuses a new row says why in a sentence and the refusal quotes it; `invalidates_goldens` is read off the row, never inferred from a path. |
+| `service/config_import.py` | `config/` → the config tables | Idempotent by truncate-and-load in one transaction; **refuses** an unmodelled key rather than skipping it. Runs once on first boot. |
+| `service/config_render.py` | The config tables → `settings.yaml` text | Byte-stable, because `config_versions` is content-addressed. `assert_complete` refuses a render missing a key whose code default is the opposite of its configured value. |
 | `service/verification.py` | Did that config change move a cell? | Runs a canary window and compares to a committed golden. Five distinguishable outcomes ([D45](06-DECISIONS.md#d45)). |
 | `service/sampledata.py` | The synthetic demo window | In `service/` so an admin can seed it from a browser, on a machine with no client data. |
 | `service/passwords.py` | Argon2id, the policy, generated passwords | Parameters are module constants, never environment — a lowered cost would make rehash-on-login *downgrade* strong hashes. |

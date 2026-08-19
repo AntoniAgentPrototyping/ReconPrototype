@@ -67,16 +67,59 @@ def _read_csv_snapshots(config_dir: Path) -> tuple[dict[str, dict], dict[str, fl
     return fee_types, vat_sku
 
 
+DEFAULT_MASTERS_FILE = "Lib & VAT rate.xlsb"
+
+# Where the live master may sit, in order. `config_dir` is where a developer
+# checkout keeps it; `config_dir/masters` is where `deploy/docker-compose.yml`
+# mounts the team's directory (`${RECON_MASTERS_DIR}:/app/config/masters:ro`).
+#
+# Only the first was searched until 2026-08-18, so EVERY containerised run missed
+# the mounted file and fell back to the CSV snapshots on a single `log.warn`
+# (docs/14-PRODUCTION-READINESS.md A11). Searching both is not a guess about which
+# is right — both are real locations that real deployments use, and which one
+# answered is now recorded in the run log rather than assumed.
+MASTER_SUBDIRS = ("", "masters")
+
+
+def master_candidates(config_dir: Path, settings: dict) -> list[Path]:
+    """Every path the live master may occupy, in search order.
+
+    An absolute `masters_file` is honoured as given — a deployment that names one
+    has said exactly where the file is, and searching relative to `config_dir`
+    would silently ignore that.
+    """
+    name = str(settings.get("masters_file") or DEFAULT_MASTERS_FILE)
+    if Path(name).is_absolute():
+        return [Path(name)]
+    out: list[Path] = []
+    for sub in MASTER_SUBDIRS:
+        candidate = (Path(config_dir) / sub / name) if sub else (Path(config_dir) / name)
+        # Deduped so a name that collapses the search (a rooted path on a platform
+        # whose `is_absolute` disagrees, say) is not reported twice as if two
+        # different places had been looked in.
+        if candidate not in out:
+            out.append(candidate)
+    return out
+
+
 def load_masters(config_dir: Path, settings: dict, log: RunLog) -> dict:
     """Returns {"fee_types", "vat_sku", "source"}. Live master preferred;
-    CSV snapshots as fallback. Drift live-vs-snapshot is logged."""
-    master_name = settings.get("masters_file", "Lib & VAT rate.xlsb")
-    master = config_dir / master_name
+    CSV snapshots as fallback. Drift live-vs-snapshot is logged.
+
+    `source` is `"xlsb"` or `"csv"`, and the caller is expected to turn `"csv"`
+    into a FINDING rather than leaving it as a log line: falling back means the
+    run used point-in-time snapshots of a file the team edits, and a run that
+    silently used stale fee buckets and VAT rates looks exactly like one that did
+    not (docs/14-PRODUCTION-READINESS.md A11).
+    """
+    candidates = master_candidates(config_dir, settings)
+    master = next((p for p in candidates if p.exists()), candidates[0])
     csv_fee, csv_vat = _read_csv_snapshots(config_dir)
 
     if master.exists():
         fee_types, vat_sku = _read_xlsb(master)
-        log.add(f"  masters: live '{master.name}' ({len(fee_types)} fee names, "
+        log.add(f"  masters: live '{master.name}' from {master.parent} "
+                f"({len(fee_types)} fee names, "
                 f"{len(vat_sku)} VAT SKUs, {sum(1 for v in vat_sku.values() if v != 1.08)} non-1.08)")
         drift = []
         for fee, m in fee_types.items():
@@ -103,10 +146,14 @@ def load_masters(config_dir: Path, settings: dict, log: RunLog) -> dict:
                 log.add(f"    drift: {d}")
         else:
             log.add("  masters: live master matches the CSV snapshots exactly")
-        return {"fee_types": fee_types, "vat_sku": vat_sku, "source": "xlsb"}
+        return {"fee_types": fee_types, "vat_sku": vat_sku, "source": "xlsb",
+                "path": str(master)}
 
-    log.warn(f"masters file '{master_name}' not found — using CSV snapshots")
-    return {"fee_types": csv_fee, "vat_sku": csv_vat, "source": "csv"}
+    log.warn(f"masters file not found in any of "
+             f"{[str(p) for p in candidates]} — using the CSV snapshots, which are "
+             f"point-in-time ports and may be stale")
+    return {"fee_types": csv_fee, "vat_sku": csv_vat, "source": "csv",
+            "searched": [str(p) for p in candidates]}
 
 
 def vat_factor_for(sku_series, settings: dict, vat_sku: dict[str, float]):

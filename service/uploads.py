@@ -32,6 +32,7 @@ import hashlib
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,14 @@ class SanitizeResult:
     # Where the leaf header row ends up in the written file (1-based). Preserved
     # from the source, not normalised — see `sanitize`.
     header_row: int = 1
+    # Distinct order ids in this file, and the span of settlement dates it covers.
+    # Both come out of the pass `sanitize` already makes over the frame, so neither
+    # costs a second read (defect 2.12 / 2.3's residual). Empty when the file has no
+    # such column: the api then reports "not checked" rather than guessing, the same
+    # posture `ingest.date_format` takes when no format is configured.
+    order_ids: list[str] = field(default_factory=list)
+    settles_from: "date | None" = None
+    settles_to: "date | None" = None
 
     @property
     def dropped_known_pii(self) -> list[str]:
@@ -97,13 +106,14 @@ def digest_bytes(data: bytes) -> str:
 def column_map_for(settings: dict, platform: str, kind: str) -> dict[str, str]:
     """The allowlist for this platform and file kind.
 
-    Lazada's maps are hardcoded in `src/lazada.py` rather than in YAML — a real
-    asymmetry in the codebase, noted in docs/08-KNOWN-DEFECTS.md 1.10 — so this
-    reaches into the module rather than pretending the config covers it.
+    Reached through the pipeline's own accessor, never a copy. Lazada used to be
+    the exception — its maps were constants in `src/lazada.py` and this module had
+    to import them — until M8/1.7 moved them into `column_maps.lazada` (docs/14
+    D4). All three platforms now answer the same question the same way.
     """
     if platform == "lazada":
         from src import lazada
-        return dict(lazada.WEEKLY_MAP if kind == "weekly" else lazada.DAILY_MAP)
+        return lazada.column_map(settings, "weekly" if kind == "weekly" else "daily")
 
     from src import config as src_config
     return dict(src_config.column_map(settings, platform, kind))
@@ -111,8 +121,11 @@ def column_map_for(settings: dict, platform: str, kind: str) -> dict[str, str]:
 
 def sheet_for(platform: str, kind: str, settings: dict) -> Any:
     if platform == "lazada":
+        # Through the pipeline's accessor rather than the config key directly, so
+        # a missing entry raises `lazada.read_ledger`'s own refusal — the sanitizer
+        # and the reader cannot disagree about which sheet the ledger is on.
         from src import lazada
-        return lazada.SHEETS["weekly" if kind == "weekly" else "daily"]
+        return lazada.sheet_name(settings, "weekly" if kind == "weekly" else "daily")
     sheets = (settings.get("sheet_names") or {}).get(platform) or {}
     return sheets.get(kind, 0)
 
@@ -124,9 +137,10 @@ def _shape(settings: dict, platform: str, kind: str) -> dict:
     one of them to the sanitized copy, so the copy has to still satisfy them.
     """
     if platform == "lazada":
-        # Lazada's reader takes none of these — `lazada.read_ledger` reads the
-        # named sheet with a header on row 1 and no skip. Hardcoded there, so
-        # hardcoded here rather than invented from an absent config key.
+        # Lazada's reader takes none of these: `lazada.read_ledger` reads the named
+        # sheet with a header on row 1, no skip and the default engine. Its column
+        # map and sheet name are in the contract since M8/1.7; these three are not,
+        # because there is no code path that would read them.
         return {"header_row": 1, "sheet_regex": None, "engine": None}
     return {
         "header_row": int(((settings.get("header_rows") or {})
@@ -155,7 +169,14 @@ def read_source(source: Path, *, settings: dict, platform: str,
     """
     import pandas as pd
 
-    from src.ingest import read_excel_sheet
+    from src.ingest import read_excel_sheet, rights_protected
+
+    # Checked at the door, where a person is still looking at the screen. A
+    # rights-protected file otherwise fails deep in a reader with "File is not a
+    # zip file", which says nothing about the encryption or what to do about it.
+    protection = rights_protected(source)
+    if protection:
+        raise UploadRejected(protection)
 
     shape = _shape(settings, platform, kind)
     header_row = shape["header_row"]
@@ -237,9 +258,59 @@ def sanitize(source: Path, target: Path, *, settings: dict, platform: str,
         frame[keep].to_excel(writer, sheet_name=sheet_name, index=False,
                              startrow=header_row - 1)
 
+    order_ids, first, last = _identify(frame[keep], colmap, settings=settings,
+                                       platform=platform, kind=kind)
     return SanitizeResult(sheet=str(sheet_name), rows=len(frame),
                           kept_columns=keep, dropped_columns=dropped or original[:0],
-                          sheets_read=len(sheets), header_row=header_row)
+                          sheets_read=len(sheets), header_row=header_row,
+                          order_ids=order_ids, settles_from=first, settles_to=last)
+
+
+def _identify(frame, colmap: dict, *, settings: dict, platform: str,
+              kind: str) -> tuple[list[str], "date | None", "date | None"]:
+    """Distinct order ids and the settlement-date span, from the frame already in hand.
+
+    Two questions the api could not answer before 2026-08-19, both of which cost real
+    money in July:
+
+    * *Does this file belong to the window it was uploaded to?* `POST /uploads` took
+      `period` as a form field validated for character safety only. `stage_exports.py`
+      has derived the window from settlement dates since M2.5 and the api had none of
+      that (2.3's residual). The July mis-pulls are the bill.
+    * *Which uploaded file holds store S's order X?* Needed to see defect 2.12 at all,
+      because the answer lives across windows.
+
+    **Dates are parsed with the pipeline's own accessor**, `ingest.date_format`, never
+    a second spelling — that is the whole point of D54, and `stage_exports._read_dates`
+    already goes through it. A column that is absent yields an empty answer rather than
+    a guess.
+    """
+    import pandas as pd
+
+    from src.ingest import date_format
+
+    canon = {raw: canonical for raw, canonical in colmap.items()}
+    order_ids: list[str] = []
+    for raw, canonical in canon.items():
+        if canonical == "order_id" and raw in frame.columns:
+            ids = frame[raw].astype(str).str.strip()
+            order_ids = sorted({i for i in ids if i and i.lower() not in
+                                ("nan", "none", "<na>")})
+            break
+
+    first = last = None
+    date_cols = [raw for raw, canonical in canon.items()
+                 if canonical in ("statement_date", "transaction_date")
+                 and raw in frame.columns]
+    if date_cols:
+        fmt = date_format(settings, platform, kind)
+        parsed = pd.to_datetime(frame[date_cols[0]], errors="coerce",
+                                format=fmt) if fmt else pd.to_datetime(
+                                    frame[date_cols[0]], errors="coerce")
+        good = parsed.dropna()
+        if len(good):
+            first, last = good.min().date(), good.max().date()
+    return order_ids, first, last
 
 
 # The pre-M6 name. Kept so a reader grepping either spelling lands in one place;

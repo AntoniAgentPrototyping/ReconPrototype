@@ -154,6 +154,23 @@ class _Tab:
 
 
 def _blank_repeats(df: pd.DataFrame, key: str, cols: list[str]) -> pd.DataFrame:
+    """Blank `cols` on 2nd+ rows of each `key` group — the team's "non repeat" columns.
+
+    **Copies first, and the reason is sharper than "don't mutate your argument."**
+    Every caller passes a frame whose `"... non repeat"` column was built from the
+    *same* Series as the column beside it (`"Source.Name"` and
+    `"Source.Name non repeat"` are both `df["store"]`). Under pandas 2.x the
+    dict-of-Series constructor copies, so those are distinct arrays and blanking one
+    leaves the other alone. Under a no-copy construction they would share storage,
+    and blanking the repeat column would **empty the real store column on invoice
+    tabs** — a silent, load-bearing failure, not a tidiness issue.
+
+    That is what the `pandas<3` pin in `pyproject.toml` is standing in front of, and
+    this copy is the local half of the fix. The pin stays: Copy-on-Write changes more
+    than this one function, and lifting it needs its own measured golden run
+    (docs/08-KNOWN-DEFECTS.md#110).
+    """
+    df = df.copy()
     dup = df.duplicated(subset=[key])
     for c in cols:
         df.loc[dup, c] = None
@@ -686,9 +703,18 @@ def build_lazada(rev: pd.DataFrame, settings: dict, meta: dict, log: RunLog,
     return wb, checks
 
 
-def write_workbook(wb: Workbook, path: Path, checks: list[dict], log: RunLog) -> None:
+def write_workbook(wb: Workbook, path: Path, checks: list[dict], log: RunLog,
+                   *, write_to: Path | None = None) -> None:
+    """Save the workbook. `path` is what the run PRODUCED; `write_to` is where the
+    bytes go.
+
+    They differ only when `pipeline.write_artifacts` is staging an atomic write, and
+    the split exists so the log names the artifact rather than a `.tmp` file. Where
+    the bytes land stays the caller's decision — this function does not invent a
+    temp path of its own, because then two places would own atomicity.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(path)
+    wb.save(write_to or path)
     log.add(f"  wrote {path.name} ({len(wb.sheetnames)} tabs: {wb.sheetnames})")
     for c in checks:
         log.add(f"    check [{c['tab']}] {c['check']}: diff {c['diff']:,.2f} "

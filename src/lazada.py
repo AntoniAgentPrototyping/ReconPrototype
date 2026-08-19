@@ -36,7 +36,8 @@ import numpy as np
 import pandas as pd
 
 from .errors import ReconHardStop
-from .ingest import report_unparseable, to_number
+from .ingest import date_format as ingest_date_format
+from .ingest import parse_dates, report_undated, report_unparseable, to_number
 from .runlog import RunLog
 
 # Verified 2026-07-17 by tools/calc_verify_lazada.py against the Total files'
@@ -72,46 +73,65 @@ PROMO_BUCKETS = [
 LEDGER_REQUIRED = ["store", "transaction_date", "fee_name", "amount_incl_vat",
                    "vat_amount", "order_id", "order_line_id", "sku_id"]
 
-WEEKLY_MAP = {  # sheet "Transaction Overview", header row 1
-    "Transaction Date": "transaction_date",
-    "Fee Name": "fee_name",
-    "Details": "product_name",
-    "Seller SKU": "sku_id",
-    "Lazada SKU": "lazada_sku",
-    "Amount": "amount_incl_vat",
-    "VAT in Amount": "vat_amount",
-    "Order No.": "order_id",
-    "Order Item No.": "order_line_id",
-}
-DAILY_MAP = {  # sheet "Income Overview" (the 25-31T05 window uses these)
-    "Transaction Date": "transaction_date",
-    "Fee Name": "fee_name",
-    "Product Name": "product_name",
-    "Seller SKU": "sku_id",
-    "Lazada SKU": "lazada_sku",
-    "Amount(Include Tax)": "amount_incl_vat",
-    "VAT Amount": "vat_amount",
-    "Order Number": "order_id",
-    "Order Line ID": "order_line_id",
-}
-SHEETS = {"weekly": "Transaction Overview", "daily": "Income Overview"}
-
-# "15_Masan.xlsx" -> "Masan". The optional "(N)" is a BROWSER download-duplicate
-# marker, not part of the store name: a store's five weekly exports downloaded
-# in one session arrive as "2_KAO.xlsx", "2_KAO (1).xlsx" … "2_KAO (4).xlsx",
-# and each is a DIFFERENT settlement week (verified Aug 2026: 05-01..03,
-# 05-18..24, 05-04..10, 05-11..17 — distinct ranges, not re-pulls). Without
-# stripping it the same storefront reads as five separate stores.
-STORE_PATTERN = r"^\s*\d+_\s*(.+?)(?:\s*\(\d+\))?\s*\.xlsx$"
+VARIANTS = ("weekly", "daily")
 
 
-def _read_ledger_file(f: Path, variant: str, log: RunLog) -> pd.DataFrame:
-    cmap = WEEKLY_MAP if variant == "weekly" else DAILY_MAP
-    df = pd.read_excel(f, dtype=str, sheet_name=SHEETS[variant])
+def column_map(settings: dict, variant: str) -> dict[str, str]:
+    """The export's header spellings for one variant, from the contract.
+
+    These were module constants (`WEEKLY_MAP` / `DAILY_MAP`) until 2026-08-18.
+    They moved into `column_maps.lazada` so Lazada's rules are visible, versioned
+    and editable like every other platform's — Lazada was the last part of the
+    domain contract that could only be changed by editing Python
+    (`docs/14-PRODUCTION-READINESS.md` D4). The spellings did not change.
+
+    Absent is a hard stop, not a fallback to a copy kept here: two definitions of
+    the same header map is exactly what this move removed, and a Lazada run under
+    a contract that does not describe Lazada should say so rather than quietly use
+    something else.
+    """
+    configured = ((settings.get("column_maps") or {}).get("lazada") or {}).get(variant)
+    if not configured:
+        raise ReconHardStop(
+            f"column_maps.lazada.{variant} is not configured. Lazada's header map "
+            f"moved out of src/lazada.py into the contract on 2026-08-18; a config "
+            f"without it cannot read a {variant} ledger export.")
+    return {str(k): str(v) for k, v in configured.items()}
+
+
+def sheet_name(settings: dict, variant: str) -> str:
+    """Which sheet holds the ledger. Weekly and Daily are different schemas, and
+    the Daily-format week (25th-end) is a PERMANENT monthly fixture."""
+    configured = ((settings.get("sheet_names") or {}).get("lazada") or {}).get(variant)
+    if not configured:
+        raise ReconHardStop(
+            f"sheet_names.lazada.{variant} is not configured, so there is no sheet "
+            f"to read a {variant} ledger export from.")
+    return str(configured)
+
+
+def store_pattern(settings: dict) -> str:
+    """The regex whose group 1 is the storefront.
+
+    Lazada exports carry no store column either, so this is the highest-consequence
+    string in its half of the contract: a wrong capture reassigns a storefront's
+    revenue.
+    """
+    configured = (settings.get("store_from_filename") or {}).get("lazada")
+    if not configured:
+        raise ReconHardStop(
+            "store_from_filename.lazada is not configured, so no storefront can be "
+            "derived from a Lazada export's file name.")
+    return str(configured)
+
+
+def _read_ledger_file(f: Path, variant: str, settings: dict, log: RunLog) -> pd.DataFrame:
+    cmap = column_map(settings, variant)
+    df = pd.read_excel(f, dtype=str, sheet_name=sheet_name(settings, variant))
     df.columns = [str(c).strip() for c in df.columns]
     missing = [src for src in cmap if src not in df.columns]
     df = df.rename(columns={s: d for s, d in cmap.items() if s in df.columns})
-    m = re.match(STORE_PATTERN, f.name, flags=re.IGNORECASE)
+    m = re.match(store_pattern(settings), f.name, flags=re.IGNORECASE)
     if not m:
         raise ReconHardStop(f"Cannot derive store from Lazada file name '{f.name}'")
     df["store"] = m.group(1).strip()
@@ -126,12 +146,12 @@ def read_ledger(period_dir: Path, settings: dict, log: RunLog) -> pd.DataFrame:
     """Read a window's Weekly/ and Daily/ folders (either may be empty) —
     the union mirrors the team's FR_Total query."""
     frames = []
-    for variant in ("weekly", "daily"):
+    for variant in VARIANTS:
         folder = period_dir / variant.capitalize()
         if not folder.is_dir():
             continue
         for f in sorted(folder.glob("*.xlsx")):
-            frames.append(_read_ledger_file(f, variant, log))
+            frames.append(_read_ledger_file(f, variant, settings, log))
     if not frames:
         raise ReconHardStop(f"No Weekly/ or Daily/ ledger files under {period_dir}")
     df = pd.concat(frames, ignore_index=True)
@@ -149,7 +169,38 @@ def read_ledger(period_dir: Path, settings: dict, log: RunLog) -> pd.DataFrame:
     # Same posture as TikTok/Shopee: an amount that cannot be read stops the
     # run rather than becoming 0 VND (docs/08-KNOWN-DEFECTS.md#16).
     report_unparseable(unparseable, "lazada/ledger", style, settings, log)
-    df["transaction_date"] = pd.to_datetime(df["transaction_date"], errors="coerce")
+    # Lazada consumes no `dayfirst` (migration 009 records why: `read_ledger` never
+    # passed one), so its format was decided by inference alone — the least defended
+    # of the three platforms. Since 2026-08-19 it is stated: `date_formats.lazada`.
+    #
+    # **Parsed PER VARIANT, because the two do not agree.** Weekly spells it
+    # `03-Jul-2026` and Daily spells it `29 Jul 2026` — measured over 66 weekly and
+    # 14 daily files across May and July. One format applied to the concatenated
+    # frame would silently NaT every row of whichever variant lost, and a window
+    # that is entirely Daily (July's l5) is a real, recurring shape rather than a
+    # corner case: the 25th-to-month-end week is Daily every month.
+    parsed = df["transaction_date"].copy()
+    undated: dict[str, tuple[int, str | None]] = {}
+    for variant in sorted(set(df["ledger_variant"])):
+        rows = df["ledger_variant"] == variant
+        fmt = ingest_date_format(settings, "lazada", variant)
+        raw = df.loc[rows, "transaction_date"]
+        got = parse_dates(raw, False, f"lazada/{variant}",
+                          "transaction_date", log, fmt=fmt)
+        # Went in with text, came out NaT. A cell that was already blank is not an
+        # unreadable date, which is why this is not a plain isna() count.
+        n_bad = int((got.isna() & raw.notna()).sum())
+        if n_bad:
+            undated[variant] = (n_bad, fmt)
+        parsed.loc[rows] = got
+    df["transaction_date"] = pd.to_datetime(parsed, errors="coerce")
+    # Reported PER VARIANT, under the format that actually parsed it. One collapsed
+    # `lazada/ledger` line naming `dayfirst=False` sent the reader to a setting this
+    # platform does not consume (migration 009 deliberately emits no `dayfirst.lazada`),
+    # and it could not say which of the two disagreeing variants failed.
+    for variant, (n_bad, fmt) in undated.items():
+        report_undated({"transaction_date": n_bad}, f"lazada/{variant}", False,
+                       settings, log, fmt=fmt)
     for col in ("order_id", "order_line_id", "sku_id", "fee_name", "store"):
         df[col] = df[col].astype(str).str.strip()
     log.add(f"  ledger: {len(df)} rows, {df['store'].nunique()} stores, "
@@ -219,16 +270,39 @@ def revenue_lines(df: pd.DataFrame, log: RunLog) -> pd.DataFrame:
     # alone double-applies the promo pool to both name-groups. Matching by
     # name reproduces the team's KA values exactly (gift groups zero out).
     promo_rows = df[df["fee_bucket"].isin(PROMO_BUCKETS)]
+    # `dropna=False` matches the revenue side above. Without it a promo row with a
+    # null product name (or SKU) left the pool entirely while its revenue-side
+    # counterpart stayed — and because promo is a CREDIT that reduces the invoiced
+    # unit price below, losing one makes `price_ka` too HIGH. An over-statement, in
+    # the direction nothing else here can produce (docs/08-KNOWN-DEFECTS.md#110).
+    #
+    # Measured before the flag was added: **0 null `sku_id` and 0 null
+    # `product_name` promo rows** across all nine staged Lazada windows (May
+    # l1-l4, July l1-l5), so this moved no cell — the four Lazada goldens
+    # regenerate unchanged. The divergence was latent, not active, and this closes
+    # it while the direction of the error is known rather than after an export
+    # arrives with a blank product name.
     promo = (promo_rows
-             .groupby(["store", "order_id", "sku_id", "product_name"], as_index=False)["amount_incl_vat"].sum()
+             .groupby(["store", "order_id", "sku_id", "product_name"], as_index=False,
+                      dropna=False)["amount_incl_vat"].sum()
              .rename(columns={"amount_incl_vat": "promo"}))
     grouped = grouped.merge(promo, on=["store", "order_id", "sku_id", "product_name"], how="left")
     grouped["promo"] = grouped["promo"].fillna(0)
     matched_total = float(grouped["promo"].sum())
     promo_total = float(promo_rows["amount_incl_vat"].fillna(0).sum())
     if abs(promo_total - matched_total) > 0.5:
-        log.warn(f"promo charges not matched to any revenue line: "
-                 f"{promo_total - matched_total:,.0f} VND (left un-netted, as the team's pairing does)")
+        # Now that both sides handle null keys identically, this remainder is
+        # genuinely un-paired promo — a charge against an (order, SKU, product) that
+        # has no revenue line at all — and not a key the grouping threw away. The
+        # message used to say "as the team's pairing does" for BOTH causes, which
+        # made a dropped group and a real orphan read the same. Measured on real
+        # data: July l2 -30,845 VND and l3 -22,486 VND with zero null keys, so the
+        # orphan class is real and this is the wording for it.
+        log.warn(f"promo charges paired to no revenue line: "
+                 f"{promo_total - matched_total:,.0f} VND over "
+                 f"{len(promo_rows):,} promo row(s) — left un-netted, as the team's "
+                 f"pairing does. Not a null group key: those now group and merge "
+                 f"like the revenue side.")
 
     # Team's "Price KA" = per-UNIT net price, rounded to whole VND (Excel
     # ROUND, half away from zero): (credits + promo) / units / VAT.

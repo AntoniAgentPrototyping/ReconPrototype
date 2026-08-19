@@ -503,34 +503,37 @@ def generate(target_root: Path, *, config_dir: Path, period: str = PERIOD) -> li
 # The demo's own config version
 # ---------------------------------------------------------------------------
 
-def demo_settings_text(config_dir: Path) -> str:
-    """The real settings, with the demo's synthetic roster substituted.
+def demo_settings_text(config_dir: Path, *, content: str | None = None) -> str:
+    """The real contract, with the demo's synthetic roster substituted.
 
     **Built by ruamel round-trip, so every comment survives** — the demo config is a
-    real config version and has to be as defensible as any other. And
-    `config/settings.yaml` on disk is never touched: the demo roster reaches a run
-    through the pin mechanism, which is the same path a re-run of May uses. Without
-    this the demo stores would have to be added to the real roster, and every real
-    window would then expect two storefronts that do not exist.
-    """
-    from . import config_edits, config_store
+    real config version and has to be as defensible as any other. Nothing is
+    written: the demo roster reaches a run through the pin mechanism, which is the
+    same path a re-run of May uses. Without this the demo stores would have to be
+    added to the real roster, and every real window would then expect two
+    storefronts that do not exist.
 
-    content = config_store.read_text(config_dir)
-    edits: list[config_edits.Edit] = []
+    The roster is REPLACED rather than emptied item by item. Since M8/1.6 config is
+    edited as rows and `service/config_edits.py` is gone; replacing the list also
+    takes the interleaved comments naming the real stores, which is what the old
+    edit path had to say `comment_disposition="remove"` to achieve. `content` lets
+    the caller pass the contract rendered from the config tables, so the demo is
+    pinned to what a run would actually use rather than to the image's seed copy.
+    """
+    from . import config_store
+
+    data = config_store.parse(content if content is not None
+                              else config_store.read_text(config_dir))
     for platform in ("tiktok", "shopee", "lazada"):
-        current = (config_store.parse(content).get("expected_stores") or {}).get(platform) or []
-        for store in current:
-            edits.append(config_edits.Edit(
-                op="remove_list_item", path=("expected_stores", platform), value=store,
-                # The roster's interleaved comments describe the REAL stores and are
-                # meaningless once they are gone. Answered explicitly rather than
-                # left to a default — see config_edits.OrphanedEvidence.
-                comment_disposition="remove"))
-        for store in STORES:
-            edits.append(config_edits.Edit(
-                op="append_list_item", path=("expected_stores", platform), value=store,
-                comment="synthetic demo store — service/sampledata.py"))
-    return config_edits.apply_edits(content, edits)
+        rosters = data.setdefault("expected_stores", {})
+        rosters[platform] = list(STORES)
+        # A real store left in `stores_optional` would name a storefront no longer
+        # in the roster. `check_stores` reads both keys, so that reads as a
+        # storefront somebody excused rather than one that does not exist here.
+        optional = data.get("stores_optional")
+        if isinstance(optional, dict) and platform in optional:
+            del optional[platform]
+    return config_store.dump(data)
 
 
 def seed(repo, settings, *, target_root: Path | None = None,
@@ -547,7 +550,11 @@ def seed(repo, settings, *, target_root: Path | None = None,
 
     scratch = Path(tempfile.mkdtemp(prefix="recon-demo-"))
     store = object_lib.upload_store(settings)
-    domain_text = demo_settings_text(settings.config_dir)
+    # The contract a run would actually use, so the demo is pinned to the same
+    # rules — rendered from the config tables where they are seeded, and the
+    # image's copy of `config/` only before that has happened.
+    rendered = repo.render_config() if hasattr(repo, "render_config") else None
+    domain_text = demo_settings_text(settings.config_dir, content=rendered)
 
     from src import config as src_config
     domain = src_config.parse_settings(domain_text)
@@ -568,7 +575,12 @@ def seed(repo, settings, *, target_root: Path | None = None,
                     filename=path.name, sha256=digest, bytes_=len(data),
                     uploaded_by=seeded_by, platform=platform, period=period,
                     kind=kind, sanitized=True, uri=ref.uri, object_key=key,
-                    state="stored", store=store_name, store_canonical=store_name))
+                    state="stored", store=store_name, store_canonical=store_name,
+                    # The demo seeds already-sanitized files, so the two digests
+                    # coincide here. Recorded separately anyway: materialisation
+                    # checks object_sha256, and a demo window that skipped the
+                    # check would be a demo of something the product does not do.
+                    object_sha256=digest))
             except Exception:                                   # noqa: BLE001
                 # Already seeded. Idempotent by construction: the key is the content
                 # digest, so re-seeding overwrites the same object.
@@ -609,7 +621,10 @@ def unseed(repo, settings, *, period: str = PERIOD) -> dict:
         removed += 1
     repo.delete_uploads_for_period(period)
     for platform in ("tiktok", "shopee", "lazada"):
-        repo.unpin_period_config(platform, period)
+        repo.unpin_period_config(
+            platform, period, actor="demo teardown",
+            reason="the synthetic demo window is being removed, so its config pin "
+                   "has nothing left to protect")
     return {"period": period, "uploads_removed": removed}
 
 

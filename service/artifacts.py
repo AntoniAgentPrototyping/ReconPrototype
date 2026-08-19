@@ -53,6 +53,20 @@ def sha256_of(path: Path, *, chunk: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
+def sha256_of_chunks(chunks: Iterator[bytes]) -> str:
+    """The same digest over a stream, in constant memory.
+
+    Used to verify an artifact before it is served. Deliberately does NOT collect the
+    bytes: a 30 MB workbook buffered in the api to check its digest would undo the
+    reason `stream()` exists. The store is read twice instead — once to verify, once
+    to serve — which is the right trade for a file a human downloads occasionally.
+    """
+    h = hashlib.sha256()
+    for block in chunks:
+        h.update(block)
+    return h.hexdigest()
+
+
 class ArtifactStore(Protocol):
     def put(self, *, period: str, platform: str, run_id: int, path: Path) -> StoredArtifact: ...
 

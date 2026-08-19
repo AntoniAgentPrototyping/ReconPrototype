@@ -104,9 +104,9 @@ def test_a_csv_upload_is_stored_as_xlsx(tmp_path, settings_dict):
     assert upload_lib.sanitized_name("part_1.csv") == "part_1.xlsx"
     assert upload_lib.sanitized_name("1_KAO.xlsx") == "1_KAO.xlsx"
 
-    from src import lazada
+    from _contract import lazada_headers
     source = tmp_path / "1_Store.csv"
-    mapped = list(lazada.WEEKLY_MAP)[:4]
+    mapped = lazada_headers("weekly", settings_dict)[:4]
     pd.DataFrame({**{c: ["x"] for c in mapped},
                   "Phone #": ["0900000000"]}).to_csv(source, index=False,
                                                      encoding="utf-8-sig")
@@ -127,23 +127,24 @@ def test_the_allowlist_is_the_pipelines_own_column_map(settings_dict):
     """No second list of PII column names to maintain and go stale — the strip
     uses the same contract `ingest.read_parts` does."""
     from src import lazada
-    assert upload_lib.column_map_for(settings_dict, "lazada", "weekly") == dict(lazada.WEEKLY_MAP)
+    assert (upload_lib.column_map_for(settings_dict, "lazada", "weekly")
+            == lazada.column_map(settings_dict, "weekly"))
     assert upload_lib.column_map_for(settings_dict, "tiktok", "orders") \
         == dict(settings_dict["column_maps"]["tiktok"]["orders"])
 
 
 def test_sanitize_keeps_only_mapped_columns(tmp_path, settings_dict):
     import pandas as pd
-    from src import lazada
+    from _contract import lazada_headers, lazada_sheet
 
-    mapped = list(lazada.WEEKLY_MAP)[:4]
+    mapped = lazada_headers("weekly", settings_dict)[:4]
     source = tmp_path / "1_Store.xlsx"
     frame = pd.DataFrame({**{c: ["x"] for c in mapped},
                           "Recipient": ["a real person"],
                           "Phone #": ["0900000000"],
                           "Detail Address": ["a real address"]})
     with pd.ExcelWriter(source, engine="openpyxl") as w:
-        frame.to_excel(w, sheet_name=lazada.SHEETS["weekly"], index=False)
+        frame.to_excel(w, sheet_name=lazada_sheet("weekly", settings_dict), index=False)
 
     result = upload_lib.sanitize(source, tmp_path / "out.xlsx",
                                        settings=settings_dict, platform="lazada", kind="weekly")
@@ -152,7 +153,8 @@ def test_sanitize_keeps_only_mapped_columns(tmp_path, settings_dict):
     assert set(result.dropped_columns) == {"Recipient", "Phone #", "Detail Address"}
     assert result.dropped_known_pii == ["Detail Address", "Phone #", "Recipient"]
 
-    written = pd.read_excel(tmp_path / "out.xlsx", sheet_name=lazada.SHEETS["weekly"])
+    written = pd.read_excel(tmp_path / "out.xlsx",
+                            sheet_name=lazada_sheet("weekly", settings_dict))
     assert "Phone #" not in written.columns
     assert "0900000000" not in written.to_csv(), "a PII VALUE survived the strip"
 
@@ -313,13 +315,13 @@ def sample_export(tmp_path: Path, name: str = "1_TestStore.xlsx") -> Path:
     that ignored the name would make every second file in a window a 409.
     """
     import pandas as pd
-    from src import lazada
-    mapped = list(lazada.WEEKLY_MAP)[:5]
+    from _contract import lazada_headers, lazada_sheet
+    mapped = lazada_headers("weekly")[:5]
     path = tmp_path / name
     frame = pd.DataFrame({**{c: [f"{c}-{name}"] for c in mapped},
                           "Recipient": ["a person"]})
     with pd.ExcelWriter(path, engine="openpyxl") as w:
-        frame.to_excel(w, sheet_name=lazada.SHEETS["weekly"], index=False)
+        frame.to_excel(w, sheet_name=lazada_sheet("weekly"), index=False)
     return path
 
 
@@ -519,9 +521,10 @@ def test_the_plan_uses_the_config_the_window_will_actually_run_under(
     from service import config_store
 
     # A config whose tiktok roster is exactly one invented store, pinned to a window.
-    sandbox = config_store.apply_edit(
-        config_store.read_text(service_settings.config_dir),
-        ["expected_stores", "tiktok"], ["Only This Store"])
+    document = config_store.parse(
+        config_store.read_text(service_settings.config_dir))
+    document["expected_stores"]["tiktok"] = ["Only This Store"]
+    sandbox = config_store.dump(document)
     version = repo.record_config_version(sandbox, source="proposal", created_by="test")
     repo.pin_period_config("tiktok", "2026-05_pinned", version["id"],
                            pinned_by="test", reason="pinned for this test")

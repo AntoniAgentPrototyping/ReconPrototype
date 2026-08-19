@@ -2,10 +2,11 @@
 #
 # Column maps corrected against REAL May-2026 exports on 2026-07-16
 # (TikTok order file "7. Order U food 17.05.xlsx", income "7. income U food.xlsx").
-# The pre-sample placeholder maps are preserved in tools/sample_config/settings.yaml
-# (used by the synthetic smoke test) and in the comment block at the end of this file.
-
-vat_rate: 0.08            # used only by the legacy placeholder formulas (sample smoke path)
+#
+# This header used to point at `tools/sample_config/settings.yaml` for the
+# pre-sample placeholder maps. That directory does not exist — it went with the
+# placeholder path in M1, and the reference outlived it by three milestones.
+# The synthetic smoke test builds its own settings (tools/smoke_test.py).
 
 # VAT model (confirmed by the team): ONE default factor plus per-SKU
 # exceptions from the team-owned master file below. The 8% rate is a
@@ -37,10 +38,6 @@ reader_engine:
     income: calamine
 
 tolerances:
-  # Legacy values used by the sample/spec path only. The "~10,000 VND" rule
-  # from the build spec is NOT what the team's files use — see tiktok below.
-  split_rounding_vnd: 10000
-  exact_check_vnd: 1
   # The team's OWN tolerance checks, read from their TikTok workbooks
   # ("Tiktok result 01 to 17T5 For KA.xlsx"):
   #   'PV sum'!E3     = IF(ABS(E2)<12000, "OK", "check lai sai roi")
@@ -58,7 +55,10 @@ tolerances:
   #     Return-tab split: recomputed order total + refund within 10 VND of
   #     zero = full return (skip invoice), else partial (must invoice).
   shopee:
-    pv_sum_vnd: 2000
+    # NOTE: Shopee has no pv_sum_vnd. Its pivot-drift check does NOT read one —
+    # build_shopee uses the TOL_PIVOT_DRIFT_SHOPEE constant. A key was configured
+    # here at 2000 and read by nothing; removed 2026-08-18 rather than left to
+    # look like a control (docs/14-PRODUCTION-READINESS.md A12).
     xuat_hd_vnd: 2000
     return_full_vnd: 10
     # The order-file-vs-income-file revenue crossing (src/tieout.py,
@@ -67,9 +67,6 @@ tolerances:
     # (May s1/s2/s3) and 1 of 81,232 in the team's own June consolidated file.
     # 1 VND because the relation is exact, not because 1 VND is a nice number.
     conservation_vnd: 1
-
-periods:
-  rolling_window_months: 2
 
 # Settlement-window bounds — DEDUPLICATION OF A PULL ARTIFACT, not a rule.
 # A window's finance file may only contain settlements dated inside its own
@@ -84,6 +81,18 @@ periods:
 # in w1 ("01 to 07T07"), which legitimately owns settlements through 7 July.
 # Rows settled 08-14 July whose orders also appear in w1 (1,180 rows) are
 # genuine second payout events and are KEPT.
+#
+# DO NOT add "2026-07_w5": from 2026-07-29. Measured 2026-08-19, and it is the
+# trap this rule's second condition exists to catch. The 29-31 July TikTok folder
+# holds "16. Income Curel 07.xlsx", spanning 2026-07-01..2026-07-31 — 849 rows, of
+# which 772 settle before 29 July. It looks exactly like the w2 mis-pull and it is
+# the opposite: it is the ONLY Curel income file in the entire July dump. The team
+# pulled that storefront once, at month end, for the whole month. Its 772 early
+# rows carry 230,946,293 VND that appears in NO other window, so bounding w5 would
+# delete a quarter of a billion dong and leave a window that still ties to itself.
+# `tools/stage_exports.py` reports it as a candidate mis-pull, which is correct —
+# a candidate is not a finding. The team's own month-end master agrees: its TikTok
+# tab shows Curel revenue in the 29-31 column and nowhere else.
 window_settlement_bounds:
   "2026-07_w2":
     from: "2026-07-08"
@@ -118,9 +127,48 @@ dedupe_rows: false
 # Date parsing: set true per platform if exports use dd/mm/yyyy text dates.
 # TikTok confirmed dd/mm/yyyy (probe with false produced impossible Jan-Dec
 # ranges for a May-only window).
+#
+# ONLY consulted where date_formats below has no entry. dayfirst is per-PLATFORM
+# and the formats are per-KIND, which is the defect it cannot express: TikTok
+# orders really are dd/mm/yyyy while TikTok income is yyyy/mm/dd, and one flag
+# cannot be right for both.
 dayfirst:
   tiktok: true
   shopee: false   # TODO verify when Shopee is mapped
+
+# Explicit strptime format per platform/kind, applied to every date column of
+# that kind. Takes precedence over dayfirst.
+#
+# WHY THIS EXISTS, measured 2026-08-19. pandas infers a format from the first
+# non-null element and dayfirst only decides the AMBIGUOUS case, so which format
+# it picks is data-dependent. Real TikTok income is `%Y/%m/%d` against
+# `dayfirst.tiktok: true`, and July is where that finally bit: the first value of
+# `Order settled time` is `2026/07/07`, ambiguous between %Y/%m/%d and %Y/%d/%m,
+# so pandas honoured dayfirst and read the whole column as %Y/%d/%m. July
+# settlement dates came out spanning 2026-01-07..2026-09-07 for a window that is
+# entirely 1-7 July, and `tools/stage_exports.py` could not derive a single
+# window. May escaped it only because its first value happened to be unambiguous.
+#
+# Every value below was measured against real exports rather than assumed: each
+# format parses 100% of the non-blank cells in its date columns, in BOTH the May
+# set (the golden windows) and the July set, across 10 files per platform/kind.
+# The probe is recorded in docs/07-VERIFICATION.md.
+#
+# Explicit parsing is deliberately STRICTER than inference: a cell that does not
+# match becomes NaT, which `ingest.report_undated` counts and names rather than
+# dropping silently.
+date_formats:
+  tiktok:
+    orders: "%d/%m/%Y %H:%M:%S"   # Created Time
+    income: "%Y/%m/%d"            # Order settled time, Order created time
+  shopee:
+    orders: "%Y-%m-%d %H:%M"      # Ngày đặt hàng
+    income: "%Y-%m-%d"            # Ngày hoàn thành thanh toán, Ngày đặt hàng
+  lazada:
+    # The two variants do not agree, and nothing would have said so: the
+    # separator differs. 66 weekly files and 14 daily across May and July.
+    weekly: "%d-%b-%Y"            # Transaction Date, e.g. 03-Jul-2026
+    daily: "%d %b %Y"             # Transaction Date, e.g. 29 Jul 2026
 
 # Rows to drop immediately after the header row. TikTok order exports have a
 # per-column description row under the header ("Current order status." etc.)
@@ -139,6 +187,14 @@ sheet_names:
     income: "Order details"
   shopee:
     orders: "orders"
+  # Lazada is a fee-event LEDGER, not orders+income: one row per
+  # (order item x fee event) and no order files at all. The two variants are
+  # different schemas, and the Daily-format week (25th-end) is a PERMANENT
+  # monthly fixture — dual-schema handling is standard here, not an exception.
+  # Moved out of src/lazada.py on 2026-08-18 (M8/1.7); the values are unchanged.
+  lazada:
+    weekly: "Transaction Overview"
+    daily: "Income Overview"
 
 # Regex sheet matching for exports that split data across numbered sheets.
 # Shopee income caps sheets at ~10k rows: "Doanh thu", "Doanh thu - 1", ...
@@ -179,6 +235,13 @@ store_from_filename:
   # of the same store carries no suffix and proves the bare name is the real
   # one; check_stores is the backstop if this ever over-strips.
   shopee: '^\s*(?:\d+_\s*)?(?:order|income)[. ]\s*(.+?)(?:\s+part\s*\d+)?(?:\s+\d{1,2}-(?:\d{1,2}|end))?\s*\.xlsx$'
+  # "15_Masan.xlsx" -> "Masan". The optional "(N)" is a BROWSER download-duplicate
+  # marker, NOT part of the store name: a store's five weekly exports downloaded in
+  # one session arrive as "2_KAO.xlsx", "2_KAO (1).xlsx" ... "2_KAO (4).xlsx", and
+  # each is a DIFFERENT settlement week (verified Aug 2026: 05-01..03, 05-18..24,
+  # 05-04..10, 05-11..17 — distinct ranges, not re-pulls). Without stripping it the
+  # same storefront reads as five separate stores.
+  lazada: '^\s*\d+_\s*(.+?)(?:\s*\(\d+\))?\s*\.xlsx$'
 
 # Stores present in the May-2026 data (names as they appear in file names).
 # TikTok: 17 stores in window 01-17T05; window 18-30T05 has 18 (adds
@@ -261,6 +324,15 @@ expected_stores:
     - "Reckitt_chamsocnhacua"
     - "ufood_store"
     - "mondelezkinhdovn"
+    # July 2026 onboarded stores. Each one appears in the July windows with
+    # revenue AND in the team's own month-end master (its "by brand" tab carries
+    # pepsicofoods 787,342,007, xa kho gia tot 44,201,866 and tolpa 20,126,780
+    # under Shopee), so these are real storefronts and not a naming accident.
+    # Until they were listed here the unexpected-store check hard-stopped all
+    # four July Shopee windows, which is the check working as designed (D3).
+    - "Tolpa"
+    - "pepsicofoods"
+    - "xa_kho_gia_tot"
 
 # Brand/invoice grouping per store. TikTok evidence (For KA "PV sum" bucket
 # pivots, both windows): three invoice buckets — "KAO 8%", "Merries 8%",
@@ -304,8 +376,46 @@ store_aliases:
     # order vs income file-name drift (case / separator differences)
     "lashe": "Lashe"
     "mars.wrigley": "Mars wrigley"
+    # July 2026: the ORDER files call this store "AHC" ("17_Order.AHC part 1.xlsx")
+    # while its income file is "17_Income. Unilever AHC.xlsx". Same store, same
+    # numeric prefix, and only the orders side is short — which is why it surfaced
+    # as an unexpected store the moment the roster check started reading orders
+    # too (M8/2.3). Canonical is the income spelling, which is what May used and
+    # what the team's master calls it.
+    "AHC": "Unilever AHC"
 
 column_maps:
+  # Lazada is a fee-event LEDGER: one row per (order item x fee event), no order
+  # files. Two export variants carry different header spellings for the same
+  # canonical columns — the team's own Power Query ("Weekly"/"Daily"/"FR_Total")
+  # normalizes both to one table, and FR_Total = Daily UNION Weekly.
+  #
+  # Moved out of src/lazada.py's WEEKLY_MAP/DAILY_MAP on 2026-08-18 (M8/1.7).
+  # The spellings are unchanged; what changed is that they are now visible,
+  # versioned and editable like every other platform's (docs/14 D4).
+  lazada:
+    # sheet "Transaction Overview", header row 1
+    weekly:
+      "Transaction Date": transaction_date
+      "Fee Name": fee_name
+      "Details": product_name
+      "Seller SKU": sku_id
+      "Lazada SKU": lazada_sku
+      "Amount": amount_incl_vat
+      "VAT in Amount": vat_amount
+      "Order No.": order_id
+      "Order Item No.": order_line_id
+    # sheet "Income Overview" — the 25-31T05 window uses these
+    daily:
+      "Transaction Date": transaction_date
+      "Fee Name": fee_name
+      "Product Name": product_name
+      "Seller SKU": sku_id
+      "Lazada SKU": lazada_sku
+      "Amount(Include Tax)": amount_incl_vat
+      "VAT Amount": vat_amount
+      "Order Number": order_id
+      "Order Line ID": order_line_id
   tiktok:
     # Real TikTok Seller Center order export: sheet "OrderSKUList",
     # 54 columns, header row 1, English. One row per SKU line.

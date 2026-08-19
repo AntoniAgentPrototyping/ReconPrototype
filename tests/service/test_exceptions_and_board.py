@@ -111,7 +111,8 @@ def test_unmapped_fees_reach_the_queue(repo, worker, service_settings, make_clie
     """Give the window a fee name the master does not know, which is the real
     recurring exception class on Lazada."""
     import pandas as pd
-    from src import lazada
+
+    from _contract import lazada_sheet
 
     folder = service_settings.input_root / "2026-05_exc" / "lazada" / "Weekly"
     folder.mkdir(parents=True)
@@ -122,7 +123,8 @@ def test_unmapped_fees_reach_the_queue(repo, worker, service_settings, make_clie
         "Order No.": "EXC-1", "Order Item No.": "EXC-1-A", "Paid Quantity": "1",
     }]
     with pd.ExcelWriter(folder / "1_ExcStore.xlsx", engine="openpyxl") as w:
-        pd.DataFrame(rows).to_excel(w, sheet_name=lazada.SHEETS["weekly"], index=False)
+        pd.DataFrame(rows).to_excel(
+            w, sheet_name=lazada_sheet("weekly"), index=False)
 
     repo.enqueue("lazada", "2026-05_exc")
     outcome = Worker(repo, __import__("service.artifacts", fromlist=["x"]).LocalArtifactStore(
@@ -279,9 +281,13 @@ def test_a_re_run_uses_the_pinned_config_not_todays(repo, worker, window, servic
     for item in service_settings.config_dir.iterdir():
         if item.is_file():
             shutil.copy2(item, sandbox / item.name)
-    text = config_store.read_text(sandbox)
+    # Edited through the ruamel round trip rather than by rewriting the file, so the
+    # 200 comment lines survive and the second run is reading a real contract.
+    # `config_store.apply_edit` went with the dotted-path editor in M8/1.6.
+    document = config_store.parse(config_store.read_text(sandbox))
+    document["vat_factors"]["default"] = 1.10
     config_store.settings_path(sandbox).write_text(
-        config_store.apply_edit(text, ["vat_factors", "default"], 1.10), encoding="utf-8")
+        config_store.dump(document), encoding="utf-8")
 
     moved = Worker(repo, worker.store, replace(service_settings, config_dir=sandbox))
     repo.enqueue("lazada", window)
@@ -313,16 +319,80 @@ def test_pins_are_visible_and_removable_over_http(repo, worker, window, make_cli
     pins = admin.get("/config/pins").json()["pins"]
     assert [(p["platform"], p["period"]) for p in pins] == [("lazada", window)]
 
-    assert admin.delete(f"/config/pins/lazada/{window}").status_code == 200
+    unpin = {"reason": "re-running under corrected fee buckets"}
+    assert admin.request(
+        "DELETE", f"/config/pins/lazada/{window}", json=unpin).status_code == 200
     assert admin.get("/config/pins").json()["pins"] == []
-    assert admin.delete(f"/config/pins/lazada/{window}").status_code == 404
+    assert admin.request(
+        "DELETE", f"/config/pins/lazada/{window}", json=unpin).status_code == 404
 
 
 def test_only_an_admin_may_unpin(repo, worker, window, make_client):
     repo.enqueue("lazada", window)
     worker.serve(once=True)
-    assert make_client("recon.user").delete(
-        f"/config/pins/lazada/{window}").status_code == 403
+    assert make_client("recon.user").request(
+        "DELETE", f"/config/pins/lazada/{window}",
+        json={"reason": "nope"}).status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# The pin/unpin audit trail (defect 2.5's sharper half, 2026-08-19)
+# ---------------------------------------------------------------------------
+
+def test_unpinning_records_what_was_released_and_why(repo, worker, window, make_client):
+    """The gap: `unpin` was a bare DELETE of the current-state row.
+
+    Afterwards nothing recorded that the window had been pinned, to which config
+    version, or why it was released — in the system whose whole M5/M6 rationale is
+    the audit trail. And releasing a pin is the consequential act: the next re-run of
+    the window may not reproduce the invoice it was booked from.
+    """
+    repo.enqueue("lazada", window)
+    worker.serve(once=True)
+    admin = make_client("recon.admin")
+    pinned_version = admin.get("/config/pins").json()["pins"][0]["config_version_id"]
+
+    admin.request("DELETE", f"/config/pins/lazada/{window}",
+                  json={"reason": "fee buckets were wrong for this window"})
+
+    body = admin.get("/config/pins").json()
+    assert body["pins"] == [], "current state should show no pin"
+    events = [e for e in body["events"] if e["period"] == window]
+    actions = [e["action"] for e in events]
+    assert "unpin" in actions and "pin" in actions, (
+        f"the history must survive the unpin; got {actions}")
+
+    released = next(e for e in events if e["action"] == "unpin")
+    assert released["config_version_id"] == pinned_version, (
+        "the event must name the version that was released — after the delete there "
+        "is nowhere left to look it up")
+    assert released["reason"] == "fee buckets were wrong for this window"
+    assert released["actor"], "the actor comes from the session, never the body"
+
+
+def test_unpinning_without_a_reason_is_refused(repo, worker, window, make_client):
+    """A reason is required, so the record cannot be empty by omission."""
+    repo.enqueue("lazada", window)
+    worker.serve(once=True)
+    admin = make_client("recon.admin")
+
+    assert admin.request("DELETE", f"/config/pins/lazada/{window}",
+                         json={}).status_code == 422
+    assert admin.request("DELETE", f"/config/pins/lazada/{window}",
+                         json={"reason": ""}).status_code == 422
+    assert admin.get("/config/pins").json()["pins"], "the pin must still be in force"
+
+
+def test_the_automatic_pin_is_recorded_too(repo, worker, window, make_client):
+    """A window pinned by its first successful run leaves an event as well, so the
+    history is complete rather than only covering what a person did by hand."""
+    repo.enqueue("lazada", window)
+    worker.serve(once=True)
+
+    events = repo.pin_events(platform="lazada", period=window)
+    assert [e["action"] for e in events] == ["pin"]
+    assert events[0]["actor"].startswith("run "), events[0]["actor"]
+    assert "first run that produced a workbook" in events[0]["reason"]
 
 
 def test_pinning_an_unknown_version_is_404(make_client):

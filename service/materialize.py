@@ -30,6 +30,7 @@ number.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +44,59 @@ class MaterializationError(RuntimeError):
     Raised rather than worked around: a window quietly missing one export
     produces a workbook that looks complete and under-invoices one storefront.
     """
+
+
+# 1 MiB. Windows reach 382 MB; reading one whole in order to hash it would put the
+# largest export in memory twice, next to the frames the pipeline is about to build.
+_CHUNK = 1 << 20
+
+
+def digest_file(path: Path) -> str:
+    """sha256 of a file on disk, streamed."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(_CHUNK), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def verify_digest(target: Path, row: dict, item) -> None:
+    """The bytes the pipeline is about to read ARE the bytes that were stored.
+
+    Closes [defect 2.10](../docs/08-KNOWN-DEFECTS.md). Until M8/2.5 the download was
+    taken on trust: a digest was recorded at the door, carried through the database,
+    copied onto `MaterializedFile` — and never once compared against what actually
+    landed in scratch. Every claim the upload boundary makes, PII stripping included,
+    is a claim about a file the run might not have been reading.
+
+    **Which digest, and why it is not `sha256`.** `uploads.sha256` digests the
+    ORIGINAL upload; the object store holds the SANITIZED rewrite, which has
+    different bytes on purpose. Comparing against `sha256` fails every healthy
+    window — measured, and the reason `010_object_digest.sql` exists. The value that
+    means anything here is `object_sha256`.
+
+    A mismatch is a HARD failure, never a warning. There is no benign cause: an
+    object store returning different bytes under one key, a truncated download, or
+    two windows colliding in scratch each arrive here looking identical, and each is
+    a reason to stop rather than to invoice. Costs one streamed read per file.
+    """
+    expected = (row.get("object_sha256") or "").strip().lower()
+    if not expected:
+        raise MaterializationError(
+            f"upload {row['id']} ({item.original}) predates the M8/2.5 integrity "
+            f"check and carries no digest of its stored bytes, so nothing can "
+            f"establish that the file materialised for {item.store!r} is the file "
+            f"that was uploaded. Re-upload the export. (Computing the digest now "
+            f"would certify the object store against itself and pass even if the "
+            f"bytes had already been replaced — see 010_object_digest.sql.)")
+    actual = digest_file(target)
+    if actual != expected:
+        raise MaterializationError(
+            f"upload {row['id']} ({item.original}) does NOT match what was stored: "
+            f"recorded {expected[:12]}…, materialised {actual[:12]}… "
+            f"({target.stat().st_size:,} bytes from {row['object_key']!r}). The "
+            f"bytes this run would read are not the bytes that passed the upload "
+            f"door — the window is not safe to invoice from.")
 
 
 @dataclass(frozen=True)
@@ -213,6 +267,7 @@ def materialize_window(repo, settings, platform: str, period: str, *,
                     f"are not in the store at {row['object_key']!r}. The window is "
                     f"incomplete; running it would under-report "
                     f"{item.store!r}.") from exc
+            verify_digest(target, row, item)
             result.files.append(MaterializedFile(
                 upload_id=row["id"], kind=kind, store=item.store,
                 store_canonical=row.get("store_canonical") or item.store,

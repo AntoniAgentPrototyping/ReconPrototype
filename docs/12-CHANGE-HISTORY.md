@@ -24,7 +24,7 @@ The drift log is the most operationally useful page in these docs. It is the evi
 | Aug 2026 | Shopee income writes the Excel **accounting dash** (`-`) for zero — 46,972 of 83,134 rows of `seller_ship_support`, which feeds the discount allocation | **Fixed in M2.5** — the dash and blanks parse to `0.0`; only genuinely unparseable cells stay NaN, and those hard-stop with the column named ([defect 1.6](08-KNOWN-DEFECTS.md#16-silent-numeric-and-date-coercion--fixed-m25-2026-08-13-numeric-date-part-still-open)). The value was already right; the path was not |
 | Aug 2026 | The team's VAT master matches **no SKU** at the largest stores (0 of 295 TikTok / 650 Shopee), while matching 41–50% at another | Not drift so much as a standing gap made visible: the override fires where the master covers the store and nowhere else, and every SKU it has matched is 1.08. Coverage is reported every run; the policy question is [open question 9](11-OPEN-QUESTIONS.md) |
 | Aug 2026 | Shopee sub-window income files carry the settlement range in the name (`… 1-10.xlsx`, `… 21-end.xlsx`); Lazada weekly exports arrive browser-numbered (`2_KAO (1).xlsx` … `(4)`) | Both parsed as distinct stores. Handled as optional trailing tokens in the existing filename patterns — never by truncating the name |
-| Aug 2026 | One Lazada weekly export is **password-protected** | Cannot be staged or read. The stager names it in its refusal rather than crashing; the window (`2026-05_l5`, settled 05-25..31) has no golden |
+| Aug 2026 | One Lazada weekly export is **encrypted by a sensitivity label** | Cannot be staged or read. Recorded as "password-protected" until 2026-08-19, when the bytes were examined: it is a Microsoft Purview label (`method="Privileged"`), the same label id and tenant as the month-end master. No password exists to ask for; the label has to be removed or extended. The stager names it in its refusal rather than crashing; the window (`2026-05_l5`, settled 05-25..31) has no golden |
 
 **Pattern:** drift is roughly linear in platforms × stores × export variants. Each event needed a human to notice, diagnose, and hand-edit config. This is why schema-drift assistance is the one place AI earns its keep ([10-ROADMAP](10-ROADMAP.md#where-ai-does-and-does-not-belong)).
 
@@ -136,7 +136,7 @@ The step this system was most exposed on now has a tool instead of a monthly rew
 
 The acceptance test is that deriving reproduces the labels a human had already assigned by hand for all eight staged windows. It does, on all three platforms.
 
-Refusals, each mapped to a failure that actually happened: unclassifiable or unreadable files (a password-protected export is now *named*), identical content bound for two windows or already staged elsewhere (the double-pull class, 5.97B VND when it last happened), an export whose range starts before its siblings' (the shape that mis-pull took), and data-less exports (Summary-only Shopee files, removed by hand ten times in July). Each staged window now carries a `staging.json` provenance record; staging previously left none.
+Refusals, each mapped to a failure that actually happened: unclassifiable or unreadable files (an unreadable export is now *named* — the one this refers to turned out to be encrypted by a sensitivity label, not a password; see 2026-08-19 below), identical content bound for two windows or already staged elsewhere (the double-pull class, 5.97B VND when it last happened), an export whose range starts before its siblings' (the shape that mis-pull took), and data-less exports (Summary-only Shopee files, removed by hand ten times in July). Each staged window now carries a `staging.json` provenance record; staging previously left none.
 
 **Three bugs the tool had, all found by pointing it at real dumps rather than by reading it:**
 
@@ -167,7 +167,7 @@ Raw exports for more stores arrived, closing roadmap item 2. Coverage table in [
 - **It also staged nothing from nested folders.** Real Shopee exports arrive as per-sub-window directories (`1_10/`, `11_20 - Xmen/Doanh Thu/`); a flat `iterdir()` silently skipped them — the worst stager failure mode, because the run that follows looks fine and is simply missing a store. Now recursive, with a `--pattern` flag because one raw folder legitimately holds several settlement windows.
 - **Two store-identity hazards, both the [D6](06-DECISIONS.md#d6) filename problem.** Shopee sub-window income files carry the settlement range (`Income. Xmenforboss 1-10.xlsx` → store `Xmenforboss 1-10`), and a store's five weekly Lazada exports downloaded in one browser session arrive as `2_KAO.xlsx`, `2_KAO (1).xlsx` … (→ five distinct "stores"). Both fixed as optional trailing tokens in the existing patterns, under the standing rule that a store name must never be truncated.
 - **A double-pull was ruled out before staging, not after.** The Mars store shipped two order exports; they share **1 order in 24,408** and each alone covers only ~half the income orders, so they are complementary parts. The July 5.97B VND catch is why this gets checked every time.
-- **One Lazada week could not be staged at all — the export is password-protected.** The stager now names it in its existing "refusing to stage a partial tree" refusal instead of dying on a traceback that named no file.
+- **One Lazada week could not be staged at all — the export is encrypted.** The stager now names it in its existing "refusing to stage a partial tree" refusal instead of dying on a traceback that named no file. *(Called "password-protected" here until 2026-08-19; it is a Microsoft sensitivity label (corrected 2026-08-19 by reading the container's streams — same label id and tenant as the month-end master; `ingest.rights_protected` now names it).)*
 
 **And it corrected a claim made earlier the same day.** Defect 1.4's write-up had concluded from three stores that the VAT master matches nothing and the per-SKU override mechanism is inert. The KAO windows match 41–50% of their ledger rows: the lookup works, and the real finding is narrower — the master is populated for a different store set than the largest stores in this data. Every SKU it matches is still 1.08, so the non-1.08 path stays live-unexercised.
 
@@ -234,6 +234,277 @@ Suite: `36 passed, 3 skipped, 11 xfailed` → `74 passed, 3 skipped, 12 xfailed`
 
 The `docs/` set replaced a scattered collection of overlapping documents. Retired: `HANDOFF.md`, `COMPLETION_REPORT.md`, `REVIEW_PACKAGE.md` (auto-generated) and the six-file `EVALUATION_DOSSIER/`. Their content was migrated here — verification evidence into [07](07-VERIFICATION.md), rules into [05](05-DOMAIN-RULES.md), drift history into this file. The old `README.md` was scaffold-era and actively misleading (it described column maps as placeholders and Lazada as out of scope, long after both were false); it is now a navigation index.
 
+## M8 — production readiness (in progress, from 2026-08-18)
+
+The register in [14-PRODUCTION-READINESS](14-PRODUCTION-READINESS.md) is the working
+record; this notes what has landed and where a claim about it should be checked.
+
+**The defect register was audited against the code (2026-08-19), and about a third of
+what it called open had already been fixed.** Worth recording as drift in its own
+right: the page whose job is to stop rediscovery had itself become a source of it.
+Corrected in place with the wrong text quoted — 1.6's date residual and the 1.10 date
+bullet (`date_formats` had shipped), 1.7's "atomic write is M2" (M2 closed without it;
+D10 is the record), the 1.10 provenance bullet (three claims, three different answers,
+and its "parity fingerprints are the first step" sentence was simply false — zero
+references in `service/`), 2.3's description of `POST /uploads/{id}/stage`, deleted in
+M6, 2.5's "no way to pin ahead of time" (there is, since M8), register A5 (fixed on
+both paths by Phase 3) and A9's line citations. Two entries mattered more than
+tidiness:
+
+- **2.4's digest half described a fix that was measured to fail.** It said the stored
+  `uploads.sha256` "could be checked"; doing exactly that failed every healthy window,
+  because that digest is of the original upload while the store holds the sanitized
+  rewrite ([D52](06-DECISIONS.md#d52)). Left standing, it invited a reimplementation of
+  the version that does not work.
+- **2.12 cited D14 for "byte-identical order lines are legitimate."** That is D5. D14 is
+  "compare stored artifacts, not live processes".
+
+One gap was found *by* the audit rather than corrected in it: **artifact downloads are
+never digest-checked** — the same shape as 2.10, opposite direction, digest already
+stored. Also fixed in the same pass: Lazada's undated-date count was reported as one
+`lazada/ledger` line naming `dayfirst=False`, a setting Lazada does not consume and
+which migration 009 deliberately never emitted; it now reports per variant under the
+format that actually parsed it. And `src/export.py`'s docstring still said it was "not
+yet wired into production", citing `tools/full_run.py` — wired since M2, and that file
+became `tools/devrun.py` in M6.
+
+**Phase 1 — configuration into the database.** Config was fragmented across seven
+files, two of which nothing read; five settings keys were dead; seven tolerances
+were read by `src/tieout.py` and never configured, so code literals were the source
+of truth by accident; and two flags had code defaults that were the **opposite** of
+their configured values. Behind all of that sat **A1**: a config change made in the
+browser never reached the worker, because `config/` is baked into each image and no
+volume joins them, so applying a proposal wrote `settings.yaml` into the api
+container's writable layer and was lost on the next restart.
+
+The seam that made this safe was already there. `build_context(settings_text=…)`
+takes a YAML **string**, so the fix is normalized tables → renderer → YAML text →
+the existing `config_versions` snapshot → the existing per-window pin. `src/` never
+learns about Postgres, the I/O-boundary allowlist is unchanged, and `service/` stays
+deletable. It reverses [D2](06-DECISIONS.md#d2), and that reversal is argued in
+`service/migrations/007_config_normalized.sql`'s header rather than waved through:
+evidence becomes a **column**, which is strictly stronger than a comment — queryable,
+attributed, dated, and impossible to orphan by editing a neighbour.
+
+**The gate that mattered: all eight golden windows re-run under DB-rendered config —
+`matched 8 | moved 0`.** That is the test to run before believing any claim here
+(`tests/service/test_config_render.py::test_config_render_produces_the_committed_goldens`,
+~11 minutes). The fast suite is a *structural* gate and never re-runs the pipeline.
+
+**1.6 made the tables the thing that is edited**, not just the thing that is
+rendered. `service/config_edits.py` and `service/config_schema.py` are deleted;
+`service/config_rows.py` replaces both with eleven tables and two operations. Three
+things that were awkward became impossible rather than handled:
+
+- **Orphaned evidence.** Removing a commented list item left its justification
+  captioning the item below it — measured, and the worst available outcome: evidence
+  that looks authoritative and is attached to the wrong thing. A row deletes its own
+  evidence, so `OrphanedEvidence` and `comment_disposition` are gone.
+- **Per-entry evidence.** A file can only caption a top-level key, so the editor
+  showed the roster's justification against all 42 storefronts in it. Each row now
+  answers for itself.
+- **Inferring what can move a cell.** `invalidates_goldens` is a column on every
+  table (migration `008`), so `verification.verify` is *given* the answer instead of
+  resolving a dotted path back to a declared field. Two tables are argued down to
+  false and two were tightened; migration 008's header argues all four.
+
+**1.7 put Lazada in the contract.** Its column maps, sheet names and filename regex
+were module constants in `src/lazada.py`, imported directly by two modules in
+`service/`, one in `tools/` and a handful of tests — the last part of the domain
+contract that could only be changed by editing Python. They are now
+`column_maps.lazada`, `sheet_names.lazada` and `store_from_filename.lazada`, and the
+accessors that read them **hard-stop** rather than falling back to a copy, because a
+fallback would re-create the two-definitions problem the move removed. Four Lazada
+golden windows re-ran unmoved. `check_stores` is wired into `_run_lazada`, which
+never called it at all; `expected_stores.lazada` is still empty because that is a
+business question, and the check self-skips until it is answered.
+
+One thing 1.7 refused to do quietly: a Lazada platform row would have emitted
+`dayfirst.lazada: false` into the contract, and `read_ledger` calls `pd.to_datetime`
+with no `dayfirst` at all. Emitting it would have added a key nothing reads — what
+1.1 deleted five of — and honouring it would have shifted Lazada dates by up to
+eleven days inside an output-identical refactor. Migration `009` makes the column
+nullable and null means "this reader does not consume it".
+
+**1.8 found a control that had never run in production.** A11 said the live
+VAT/fee master is mounted at `/app/config/masters` while `src/masters.py` looks in
+`/app/config`. Confirmed **in a running container**, not read off the Dockerfile:
+with the file mounted and present, the pre-fix image reports `masters file 'Lib &
+VAT rate.xlsb' not found — using CSV snapshots`. Every containerised run had been on
+point-in-time snapshots. Both locations are searched now, the log names which
+answered, and the fallback is a **finding** rather than one `log.warn` in a log
+nobody reads after a green run. Measured honestly: the live master currently matches
+the snapshots exactly, so no number was wrong *yet* — the failure was that nothing
+would have said so the day the team edited the file.
+
+**A measurement that corrected a doc claim.** `--durations=25` over the 706s fast
+suite: two tests are 67% of it, both real-pipeline runs over real windows. So
+"the fast suite never re-runs the pipeline on real data" was true of
+`tests/goldens/` and false of the suite, and is corrected in `CLAUDE.md` and
+`docs/14` with the numbers. An opt-in Parquet read cache
+(`tests/io_cache.py`, `RECON_TEST_IO_CACHE=1`) halves those two — 357s to 210s
+measured — keyed on `sha256(bytes) + sheet + header_row + engine` so an edited
+export or a changed reading rule misses. **Off by default**, because a run served
+from a cache is a weaker run and the run that matters is the one nobody would have
+remembered to disable it for.
+
+**D6 closed as a consequence**, not as separate work: the roster "optional" flag and
+the settlement-bounds date pickers had both been described in help text and were
+absent from the schema, and normalising made each of them a column.
+
+**One correction worth recording.** During 1.1 the fast suite's `tests/goldens` was
+cited as proof that deleting dead config moved nothing. It is not: those tests
+compare committed digests against *static* golden cellsets and never execute
+`pipeline.run`. The claim happens to be true and the evidence is the 1.4 golden
+re-run, which ran afterwards — but the test named at the time could not have
+detected a behaviour change either way.
+
+**Phase 2 — the rest of the correctness work (2026-08-18).** Seven items, all
+landed, golden gate re-run over all eight windows at zero tolerance with **no cell
+moved**. The two worth remembering are the ones where the register was wrong.
+
+*2.5 was specified against the wrong column.* The register said "`uploads.sha256`
+sits unused ten lines from the download". Implementing exactly that failed **every
+healthy window** on the first run — `sha256` digests the original upload while the
+object store holds the sanitized rewrite, so the two were never comparable. Migration
+`010` adds `object_sha256` and [D52](06-DECISIONS.md#d52) records why no backfill is
+attempted. This is the pattern worth noticing: the register is a set of hypotheses
+written from reading code, and two of the seven did not survive contact with a run.
+
+*2.3's premise had to be measured before it could be landed*, because adding the
+roster check to orders files can only ever ADD hard stops. Measured across all four
+rostered golden windows: the store set derived from orders is **identical** to the
+one derived from income on every one of them. Zero windows newly stop. Had that come
+out differently the correct move was to report the list, not to land it and see.
+
+*The date counter was not a register item* and was added at the user's request after
+they challenged a claim in `CLAUDE.md` about what the fast suite proves. It closes
+the date half of [defect 1.6](08-KNOWN-DEFECTS.md) and immediately found something
+real: TikTok income is `%Y/%m/%d` while `dayfirst.tiktok` is `true`, so the file and
+the contract disagree on every run. The dates are correct today only because that
+column's first value is unambiguous — pandas infers the format from it and overrides
+the setting. A column whose first value has a day ≤ 12 would transpose silently.
+[D53](06-DECISIONS.md#d53) records why declaring the formats is a separate commit.
+
+*A test-hygiene leak, caught by the tests that were already there.*
+`window_references` was missing from the per-test `truncate` list, so figures
+supplied in one test file changed the status of three worker tests in another —
+`UNVERIFIED` became `VARIANCE`. It was unmissable precisely because those tests
+assert a status rather than a count. `windows` was added alongside it: same key,
+same shape of leak, and every worker test reuses one synthetic window name.
+
+**Phase 4 — making failure legible (2026-08-18).** Seven items, web-layer plus the
+service halves that back them. Three things are worth carrying forward.
+
+*The traceback fix is legibility, not security, and the register said so carefully
+enough that it survived implementation.* `GET /runs/{id}` and `GET /runs/{id}/log`
+are both `VIEWER`, so moving a stack trace from one to the other restricts nothing.
+What changed is what a finance user sees first on a failed run. The tempting
+implementation — interpolate `str(exc)` into a friendly wrapper — would have put
+connection strings and file paths on screen, so `failures.humanise` falls back to a
+fixed sentence instead, and a test asserts a fake password does not survive it.
+
+*The translation layer was too eager on its first pass, and the existing tests set
+it straight.* `MaterializationError` was given a canned sentence; three materialize
+tests failed because they assert on its real text, which names the file. The rule
+turned out to be "is this message written for this reader", not "is this an
+exception we recognise" — `ReconHardStop` and `MaterializationError` both pass
+through, everything else is translated.
+
+*A silent bug in my own new code, found by a test that asserted the outcome rather
+than the call.* `reclaim_expired` returns `{"requeued": [...], "dead": [...]}`; both
+the new endpoint and the new CLI command read `result["failed"]`. Reading a missing
+key from a dict returns the default, so the sweep ran, changed rows, and reported
+"nothing to reclaim". `assert response.status_code == 200` would have passed. What
+caught it was `assert job.id in body["failed"]`.
+
+*The worker healthcheck is a file, and the number in it comes from the lease.* The
+worker has no HTTP server and giving it one to answer a healthcheck would add a port
+and a framework to a process whose whole job is to hold one settlement run. It
+touches `scratch/worker.alive` each loop turn. The threshold is 1200s because the
+heartbeat is only touched *between* jobs — a worker inside a 269-second Shopee run is
+legitimately silent, and a tighter threshold would restart healthy workers
+mid-settlement. `stop_grace_period` was the same class of mistake already shipped:
+Docker's 10-second default against a 171-second run had been SIGKILLing workers
+partway through `build_workbook` on every redeploy.
+
+*The limit that did not move.* There is still no browser automation. Every screen in
+this phase was reasoned about and typechecked; none was exercised by a person or a
+test. That is [defect 2.8](08-KNOWN-DEFECTS.md)'s gap, it applies to these screens
+exactly as it applies to M6's, and Phase 4 does not close it.
+
+**A wrong diagnosis corrected, 2026-08-19 — and it was wrong in both directions.**
+
+Two files in the data tree refuse to open. The month-end master had been written up
+in the register as "not an `.xlsx`: an OLE2 compound file, i.e. a legacy Excel
+97–2003 `.xls` with the wrong extension". One Lazada weekly export had been recorded
+since August, in four documents, as **"password-protected"**. Neither was true.
+
+Both are genuine `.xlsx` files encrypted by a **Microsoft Purview sensitivity
+label** — the same label id, the same tenant, `method="Privileged"` on each. The
+`D0 CF 11 E0` signature that produced the first diagnosis is the encryption wrapper;
+`xlrd` opens the container and finds no workbook stream in it, which is what gave it
+away. The container's own `LabelInfo` stream names the label.
+
+*The mistake worth remembering:* **a container signature identifies the container,
+not what is inside it.** The magic-byte check was correct and the conclusion drawn
+from it was not, and it survived because the conclusion was plausible and nobody had
+a reason to look further.
+
+*Why the distinction is not pedantry.* "Password-protected" points at a fix that does
+not exist — there is no password to ask anyone for. A sensitivity label is org policy:
+the file opens only for an identity the label grants rights to, no re-save touches it,
+and **it will apply to every labelled file the team ever sends**. That makes it a
+constraint on hosting this system at all, not a per-file nuisance, and it now sits in
+[13-ENTRA-SETUP](13-ENTRA-SETUP.md) beside the role assignments and as register item
+**C15**.
+
+*What was built:* `src/ingest.rights_protected` — stdlib only, keyed on bytes,
+distinguishing three cases that need three different answers (a sensitivity label:
+re-saving will not help; plain encryption: ask for an unprotected copy; a genuine
+legacy `.xls`: re-saving IS the fix). Wired into `read_excel_sheet` and the upload
+door, so the failure stops being `File is not a zip file`. A healthy export costs 8
+bytes, because a real `.xlsx` is a ZIP and the signature check answers immediately.
+
+*The lint did its job on the way in:* adding a `open()` to `src/ingest.py` failed
+`test_io_boundary.py` until it was declared in the `ALLOWED` table. Declared, not
+exempted — widening that table is meant to be a visible act.
+
+**Phase 5 — the vocabulary and Vietnamese (2026-08-19).** Five items; the two worth
+carrying forward are both decisions rather than code.
+
+*The Vietnamese came from the team, not from a translator.* `src/finance_template.py`
+already held `VERDICT_OK = "ok có thể xuất HD"` and
+`VERDICT_BAD = "Cần check lại số có vấn đề"` — the phrases the finance team writes in
+their own workbooks. Those are now the run verdicts on screen, verbatim. Writing a
+more standard Vietnamese rendering of *variance* would have been fluent and would
+have made the interface read as a different system from the file it produces. A test
+asserts the two never diverge, because the tempting future edit is to "fix" the
+grammar.
+
+*The default language is the browser's, falling back to Vietnamese.* The app shipped
+`<html lang="en">` and zero Vietnamese words because nobody had got to it, not
+because anyone decided. `Accept-Language` gives a Vietnamese browser Vietnamese with
+nothing configured and a maintainer's browser English; Vietnamese wins ties, because
+a finance user seeing English is worse than a maintainer seeing Vietnamese — the
+maintainer can find the toggle.
+
+*Two typography changes the language forced.* Column headers lost
+`text-transform: uppercase`, because Vietnamese headers carry stacked diacritics that
+capitalisation cramps; and the 12px floor went to 13px with body at 15px, because
+ế/ộ/ữ lose their marks first at small sizes. Neither was on the register — they came
+out of doing the translation.
+
+*What is deliberately not done, and labelled:* byte-level upload progress (a server
+action gives the browser no progress events, and an XHR rewrite would cost the
+per-file refusal handling that matters at month end), and the rules editor and
+accounts screens, which stay English because the rules editor's load-bearing content
+is per-row evidence text written and verified in English in `settings.yaml`.
+
+*The limit that still has not moved:* `tests/test_ui_vocabulary.py` lints the source.
+It cannot tell anyone whether the Vietnamese reads naturally, because there is still
+no browser automation and nobody has used these screens.
+
 ## M6 — browser-only: passwords, bucket input, a revamped config editor (2026-08-17)
 
 The milestone that turned a verified pipeline with a service wrapper into an application. Five things changed — auth, input, the roster control, config, and sample data — and the verification apparatus stayed, because it is the reason anyone believes the numbers. It just stopped being something a *user* touches.
@@ -280,3 +551,51 @@ These are the findings, and they are the part of M6 worth re-reading:
 * **No `ROSTER:` stamp in the finance workbook's control block.** It is the stronger version of the roster caveat and it moves workbook cells, so it needs its own commit and a deliberate rebaseline rather than being smuggled into a change that must be output-identical.
 * **No deliberate tie-out breach in the demo**, and no planted duplicate row — see the generator's own docstring for why each would teach the wrong lesson.
 * **`drop_unmapped_columns` stays uneditable**, against the literal request. It is the PII control in two places and its diff reads as an ordinary boolean flip.
+
+## 2026-08-19 — July 2026 format and roster drift, found by staging and running the month
+
+The first full month staged and run since May, and it needed maintenance in four
+places. Recorded here because "rules that are month-shape-dependent have needed
+maintenance every single month so far" is a claim this project makes, and July is
+another data point for it.
+
+**1. TikTok income dates (the expensive one).** `dayfirst.tiktok: true` against a
+`%Y/%m/%d` income column inverted day and month, deriving a 1–7 July window as
+`2026-01-07..2026-09-07`. `tools/stage_exports.py` could not derive a single TikTok
+window from a 3.7 GB dump, and every folder's prior-month order re-pull then
+collided as a false double-pull. Fixed by declaring formats explicitly
+([D54](06-DECISIONS.md#d54)). **This had been latent since May and cost nothing
+then**, because May's first date value happened to be unambiguous so pandas'
+inference silently overrode the flag.
+
+**2. Lazada's two variants disagree with each other.** Weekly writes `03-Jul-2026`,
+Daily writes `29 Jul 2026`. Never noticed because inference handled both; it
+matters now that formats are declared, so the ledger parses per variant.
+
+**3. Shopee roster.** Three new storefronts — `Tolpa`, `pepsicofoods`,
+`xa_kho_gia_tot` — and one alias: the order files call Unilever AHC `AHC` while its
+income file spells it out. All four July Shopee windows hard-stopped on the
+unexpected-store check until these landed. The check was working; the config was
+stale.
+
+**4. TikTok folder spans overlap, so its windows cannot be derived.** Two genuine
+mis-pulls (a U food income file carrying w1's block, a Curel file carrying the
+whole month) plus a one-day boundary overlap at 7 July. TikTok is staged per folder
+with an explicit `--period`; Lazada and Shopee still derive automatically.
+
+**Three exports declare themselves empty in a way that used to block a window.**
+TikTok emits one all-blank row for a store that settled nothing —
+`19. Income Merries 29-31.xlsx`, `23. Income Reckit 29-31.xlsx`,
+`22. income Nutifood-Varna-Life.xlsx` (22-28). One row, 65 columns, not a single
+non-blank cell. They reported "no parseable dates", which reads as a broken export.
+They now join Shopee's zero-revenue "part 2" exports in the self-declared-empty
+class. The blank test had to tolerate **whitespace**: the row blocking `w4` held a
+single space in every cell, so an `== ""` test called it data.
+
+**Staging's cross-window duplicate check was too broad and was narrowed.** TikTok
+ships each store's prior-month order re-pull in *every* weekly folder,
+byte-identical, because the cross-period stitch needs it. Twenty-three such files
+were reported as double-pulls in one dump. Cross-window duplicates are now only
+reported for the kinds that DEFINE a window (income / Weekly / Daily); the
+same-window check is unchanged for every kind, because the same bytes twice in one
+window really does double-count.

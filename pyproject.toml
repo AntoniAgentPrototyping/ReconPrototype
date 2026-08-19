@@ -14,10 +14,17 @@ readme = "README.md"
 requires-python = ">=3.12,<3.14"
 
 dependencies = [
-    # Upper bound is a control, not laziness. pandas 3.0 makes Copy-on-Write
-    # the default, which changes whether an in-place mutation of a passed-in
-    # frame is visible to the caller (src/finance_template.py::_blank_repeats
-    # does exactly that). Lifting this bound requires re-running the golden
+    # Upper bound is a control, not laziness. pandas 3.0 makes Copy-on-Write the
+    # default, which changes whether an in-place mutation of a passed-in frame is
+    # visible to the caller.
+    #
+    # `_blank_repeats` was the named instance and it now copies defensively
+    # (2026-08-19), so the specific hazard is closed: its callers build
+    # `"Source.Name"` and `"Source.Name non repeat"` from the same Series, and under
+    # a no-copy constructor blanking the repeat column would have emptied the real
+    # store column on invoice tabs. **The bound still stays.** CoW changes far more
+    # than one function — every `.loc` assignment on a slice in ~700 lines of
+    # workbook construction — and lifting it requires re-running the golden
     # comparison in tests/, not just a green test suite.
     "pandas>=2.2,<3",
     "openpyxl>=3.1",
@@ -36,6 +43,13 @@ dev = [
     # Starlette's TestClient, for the api tests. A test-only dependency: nothing
     # in service/ imports httpx.
     "httpx>=0.27",
+    # Parquet, for the OPT-IN test read cache (tests/io_cache.py). Test-only and
+    # deliberately not a runtime dependency: the pipeline reads .xlsx and writes
+    # .xlsx, and adding a columnar format to the money path would be a second
+    # serialization nobody has verified. The cache exists so a developer's inner
+    # loop stops re-decoding the same 65,000-row Shopee income sheet, and it is
+    # OFF unless RECON_TEST_IO_CACHE=1 — see that module for why it must be.
+    "pyarrow>=16.0",
 ]
 
 # M4's service wrapper. An EXTRA, not a core dependency: a machine running
@@ -91,11 +105,18 @@ packages = ["src", "service"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Surface xfail/xpass in the summary: a strict xfail that unexpectedly PASSES
-# means a gap closed and the marker must go (D22). As of 2026-08-13 there are
-# none left — every pinned control gap is fixed — so the `control_gap` marker
-# was removed with the last of them rather than left declared for nothing.
-# Re-add it here if a new gap ever needs pinning; --strict-markers means an
-# undeclared marker fails loudly rather than silently doing nothing.
+# means a gap closed and the marker must go (D22). There are none left — the
+# original eleven closed by 2026-08-13, and `control_gap` was re-declared on
+# 2026-08-19 to pin defect 2.9 then removed again when the fix made all three of
+# its pins XPASS. Re-add it here if a new gap ever needs pinning;
+# --strict-markers means an undeclared marker fails loudly rather than silently
+# doing nothing.
+#
+# 2.9's regression tests survive the unpinning, in
+# tests/test_silent_failures.py, and each carries a *discriminator*: an
+# assertion that the pre-fix comparison would still have passed. That keeps the
+# proof of the original blindness in the suite permanently, which an xfail
+# marker cannot do once it is removed.
 addopts = "-ra --strict-markers"
 markers = [
     # Reads every raw export in `input/original exports` (~370 MB of xlsx), so

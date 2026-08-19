@@ -331,6 +331,76 @@ def test_an_artifact_is_listed_and_downloadable(client, repo, store, tmp_path):
     assert got.status_code == 200 and got.content == b"workbook bytes"
 
 
+# ---------------------------------------------------------------------------
+# Artifact integrity on the way OUT (defect 2.4's replacement gap, 2026-08-19)
+#
+# M8/2.5 closed the inbound half: an object the pipeline reads is checked against
+# `object_sha256` before anything parses it. Nothing checked the outbound half, so
+# a truncated or replaced workbook reached a finance user looking authoritative.
+# ---------------------------------------------------------------------------
+
+def _stored_artifact(client, repo, store, tmp_path, *, content=b"workbook bytes"):
+    job = client.post("/jobs", json={"platform": "lazada", "period": "2026-05_l1"}).json()
+    repo.claim("w1", 60)
+    run_id = repo.start_run(job["id"], "lazada", "2026-05_l1")
+    src = tmp_path / "scratch" / "finance_file.xlsx"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_bytes(content)
+    art = store.put(period="2026-05_l1", platform="lazada", run_id=run_id, path=src)
+    return run_id, art
+
+
+def test_an_artifact_whose_stored_bytes_changed_is_refused(
+        client, repo, store, tmp_path):
+    """Replace the stored bytes behind the api's back; the download must fail.
+
+    Served unchecked, this is a finance file that opens, looks current, and is not
+    what the run computed.
+    """
+    run_id, art = _stored_artifact(client, repo, store, tmp_path)
+    repo.record_artifact(run_id, name=art.name, uri=art.uri, bytes_=art.bytes,
+                         sha256=art.sha256)
+
+    local = store.open(art.uri)
+    assert local is not None, "this fixture's store must have a local view"
+    local.write_bytes(b"tampered bytes, same key")
+
+    got = client.get(f"/runs/{run_id}/artifacts/finance_file.xlsx")
+    assert got.status_code == 502, got.status_code
+    assert "does NOT match" in got.json()["detail"]
+    assert art.sha256[:12] in got.json()["detail"], (
+        "the refusal must name both digests so an operator can tell which side moved")
+
+
+def test_an_artifact_recorded_before_digests_existed_is_refused(
+        client, repo, store, tmp_path):
+    """A NULL digest is refused, not trusted, and NOT backfilled.
+
+    Hashing the stored file now would certify the object store against itself and
+    pass even if the bytes had already been replaced — the D26 argument that
+    `010_object_digest.sql` made for uploads. The cost is stated: such an artifact
+    stops being downloadable and a re-run regenerates it.
+    """
+    run_id, art = _stored_artifact(client, repo, store, tmp_path)
+    repo.record_artifact(run_id, name=art.name, uri=art.uri, bytes_=art.bytes,
+                         sha256="")
+
+    got = client.get(f"/runs/{run_id}/artifacts/finance_file.xlsx")
+    assert got.status_code == 502
+    assert "before artifact digests existed" in got.json()["detail"]
+    assert "Re-run the window" in got.json()["detail"]
+
+
+def test_an_intact_artifact_still_downloads(client, repo, store, tmp_path):
+    """Control: the check must not cost the ordinary path."""
+    run_id, art = _stored_artifact(client, repo, store, tmp_path, content=b"good bytes")
+    repo.record_artifact(run_id, name=art.name, uri=art.uri, bytes_=art.bytes,
+                         sha256=art.sha256)
+
+    got = client.get(f"/runs/{run_id}/artifacts/finance_file.xlsx")
+    assert got.status_code == 200 and got.content == b"good bytes"
+
+
 def test_an_unknown_artifact_is_404(client, repo):
     job = client.post("/jobs", json={"platform": "lazada", "period": "2026-05_l1"}).json()
     repo.claim("w1", 60)

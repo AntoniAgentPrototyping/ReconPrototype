@@ -420,3 +420,80 @@ Applying a proposal that touches a field marked `invalidates_goldens` re-runs a 
 *Why it is a question and not a refusal.* Evidence silently re-attached to the wrong entry is the worst outcome available to a module whose entire purpose is preserving evidence — but a blanket refusal would be a dead end for an ordinary action. Whether a block describes one entry or a group is a judgement only a human can make, so it is asked at the point it matters.
 
 *A related fix, found by the same test.* Appending to a list whose trailing block introduces the **next** key left the new item under that block — a new TikTok store rendered beneath a comment announcing Shopee's roster. The item is reflowed above it.
+
+## M8 — production readiness (2026-08-18)
+
+### D50 — Configuration is normalized into Postgres, and the file is rendered from it {#d50}
+Eleven `config_*` tables hold the contract; `service/config_render.py` turns them back into `settings.yaml` text; that text is what `config_versions` stores and what a run is pinned to. `config/settings.yaml` in git is the **seed** and the CLI's input.
+
+*This reverses [D2](#d2), and the reversal is argued rather than waved through.* D2 kept config as git-backed YAML because a database "would destroy the evidence comments and make month-end depend on the app being up". Both objections are answered by the shape, not by disagreement:
+
+- **Evidence became a column, which is strictly stronger than a comment.** It is queryable, it carries an author and a date, and it cannot be orphaned by an edit to a neighbouring key — a real failure mode the previous editor had to model ([D49](#d49)).
+- **The rendered file still exists**, comments and all, and is still what a run is pinned to. The tables are the editable working set; `config_versions` remains the archive.
+- **Month-end does not newly depend on Postgres.** The worker already cannot claim a job without it, and `python -m service.admin config export` writes the rows back to the file, so `tools/devrun.py` and the golden gate never require the service ([D24](#d24)).
+
+*The reason to do it at all was not tidiness.* A config change applied in the browser did not reach the worker: `config/` is baked into each image and no volume joins them, so the api wrote `settings.yaml` into its own container's writable layer and the change was lost on restart (register A1). Rows in a shared database are how one edit reaches both.
+
+*The seam made it cheap.* `build_context(settings_text=…)` takes a YAML **string**, so `src/` never learns about Postgres, the I/O-boundary allowlist is unchanged, and `service/` stays deletable.
+
+*Gated, not asserted:* all eight golden windows re-run under rendered config — **matched 8, moved 0**.
+
+### D51 — Config is edited as rows, and the dotted-path editor is deleted {#d51}
+An edit names a table and a row: `upsert` or `delete`, and nothing else. `service/config_edits.py` and `service/config_schema.py` are gone, replaced by `service/config_rows.py`.
+
+*Three things stopped being handled and started being impossible.* [D49](#d49) is retired outright — a row deletes its own evidence, so a comment cannot end up captioning its neighbour, and `comment_disposition` has nothing to ask about. Per-entry evidence became servable: a file can only caption a top-level key, so the M6 editor showed the roster's justification against all 42 storefronts in it. And "can this change move a workbook cell" stopped being inferred from a dotted path — it is a column on every table (migration `008`), so [D45](#d45)'s verification run is *given* the answer rather than resolving a path back to a declared field that may no longer exist.
+
+*What did not change, deliberately.* Propose → approve → apply, the `self_approved` generated column, `base_sha256` optimistic concurrency, and the refusal to merge ([D38](#d38)). What `base_sha256` compares is now the **rendered** contract, so the check is against what the worker would run rather than against one container's disk copy.
+
+*The honesty rule survived the rewrite in a stronger form.* `open_container` became `may_insert` / `may_delete` on a table that must state `closed_reason` — and the refusal quotes it. `config_scalars` is closed because `src/` reads its keys by name; `config_tolerances` is closed because a tolerance nothing reads is precisely what Phase 1.1 deleted three of.
+
+*An unseeded deployment refuses rather than falling back.* Editing this process's copy of `config/` would recreate A1 exactly, so the editor returns 503 naming `python -m service.config_import`, and `build_app` seeds the tables once on first boot.
+
+### D52 — Integrity is checked against the digest of what was STORED, not what was uploaded {#d52}
+`uploads.sha256` and the bytes in the object store are two different files, and conflating them is a bug that hides for as long as nobody checks.
+
+`sha256` digests what the user handed over. It is the provenance record, and it is what the unique constraint uses to refuse a byte-identical re-upload — the M2.5 double-pull control moved to the door ([D9](#d9)). What actually goes into the store is the **sanitized rewrite**: PII columns stripped, one sheet, written by openpyxl. Different bytes, on purpose, and that difference is the entire value of the upload boundary.
+
+So [defect 2.10](../docs/08-KNOWN-DEFECTS.md#210) could not be closed the way it was written up ("`uploads.sha256` sits unused ten lines from the download"). Comparing a materialised file against it failed every healthy window on the first run. Migration `010` adds `object_sha256`, recorded from the sanitized bytes, and that is what `materialize.verify_digest` compares.
+
+*No backfill, and the refusal to backfill is the decision.* Recomputing the expected digest for existing rows means reading whatever is in the store today and writing it down as correct — which certifies the store against itself and passes even if the bytes had already been replaced. That is [D26](#d26)'s failure with a different name. `NULL` means "uploaded before this check existed" and is **refused** at materialisation; the upload has to be re-made. A trust-on-first-use fallback would have been the easy option and would have made the check ornamental.
+
+### D53 — An unreadable date is counted, but does not stop the run {#d53}
+The mirror of [D3](#d3), deliberately set one notch lower, and the asymmetry is the point.
+
+A settlement export never legitimately contains an unparseable **amount**, so one hard-stops. A **date** can legitimately be blank — `apply_settlement_bounds` has always kept and reported undated income rows — so hard-stopping on one would refuse windows that are fine. The default is `warn`, with `date_coercion: hard_stop` for an operator who has looked and decided.
+
+What was wrong until M8 was never the leniency, it was the silence: money went through `report_unparseable` while dates went through a bare `errors="coerce"` with no counter at all. And the date failure is the quieter of the two — an unreadable amount produces a *wrong* number, an unreadable date produces a **missing** one, because `finance_template` groups on `.dt.month` and pandas drops a `NaN` group key by default. The row's money leaves the invoice with nothing said.
+
+*The related warning is captured rather than silenced.* pandas infers a date format from the first element and warns when that format contradicts the configured `dayfirst`. That warning is the exact signal that the contract and the file disagree, and it went to stderr and died there. It fires on real TikTok income today (`%Y/%m/%d` against `dayfirst.tiktok: true`), where the dates parse correctly *only* because the first value of that column is unambiguous.
+
+*Declaring the format is the durable fix and is deliberately not in this commit.* Explicit parsing is stricter than inference and can turn a row dateutil forgave into a `NaT`. The counter has to run first and come back clean, or a format change and a golden move land together with nothing to attribute either to — [D18](#d18) restated.
+
+### D54 — The settlement date's format is declared per platform/kind, not inferred {#d54}
+The fix [D53](#d53) deliberately deferred, landed on 2026-08-19 once the counter had run clean — and July is the month that proved it was not theoretical.
+
+`dayfirst` is per-PLATFORM. The formats are per-KIND, and no boolean can express that: TikTok **orders** really are `%d/%m/%Y %H:%M:%S` while TikTok **income** is `%Y/%m/%d`. pandas infers a format from the first non-null element and `dayfirst` only decides the ambiguous case, so which one wins is *data-dependent*. May's first `Order settled time` value happened to be unambiguous, inference quietly overrode the flag, and everything was correct by luck. July's first value is `2026/07/07` — ambiguous — so `dayfirst=True` won and the whole column parsed as `%Y/%d/%m`. A window covering 1–7 July came out spanning `2026-01-07..2026-09-07`, and `tools/stage_exports.py` could not derive a single window from a 3.7 GB dump.
+
+`date_formats.<platform>.<kind>` takes precedence over `dayfirst`, and `ingest.date_format` is the one accessor `src/`, `service/` and `tools/stage_exports.py` all read — the stager had been reading `dayfirst` directly, which is how it became a second source of truth for a spelling.
+
+*Every value was measured, not assumed.* Each format parses 100% of the non-blank cells in its date columns across **both** the May set (the golden windows) and the July set — 10 files per platform/kind, 80 for Lazada. The measurement found something no one had noticed: Lazada's two variants **disagree**. Weekly writes `03-Jul-2026` and Daily writes `29 Jul 2026`, so the ledger is parsed per variant. A single format over the concatenated frame would have `NaT`-ed every row of whichever variant lost, and the 25th-to-month-end Daily week is a permanent monthly fixture, not a corner case.
+
+*Explicit parsing is stricter, and the golden gate is what licensed it.* All eight golden windows were regenerated with the change in place and **not one cell moved**. That is the evidence, and it is the only thing that made this safe to land — [D18](#d18) again.
+
+### D55 — The month-end master is a chained job, never part of the settlement run {#d55}
+A window run that finishes with a workbook enqueues `kind='month_master'` for its month. It does not build the master inline, and both halves of that matter.
+
+A settlement run **must not fail because a cross-month aggregation failed**. By the time the master could run, the workbook a person invoices from is already written and stored; letting a summary turn that into a failed run would be the tail wagging the dog. So the enqueue is best-effort and a failure to queue is logged, not raised.
+
+It also cannot share the window's artifact set. That set is golden-gated — appending a second, differently-shaped workbook to it would move every window's manifest for a file that has nothing to do with that window. The master gets its own run record, its own log and its own artifacts, and shows up on the month board without anyone asking for it.
+
+*`ActiveJobExists` is the normal case, not an error.* Several windows of a month commonly finish within minutes of each other. The master already queued will read whichever windows have finished when it actually runs, so a second one would build the same file twice. The existing `(platform, period)` active-job index gives this for free, with `platform='all'` and the MONTH in `period` — which is also why `platform` is `'all'` rather than `NULL`: NULLs do not compare equal, so two concurrent masters for one month would both slip through the index.
+
+*It writes through `pipeline.write_artifacts` like everything else.* `RunResult.workbook_name` exists solely so the master can be `month_master.xlsx` instead of `finance_file.xlsx` while still going through the one declared writer. The alternative — a writer in `service/` — is a second unverified implementation of a deliverable, which is [D31](#d31).
+
+### D56 — A master that does not cover its month says so on its face {#d56}
+The master is rebuilt every time a window finishes, so for most of the month it is **partial by construction**. `Coverage` carries the included and the missing windows, the workbook's first tab is `Coverage`, and the `Summary` tab repeats the banner because that is the tab people actually read.
+
+A partial master is reported as `UNVERIFIED`, not `VARIANCE`. Nothing disagrees — it is a master that does not yet cover the month, and `UNVERIFIED` already means "completed, but nothing corroborated this". Calling it a variance would put a number-disagreement verdict on a coverage fact.
+
+The missing list is only possible because the window list comes from the database ([task 3.3](../docs/14-PRODUCTION-READINESS.md)): `month_windows` unions runs, roster declarations and uploads, so a window whose files arrived but which nobody ran is *known* and therefore reportable. The hardcoded `WINDOWS` dict it replaced could not have reported a missing window, because a window it had never heard of — `s2x`, `s3k` — was indistinguishable from one that does not exist.

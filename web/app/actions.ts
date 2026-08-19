@@ -10,6 +10,8 @@
  */
 import { revalidatePath } from "next/cache";
 import { cookies } from "next/headers";
+
+import { LANG_COOKIE } from "@/lib/lang";
 import { redirect } from "next/navigation";
 
 import {
@@ -344,9 +346,148 @@ export async function clearRosterDeclaration(
   return { ok: true, message: "Declaration withdrawn. An incomplete window hard-stops again." };
 }
 
+/**
+ * Record the team's own totals for a window (A3).
+ *
+ * A run with no reference figures exits UNVERIFIED — it completed and nothing
+ * corroborated it. Every browser-driven run has been in that state since M6,
+ * because the API accepted reference totals on a job and no screen ever sent any.
+ *
+ * Blank fields are dropped rather than sent as zero. A zero would compare the
+ * window against 0 VND and report the whole thing as a variance; a blank means the
+ * team did not give us that figure, and the check skips it.
+ */
+export async function setReferences(
+  _prev: ActionResult | null,
+  form: FormData,
+): Promise<ActionResult> {
+  const platform = String(form.get("platform") ?? "");
+  const period = String(form.get("period") ?? "").trim();
+  const note = String(form.get("note") ?? "").trim();
+
+  const values: Record<string, string> = {};
+  for (const [name, raw] of form.entries()) {
+    if (!name.startsWith("ref.")) continue;
+    const text = String(raw).trim();
+    if (text) values[name.slice(4)] = text;
+  }
+  try {
+    await api(`/windows/${platform}/${period}/references`, {
+      method: "PUT",
+      body: { values, note: note || null },
+    });
+  } catch (error) {
+    return { ok: false, message: describe(error) };
+  }
+  revalidatePath(`/windows/${platform}/${period}`);
+  revalidatePath("/");
+  const n = Object.keys(values).length;
+  return {
+    ok: true,
+    message:
+      n === 0
+        ? "Saved with no figures. Runs of this window will report UNVERIFIED."
+        : `Saved ${n} reference figure${n === 1 ? "" : "s"}. The next run of this window will be checked against them.`,
+  };
+}
+
+export async function clearReferences(
+  platform: string,
+  period: string,
+): Promise<ActionResult> {
+  try {
+    await api(`/windows/${platform}/${period}/references`, { method: "DELETE" });
+  } catch (error) {
+    return { ok: false, message: describe(error) };
+  }
+  revalidatePath(`/windows/${platform}/${period}`);
+  revalidatePath("/");
+  return {
+    ok: true,
+    message: "Reference totals withdrawn. Runs of this window report UNVERIFIED again.",
+  };
+}
+
+/**
+ * Switch language (**B7**).
+ *
+ * A cookie rather than a URL segment or a user column: it takes effect on the next
+ * render with no route rewriting, it survives sign-out — a person who cannot read
+ * the login page needs the toggle to work *before* they authenticate — and it is
+ * not a preference worth a database migration.
+ *
+ * Not `httpOnly`, unlike the session cookie: nothing here is a credential, and a
+ * client component reading the current language is a reasonable thing to want later.
+ */
+export async function setLanguage(lang: "en" | "vi"): Promise<void> {
+  const jar = await cookies();
+  jar.set(LANG_COOKIE, lang, {
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: 60 * 60 * 24 * 365,
+  });
+  revalidatePath("/", "layout");
+}
+
 export async function cancelJob(jobId: number): Promise<void> {
   await api(`/jobs/${jobId}/cancel`, { method: "POST" });
   revalidatePath("/");
+}
+
+/**
+ * Cancel from the run page (**B4**) — same endpoint as the board's, reported back
+ * rather than silent, and revalidating the run as well as the board so the badge
+ * on the page you are looking at is the one that changes.
+ */
+export async function cancelRun(jobId: number, runId: number): Promise<ActionResult> {
+  try {
+    await api(`/jobs/${jobId}/cancel`, { method: "POST" });
+  } catch (error) {
+    return { ok: false, message: describe(error) };
+  }
+  revalidatePath(`/runs/${runId}`);
+  revalidatePath("/");
+  return { ok: true, message: "Cancelled. No finance file was written." };
+}
+
+/**
+ * Queue the same window again (**B4**).
+ *
+ * Goes through `POST /jobs` exactly as the board's queue form does — no separate
+ * "re-run" concept, because a second run of a window IS just a run of that window,
+ * and inventing a distinct path would give it different guards. The 409 that comes
+ * back when a live job already exists is the double-run control ([D30]) and is
+ * reported as-is rather than retried.
+ */
+export async function requeueRun(platform: string, period: string): Promise<ActionResult> {
+  try {
+    await api("/jobs", { method: "POST", body: { platform, period } });
+  } catch (error) {
+    return { ok: false, message: describe(error) };
+  }
+  revalidatePath("/");
+  return {
+    ok: true,
+    message: `Queued ${platform} ${period} again. It appears on the board as a new run.`,
+  };
+}
+
+/**
+ * Close out jobs whose worker died (**C1**). Admin only, enforced by the API.
+ *
+ * Reports what it did rather than succeeding silently: "nothing to reclaim" and
+ * "closed out three jobs" are completely different answers to "is something
+ * stuck", and a button that looks the same either way teaches nothing.
+ */
+export async function reclaimJobs(): Promise<ActionResult> {
+  try {
+    const result = await api<{ message: string }>("/jobs/reclaim", { method: "POST" });
+    revalidatePath("/");
+    return { ok: true, message: result.message };
+  } catch (error) {
+    return { ok: false, message: describe(error) };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +507,7 @@ export async function previewEdits(
       body: { edits, summary: "preview only, nothing is proposed" },
     });
     if (!body.changed) {
-      return { ok: false, message: "Those values are already what the file says." };
+      return { ok: false, message: "Those values are already what the contract says." };
     }
     return { ok: true, message: "", diff: body.diff, invalidates: body.invalidates_goldens };
   } catch (error) {
@@ -401,7 +542,7 @@ export async function rebaseProposal(id: number): Promise<ActionResult> {
     revalidatePath("/config");
     return {
       ok: true,
-      message: `Replayed against the current file as proposal #${created.id}. Review its diff — this is a replay of the stated intent, not a merge.`,
+      message: `Replayed against the current contract as proposal #${created.id}. Review its diff — this is a replay of the stated intent, not a merge.`,
     };
   } catch (error) {
     return { ok: false, message: describe(error) };
@@ -413,7 +554,9 @@ export async function rebaseProposal(id: number): Promise<ActionResult> {
 // parsing the string — so it required the operator to already know the pipeline's
 // internal key names, and `1.10` versus `"1.10"` was decided by a heuristic. The user
 // who asked for this revamp put it plainly: non-technical people do not know what a
-// JSON is. `proposeEdits` above takes typed operations from purpose-built controls.
+// JSON is. `proposeEdits` above takes typed row operations from purpose-built
+// controls, and since M8/1.6 the type of a value is decided by the column it is
+// going into rather than by parsing what somebody typed.
 
 export async function decideProposal(
   id: number,

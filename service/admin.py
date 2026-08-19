@@ -43,6 +43,7 @@ Rejected alternatives, both worse:
 from __future__ import annotations
 
 import argparse
+import getpass
 import sys
 
 from . import db, passwords
@@ -144,26 +145,106 @@ def cmd_user_enable(repo: M5Repository, args) -> int:
     return 0
 
 
+def cmd_job_list(repo: M5Repository, args) -> int:
+    """What the queue is actually doing (**C1**).
+
+    The unstick path starts here. A job stuck in `leased` with an expired lease is
+    a worker that died mid-run, and until M8 the only way to see one was to open
+    psql — which meant the person who could diagnose it and the person who noticed
+    it were rarely the same person.
+
+    Deliberately shows the lease, not just the state: `leased` on its own is
+    indistinguishable between "running normally" and "the worker is gone", and
+    that distinction is the entire question being asked.
+    """
+    from datetime import datetime, timezone
+
+    jobs = repo.list_jobs(state=None, limit=args.limit)
+    if args.state:
+        jobs = [j for j in jobs if j.state.value == args.state]
+    if not jobs:
+        print("no jobs")
+        return 0
+
+    now = datetime.now(timezone.utc)
+    print(f"{'id':>5}  {'state':<9} {'platform':<8} {'period':<16} {'attempts':>8}  lease")
+    for j in jobs:
+        if j.lease_expires_at is None:
+            lease = "-"
+        elif j.lease_expires_at < now:
+            lease = f"EXPIRED {int((now - j.lease_expires_at).total_seconds())}s ago"
+        else:
+            lease = f"{int((j.lease_expires_at - now).total_seconds())}s left"
+        print(f"{j.id:>5}  {j.state.value:<9} {j.platform:<8} {j.period:<16} "
+              f"{j.attempts:>8}  {lease}  {j.leased_by or ''}")
+    return 0
+
+
+def cmd_job_reclaim(repo: M5Repository, args) -> int:
+    """Deal with leases whose worker stopped talking (**C1**).
+
+    The sweep already existed and runs at the top of every worker loop turn. The
+    hole it could not cover is the one that matters: if the only worker is the one
+    that died, nothing sweeps, and the job sits `leased` forever with the board
+    showing it as running. This is the same call, reachable without a worker.
+
+    `max_attempts` defaults to 1, so by default this REQUEUES nothing — it marks
+    the job `error` and stops. That is deliberate and is not changed here: an
+    automatic retry of a settlement run is a second write of the same money
+    ([D30](../docs/06-DECISIONS.md#d30)).
+    """
+    result = repo.reclaim_expired()
+    # `dead` is the repository's key for "no attempts remain, stop". Reading the
+    # wrong key here fails silently — the sweep runs and reports nothing.
+    requeued, failed = result.get("requeued", []), result.get("dead", [])
+    if not requeued and not failed:
+        print("nothing to reclaim — no lease has expired.")
+        return 0
+    if requeued:
+        print(f"requeued {len(requeued)} job(s): {requeued}")
+    if failed:
+        print(f"marked {len(failed)} job(s) as failed: {failed}")
+        print("Their runs are closed as hard_stop, so the board no longer shows "
+              "them running. Look at each one before re-queueing the window.")
+    return 0
+
+
 def cmd_config_pins(repo: M5Repository, args) -> int:
     pins = repo.list_pins()
+    events = repo.pin_events()
     if not pins:
-        print("no windows are pinned. A window is pinned by its first run that "
-              "produces a workbook.")
-        return 0
-    print(f"{'platform':<10} {'period':<16} {'version':>7}  {'config':<14} pinned by")
-    for p in pins:
-        print(f"{p['platform']:<10} {p['period']:<16} {p['config_version_id']:>7}  "
-              f"{p['sha256'][:12]:<14} {p['pinned_by'] or ''}")
+        print("no windows are pinned. A window is pinned automatically by its first "
+              "run that produces a workbook, or by hand via POST /config/pins.")
+    else:
+        print(f"{'platform':<10} {'period':<16} {'version':>7}  {'config':<14} pinned by")
+        for p in pins:
+            print(f"{p['platform']:<10} {p['period']:<16} {p['config_version_id']:>7}  "
+                  f"{p['sha256'][:12]:<14} {p['pinned_by'] or ''}")
+
+    # The history, because an unpinned window has no row above at all: without this,
+    # "never pinned" and "pinned then released" look identical (defect 2.5).
+    if events:
+        print()
+        print(f"pin history ({len(events)} event(s), newest first):")
+        print(f"{'when':<17} {'action':<6} {'platform':<8} {'period':<16} "
+              f"{'ver':>4}  actor / reason")
+        for e in events:
+            print(f"{e['at']:%Y-%m-%d %H:%M}  {e['action']:<6} {e['platform']:<8} "
+                  f"{e['period']:<16} {e['config_version_id'] or '-':>4}  "
+                  f"{e['actor']}: {e['reason']}")
     return 0
 
 
 def cmd_config_unpin(repo: M5Repository, args) -> int:
-    if not repo.unpin_period_config(args.platform, args.period):
+    if not repo.unpin_period_config(args.platform, args.period,
+                                    actor=f"admin cli ({getpass.getuser()})",
+                                    reason=args.reason):
         print(f"{args.platform} {args.period} is not pinned", file=sys.stderr)
         return 1
     print(f"unpinned {args.platform} {args.period}.")
     print("WARNING: the next run of this window will read today's config, so it may "
           "produce different numbers than the run it was invoiced from.")
+    print("Recorded in config_pin_events; `config pins` prints the history.")
     return 0
 
 
@@ -172,6 +253,33 @@ def cmd_config_versions(repo: M5Repository, args) -> int:
         commit = (v["git_commit"] or "")[:12]
         print(f"{v['id']:>4}  {v['sha256'][:12]}  {v['source']:<9} {commit:<14} "
               f"{v['created_at']:%Y-%m-%d %H:%M}  {v['created_by'] or ''}")
+    return 0
+
+
+def cmd_config_export(repo, args) -> int:
+    """Write the config tables back out as `settings.yaml`.
+
+    This is what keeps [D24](../docs/06-DECISIONS.md#d24) true after the database
+    becomes the editable source of truth: `tools/devrun.py`, `tools/make_golden.py`
+    and the whole golden gate read a FILE and know nothing about Postgres. Export
+    before a month-end run on the CLI, and the developer path works with the service
+    switched off entirely.
+
+    It also answers the objection D2 raised against ever doing this — that config in
+    a database makes month-end depend on the app being up. The file is one command
+    away at all times, and it is a complete contract, not a dump.
+    """
+    from pathlib import Path
+
+    settings = ServiceSettings.from_env()
+    text = repo.render_config()
+    if text is None:
+        print("the config tables are empty — nothing to export. Seed them first:\n"
+              "  python -m service.config_import")
+        return 1
+    out = Path(args.out) if args.out else Path(settings.config_dir) / "settings.yaml"
+    out.write_text(text, encoding="utf-8")
+    print(f"wrote {len(text.splitlines())} line(s) to {out}")
     return 0
 
 
@@ -206,6 +314,19 @@ def build_parser() -> argparse.ArgumentParser:
     ena.add_argument("--username", required=True)
     ena.set_defaults(func=cmd_user_enable)
 
+    job = sub.add_parser("job", help="see the queue and unstick a dead worker's job")
+    jsub = job.add_subparsers(dest="action", required=True)
+    jlist = jsub.add_parser("list", help="jobs and whether their lease is still live")
+    jlist.add_argument("--state", default=None,
+                       help="queued, leased, done or error")
+    jlist.add_argument("--limit", type=int, default=50)
+    jlist.set_defaults(func=cmd_job_list)
+    jsub.add_parser(
+        "reclaim",
+        help="close out jobs whose worker died. Requeues only while attempts "
+             "remain, which by default means never — see D30",
+    ).set_defaults(func=cmd_job_reclaim)
+
     config = sub.add_parser("config", help="inspect config versions and pins")
     csub = config.add_subparsers(dest="action", required=True)
     csub.add_parser("pins", help="which windows are frozen to which config").set_defaults(
@@ -216,7 +337,18 @@ def build_parser() -> argparse.ArgumentParser:
     unpin = csub.add_parser("unpin", help="let a window read today's config again")
     unpin.add_argument("--platform", required=True, choices=["tiktok", "shopee", "lazada"])
     unpin.add_argument("--period", required=True)
+    # Required, like the api's. Releasing a pin means a re-run of this window may
+    # not reproduce the invoice it was booked from, and until 2026-08-19 that act
+    # left no record at all (defect 2.5).
+    unpin.add_argument("--reason", required=True,
+                       help="why this window is being released; recorded permanently")
     unpin.set_defaults(func=cmd_config_unpin)
+
+    export = csub.add_parser(
+        "export", help="write the current config tables back to settings.yaml")
+    export.add_argument("--out", default=None,
+                        help="default: the deployment's config/settings.yaml")
+    export.set_defaults(func=cmd_config_export)
 
     return ap
 

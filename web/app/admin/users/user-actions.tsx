@@ -18,6 +18,13 @@ import {
  * deployment whose only admin has locked themselves out cannot be administered
  * from the browser at all and needs someone with the database URL.
  */
+/** What each confirmation actually costs the person it is done to. */
+const CONFIRMATIONS: Record<string, (username: string) => string> = {
+  reset: (u) => `Reset ${u}'s password? Their current one stops working immediately and they need the temporary one from you to get back in.`,
+  revoke: (u) => `Sign ${u} out of every browser? Anything they have open stops working and they sign in again.`,
+  disable: (u) => `Disable ${u}? They cannot sign in at all until somebody re-enables the account.`,
+};
+
 export default function UserActions({
   userId,
   username,
@@ -35,6 +42,16 @@ export default function UserActions({
 }) {
   const [pending, start] = useTransition();
   const [result, setResult] = useState<ActionResult | null>(null);
+  // B8: a role change is applied by a button, not by the select. `onChange`
+  // committed a privilege change on a keystroke — arrowing through the list to
+  // read the options granted admin on the way past, and a mis-click was
+  // indistinguishable from a decision. `chosen` holds the intent; nothing leaves
+  // the browser until Apply.
+  const [chosen, setChosen] = useState(role);
+  // B8: the three irreversible-ish actions ask first. Reset password invalidates
+  // the person's current one, and sign-out-everywhere ends live sessions —
+  // recoverable, but not by them and not quickly, and both were one stray click.
+  const [confirming, setConfirming] = useState<string | null>(null);
 
   function run(fn: () => Promise<ActionResult>) {
     start(async () => setResult(await fn()));
@@ -48,7 +65,7 @@ export default function UserActions({
         <button
           type="button"
           disabled={pending}
-          onClick={() => run(() => resetUserPassword(userId))}
+          onClick={() => setConfirming("reset")}
         >
           Reset password
         </button>
@@ -56,7 +73,7 @@ export default function UserActions({
         <button
           type="button"
           disabled={pending}
-          onClick={() => run(() => revokeUserSessions(userId))}
+          onClick={() => setConfirming("revoke")}
           title="Sign this person out of every browser"
         >
           Sign out everywhere
@@ -66,25 +83,65 @@ export default function UserActions({
           <button
             type="button"
             disabled={pending}
-            onClick={() => run(() => setUserDisabled(userId, !disabled))}
+            onClick={() =>
+              // Enabling somebody is not destructive; disabling them is.
+              disabled ? run(() => setUserDisabled(userId, false)) : setConfirming("disable")
+            }
           >
             {disabled ? "Enable" : "Disable"}
           </button>
         )}
 
         {!protectedRow && (
-          <select
-            defaultValue={role}
-            disabled={pending}
-            onChange={(e) => run(() => setUserRole(userId, e.target.value))}
-            aria-label={`Role for ${username}`}
-          >
-            <option value="recon.viewer">recon.viewer</option>
-            <option value="recon.user">recon.user</option>
-            <option value="recon.admin">recon.admin</option>
-          </select>
+          <>
+            <select
+              value={chosen}
+              disabled={pending}
+              onChange={(e) => setChosen(e.target.value)}
+              aria-label={`Role for ${username}`}
+            >
+              <option value="recon.viewer">recon.viewer</option>
+              <option value="recon.user">recon.user</option>
+              <option value="recon.admin">recon.admin</option>
+            </select>
+            {chosen !== role && (
+              <button
+                type="button"
+                disabled={pending}
+                onClick={() => run(() => setUserRole(userId, chosen))}
+              >
+                Apply {chosen.replace("recon.", "")}
+              </button>
+            )}
+          </>
         )}
       </div>
+
+      {confirming && (
+        <div className="notice" style={{ marginTop: 6 }}>
+          <span className="small">{CONFIRMATIONS[confirming](username)}</span>{" "}
+          <button
+            type="button"
+            disabled={pending}
+            onClick={() => {
+              const action = confirming;
+              setConfirming(null);
+              run(() =>
+                action === "reset"
+                  ? resetUserPassword(userId)
+                  : action === "revoke"
+                    ? revokeUserSessions(userId)
+                    : setUserDisabled(userId, true),
+              );
+            }}
+          >
+            Yes
+          </button>{" "}
+          <button type="button" className="secondary" onClick={() => setConfirming(null)}>
+            No
+          </button>
+        </div>
+      )}
 
       {protectedRow && (
         <div className="muted small">
@@ -93,7 +150,11 @@ export default function UserActions({
       )}
 
       {result && (
-        <div className={`notice ${result.ok ? "good" : "bad"}`} style={{ marginTop: 6 }}>
+        <div
+          className={`notice ${result.ok ? "good" : "bad"}`}
+          style={{ marginTop: 6 }}
+          aria-live="polite"
+        >
           {result.message}
         </div>
       )}

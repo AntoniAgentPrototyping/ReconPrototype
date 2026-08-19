@@ -111,14 +111,14 @@ def test_a_hard_stop_does_not_consume_the_uploads(
     """The fix for a hard stop may well be to reject one file and upload the right
     one, so a run that produced nothing must not mark anything consumed."""
     import pandas as pd
-    from src import lazada
+    from _contract import lazada_headers, lazada_sheet
 
     # A file with the right shape and the wrong contents: it sanitizes and stores,
     # then hard-stops inside the run.
     export = tmp_path / "1_Broken.xlsx"
     with pd.ExcelWriter(export, engine="openpyxl") as w:
-        pd.DataFrame({list(lazada.WEEKLY_MAP)[0]: ["x"]}).to_excel(
-            w, sheet_name=lazada.SHEETS["weekly"], index=False)
+        pd.DataFrame({lazada_headers("weekly")[0]: ["x"]}).to_excel(
+            w, sheet_name=lazada_sheet("weekly"), index=False)
     client = make_client("recon.user")
     with export.open("rb") as fh:
         assert client.post("/uploads", files={"file": (export.name, fh)},
@@ -189,15 +189,15 @@ def test_two_uploads_with_one_filename_are_refused(repo: Repository, worker: Wor
     """One would overwrite the other in the window folder and the run would use the
     wrong bytes — the double-pull class arriving by a new route."""
     import pandas as pd
-    from src import lazada
+    from _contract import lazada_headers, lazada_sheet
 
     client = make_client("recon.user")
-    mapped = list(lazada.WEEKLY_MAP)[:5]
+    mapped = lazada_headers("weekly")[:5]
     for marker in ("a", "b"):
         export = tmp_path / f"1_{STORE}.xlsx"
         with pd.ExcelWriter(export, engine="openpyxl") as w:
             pd.DataFrame({**{c: [f"{c}{marker}"] for c in mapped}}).to_excel(
-                w, sheet_name=lazada.SHEETS["weekly"], index=False)
+                w, sheet_name=lazada_sheet("weekly"), index=False)
         with export.open("rb") as fh:
             assert client.post("/uploads", files={"file": (export.name, fh)},
                                data={"platform": "lazada", "period": "2026-05_dupe",
@@ -239,3 +239,50 @@ def test_an_alias_resolves_before_the_roster_is_checked():
     assert canonical_store(settings, "shopee", "kao vn") == "Kao"
     assert canonical_store(settings, "shopee", "mystery") == "mystery"
     assert canonical_store(settings, "shopee", "Untouched") == "Untouched"
+
+
+def test_object_bytes_that_do_not_match_the_recorded_digest_stop_the_run(
+        repo: Repository, worker: Worker, uploaded_window, service_settings):
+    """The bytes the pipeline reads must be the bytes that were checked at the door.
+
+    Until M8/2.5 they were merely assumed to be: a digest was recorded at upload,
+    carried through the database and copied onto `MaterializedFile` — and never
+    compared against what landed in scratch (defect 2.10). Every claim the upload
+    boundary makes, PII stripping included, is a claim about a file this run might
+    not have been reading.
+
+    Replacing an object's bytes under its key, leaving the recorded digest alone, is
+    the smallest honest simulation of that: a truncated download and a mixed-up key
+    both arrive here looking exactly like this.
+
+    The digest compared is `object_sha256`, NOT `sha256` — the latter digests the
+    original upload while the store holds the sanitized rewrite. Writing this check
+    against `sha256` failed every healthy window, which is what
+    `010_object_digest.sql` records.
+    """
+    from service import objects as object_lib
+
+    store = object_lib.upload_store(service_settings)
+    key = uploaded_window[0]["object_key"]
+    store.put(key, b"different bytes entirely")
+
+    repo.enqueue("lazada", PERIOD)
+    run_id = worker.serve(once=True)[0].run_id
+    run = repo.get_run(run_id)
+    assert run.status is RunStatus.HARD_STOP
+    assert "does NOT match what was stored" in (run.error or "")
+
+
+def test_an_intact_window_passes_the_digest_check(
+        repo: Repository, worker: Worker, uploaded_window):
+    """The other half: the check must not fire on a healthy window.
+
+    Without this, a `verify_digest` that raised unconditionally would still make the
+    test above green — and the suite would be pinning "materialisation fails" rather
+    than "materialisation is verified".
+    """
+    repo.enqueue("lazada", PERIOD)
+    run_id = worker.serve(once=True)[0].run_id
+    run = repo.get_run(run_id)
+    assert run.status is not RunStatus.HARD_STOP
+    assert "does NOT match" not in (run.error or "")

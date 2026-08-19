@@ -92,8 +92,25 @@ CMD ["python", "-m", "service.api", "--host", "0.0.0.0", "--port", "8080"]
 
 # ---------------------------------------------------------------------------
 FROM base AS worker
-# One job at a time per process: settings["_vat_sku"] is a mutable back-channel
-# and two concurrent runs sharing a settings dict cross-contaminate VAT rates.
-# Scale by replicas — which is what FOR UPDATE SKIP LOCKED is for — never by
-# threads inside one worker.
+# One job at a time per process: a window's frames peak well into the GBs, so two
+# in one process is the one reliable way to double peak RSS, and `build_context`
+# hands each job its own mutable settings dict. (The original reason was the
+# settings["_vat_sku"] back-channel; that is gone since 2026-08-19 — defect 1.9 —
+# but the design stands on memory.) Scale by replicas — which is what
+# FOR UPDATE SKIP LOCKED is for — never by threads inside one worker.
+#
+# C2: the worker had no healthcheck at all, so a wedged one looked identical to a
+# busy one and Docker would never restart it. It has no HTTP server and is not
+# getting one to answer this — it writes a heartbeat file at the top of every loop
+# turn instead (`Worker.heartbeat_path`).
+#
+# The 1200s threshold is set from the LEASE (900s), not from the poll interval.
+# The heartbeat is only touched between jobs, so a worker legitimately inside a
+# 269-second Shopee run is silent here — and the lease is already the number this
+# system uses for "silent for longer than this means stuck". Anything tighter
+# would restart healthy workers mid-settlement, which is worse than the problem.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
+    CMD python -c "import os,sys,time; \
+p=os.environ.get('RECON_SCRATCH_ROOT','/data/scratch')+'/worker.alive'; \
+sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 1200 else 1)"
 CMD ["python", "-m", "service.worker"]

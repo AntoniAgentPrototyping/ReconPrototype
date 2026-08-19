@@ -39,9 +39,16 @@ def reference_for(clean):
     export while the frame under test is rebuilt from the order export. Taking
     it *after* the mutation would recreate the original defect exactly — both
     sides derived from the same data, and a check that cannot fail.
+
+    Grouped on **(store, order_id)**, not `order_id` alone. The one-key version
+    took `store=("store", "first")`, which silently picks a winner as soon as two
+    stores share an id — so a collision fixture handed to it would prove nothing
+    about the code under test (defect 2.9). Every fixture here is collision-free,
+    so this is output-identical today; it is the composite that makes the pin in
+    test_silent_failures.py meaningful.
     """
-    income = clean.groupby("order_id", as_index=False).agg(
-        store=("store", "first"), **{MONEY: (MONEY, "first")})
+    income = clean.groupby(["store", "order_id"], as_index=False).agg(
+        **{MONEY: (MONEY, "first")})
     return SourceReference.from_income(income, money_col=MONEY)
 
 CORRUPTIONS = [
@@ -177,7 +184,7 @@ def _shopee_checks(sku, income, settings, log):
     crossing = tieout.revenue_crossing_shopee(income, log)
     assert crossing is not None, "the fixture should support building a crossing"
     reference, unmatched_money, unmatched_orders = tieout.partition(
-        income, money_col="net_revenue", present_order_ids=sku["order_id"])
+        income, money_col="net_revenue", present_keys=tieout.pairs(sku))
     return tieout.run_checks_shopee(
         sku, reference, settings, log, money_col=None, crossing=crossing,
         unmatched_money=unmatched_money, unmatched_orders=unmatched_orders)

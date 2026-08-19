@@ -14,7 +14,8 @@ changes is worse than no gate, because it reports green.
 
 This inverts the assumption: **measure whether the change moved anything.**
 
-1. `config_schema` marks the fields that *can* move a cell.
+1. Every config row declares whether changing it *can* move a cell
+   (`invalidates_goldens`, migration 008).
 2. Applying a proposal that touches one enqueues a run of a **canary window** under
    the new config.
 3. The workbook is compared cell-for-cell against that window's committed golden
@@ -22,7 +23,7 @@ This inverts the assumption: **measure whether the change moved anything.**
 4. The answer is recorded and shown. **Nothing is blocked.** The change lands and
    the system tells you what it did.
 
-Most changes — a tolerance, a store alias, a roster addition — move nothing and say
+Most changes — a tolerance, a roster addition — move nothing and say
 so, which is the outcome `oracle_rev` could never report because it could not tell
 "unchanged" from "unknown".
 
@@ -150,11 +151,67 @@ def _window_has_input(repo, platform: str, period: str) -> bool:
     return bool(repo.uploads_for_window(platform, period))
 
 
+def capability(repo, root: Path) -> dict:
+    """Can this deployment verify a config change AT ALL — asked BEFORE one is made.
+
+    Closes **A2**. The verdict states already say the right thing once a change has
+    been applied, but `unavailable` only ever appeared *after* the fact, rendered as
+    a muted "not verified" chip that reads like a neutral status. In every container
+    this system currently produces it is the ONLY reachable outcome, because the
+    canary needs `tests/goldens/manifest.json` and no image ships `tests/` — so the
+    editor was quietly presenting a gate that could never run.
+
+    The two causes are distinguished because the fixes are completely different:
+
+    * **no digests** — the deployment has no `tests/goldens/manifest.json`. Nothing an
+      operator does inside the product fixes this, and shipping the manifest is not
+      the answer either: goldens are derived from client data and must not go into an
+      image. What is available is the synthetic demo window.
+    * **no inputs** — digests exist but no canary window's exports are in the object
+      store, so there is a digest with nothing to compare against. Seeding the demo
+      window or uploading a real window fixes it.
+
+    Returns a plain dict: this is read by the api and rendered, never branched on for
+    a money decision.
+    """
+    goldens = committed_goldens(root)
+    if not goldens:
+        return {
+            "can_verify": False, "reason": "no_digests",
+            "detail": ("This deployment ships no golden digests "
+                       "(tests/goldens/manifest.json is absent), so a config change "
+                       "cannot be checked against a known-good workbook here. "
+                       "Goldens are derived from client data and are deliberately "
+                       "kept out of the image. Seed the demo window to get a "
+                       "synthetic check, or make goldens-affecting edits on a "
+                       "machine that holds a real settlement window."),
+        }
+    chosen = choose_canary(repo, root)
+    if chosen is None:
+        return {
+            "can_verify": False, "reason": "no_inputs",
+            "detail": ("Golden digests are present, but no canary window's exports "
+                       "are in this deployment's object store — a digest with "
+                       "nothing to compare against. Upload a window listed in "
+                       "CANARY_PREFERENCE, or seed the demo window."),
+        }
+    platform, period, _entry, strong = chosen
+    return {
+        "can_verify": True, "reason": "ready", "window": f"{period}/{platform}",
+        "strong": strong,
+        "detail": (f"Goldens-affecting changes will be checked against "
+                   f"{period}/{platform}."
+                   + ("" if strong else " That window is SYNTHETIC — it exercises "
+                      "only the paths its generator emits, so it is a weaker check "
+                      "than a real settlement window.")),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Running one
 # ---------------------------------------------------------------------------
 
-def verify(repo, settings, *, settings_text: str, touched_paths: list[list[str]],
+def verify(repo, settings, *, settings_text: str, invalidating: list[str],
            root: Path, log=None) -> Verdict:
     """Run the canary under `settings_text` and compare it to the committed golden.
 
@@ -162,11 +219,13 @@ def verify(repo, settings, *, settings_text: str, touched_paths: list[list[str]]
     window — the Lazada canary is ~3 seconds — and doing it inline means the answer
     is on screen when the person who applied the change is still looking at it.
     A queued job would put it on the board where nobody connects it to the edit.
-    """
-    from . import config_schema, config_store
 
-    parsed = config_store.parse(settings_text)
-    invalidating = config_schema.invalidates_goldens(parsed, touched_paths)
+    `invalidating` is decided by the CALLER and read off the rows that changed
+    (`config_rows.invalidating`), not inferred here from a dotted path. That is the
+    whole of migration 008: a row says whether changing it can move a cell, and an
+    unknown still counts as invalidating — a change no claim can be made about is
+    exactly where defaulting to "harmless" turns a gate into a skip.
+    """
     if not invalidating:
         return Verdict(state=State.NOT_APPLICABLE)
 

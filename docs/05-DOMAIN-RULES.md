@@ -92,7 +92,9 @@ Weekly (`Transaction Overview`) and Daily (`Income Overview`) schemas are both p
 
 Per-brand tabs are chosen by **case-insensitive substring match on the store name** against a per-platform bucket list, defaulting to "Others". This is simple and currently correct, but a future storefront whose name merely *contains* an existing brand token would be swept into that brand's invoice without warning.
 
-`config/brand_rules.yaml` carries a separate, much smaller notion: `invoice_grouping: separate | combined` per brand (one brand is known to need its own split). The invoice bucket lists themselves are hardcoded in `finance_template.py`, not in that file — worth knowing before assuming brand rules are fully config-driven.
+**There is no config file for this.** `config/brand_rules.yaml` carried a separate, much smaller notion — `invoice_grouping: separate | combined` per brand — and was **deleted on 2026-08-18** along with its only reader, `classify.classify()`, which had no callers of its own. The invoice bucket lists were always hardcoded in `finance_template.py:90-92`, so nothing about the invoice split changed; what went was a config file that looked like it governed the split and did not. See [D11](14-PRODUCTION-READINESS.md) and [D19](06-DECISIONS.md#d19) for the deletion standard (goldens unchanged is the proof).
+
+`config/settings.yaml`'s `store_to_brand` still advertises itself as the home for this and is empty, so every store currently falls back to its own name with a loud ingest warning — [D12](14-PRODUCTION-READINESS.md).
 
 ## Tie-out checks and tolerances
 

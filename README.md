@@ -77,9 +77,14 @@ Written to be read by humans and by coding agents. Start at Orientation.
 | **[11 — Open Questions](docs/11-OPEN-QUESTIONS.md)** | Decisions that need a human, grouped by owner |
 | **[12 — Change History](docs/12-CHANGE-HISTORY.md)** | Format drift absorbed each month, and milestone history |
 | **[13 — Entra ID & Azure access](docs/13-ENTRA-SETUP.md)** | The one-time portal setup for M5 sign-in, and the permissions to escalate for |
+| **[14 — Production Readiness](docs/14-PRODUCTION-READINESS.md)** | What stands between "it works" and the finance team using it unattended. **Read before promising a date.** |
+| **[15 — Azure access request](docs/15-AZURE-ACCESS-REQUEST.md)** | The **prototype** hosting ticket to raise with IT — synthetic data only, so the compliance policy has nothing to bind. Draft, unsent |
+| **[16 — Month-master data request](docs/16-DATA-REQUEST-MONTH-MASTER.md)** | What the finance team must supply before the month-end master can be built and checked: a re-saved `.xlsx` and the July exports. Draft, unsent |
+| **[17 — Hướng dẫn sử dụng / User guide](docs/17-USER-GUIDE.md)** | The only document written for the people who USE this rather than maintain it. Vietnamese first, English alongside |
 
 Also in the repo:
 
+- **`docs/Azure-Hosting-Proposal.docx`** — the hosting proposal for circulation: real settlement data in the company Azure tenant, pilot scale. Draft, unsent; every `[BRACKET]` needs filling.
 - **[ARCHITECTURE_POSITION.md](ARCHITECTURE_POSITION.md)** — a stakeholder-facing position document on the proposed target architecture (platform APIs, transaction store, AI layer, D365 posting). Written for leadership, not maintainers.
 - **[.claude/CLAUDE.md](.claude/CLAUDE.md)** — operating guide for coding agents: commands, invariants, and the things not to re-discover.
 - **`deploy/`** — Dockerfile and compose file for the api, worker and database. Built and brought up in M5.

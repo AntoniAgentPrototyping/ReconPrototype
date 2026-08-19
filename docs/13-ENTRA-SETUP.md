@@ -95,6 +95,34 @@ Azure is the obvious default *if* the organisation is already a Microsoft shop (
 
 **Assigning roles is itself a privilege.** The clean design here is a **managed identity** — the app authenticates to Postgres, Blob and Key Vault as itself, with no passwords in environment variables at all. Azure Database for PostgreSQL Flexible Server supports Entra authentication directly, which would remove `RECON_DATABASE_URL`'s password entirely. But *granting* that identity its roles needs `User Access Administrator` (or `Owner`), which IT frequently keeps. Either ask for it scoped to your one resource group, or plan for IT to make those three role assignments for you.
 
+### A third thing that surprises people, found the hard way
+
+**A sensitivity label makes a file unreadable to a service, and it is invisible until
+you try.** Two files in this repository's data tree — the month-end master and one
+Lazada weekly export — carry a Microsoft Purview label with encryption, **the same
+label id and tenant on both**, applied deliberately (`method="Privileged"`). They are
+genuine `.xlsx` files. Excel opens them for a person whose account has rights to the
+label. Nothing else can: not openpyxl, not calamine, not a service principal, not a
+managed identity, and no amount of re-saving or renaming.
+
+For months one was recorded as "a legacy `.xls` with the wrong extension" and the
+other as "password-protected", because a rights-protected OOXML file has the same
+`D0 CF 11 E0` signature as a legacy `.xls` and every reader just says "not a zip
+file". `src/ingest.rights_protected` now identifies it and says so.
+
+**What this means for hosting.** It is not a per-file nuisance; it is a question that
+has to be answered before the system reads the team's files at all:
+
+- Does the team's labelling policy apply to the settlement exports themselves, or
+  only to summary workbooks? Today only 2 files of 158 carry it — but which 2 was not
+  anybody's decision to make consistently.
+- If it does, the **label must grant rights to the identity this service runs as**.
+  That is a Purview/IT change, not something engineering can build around, and it
+  belongs in the same conversation as the role assignments above rather than being
+  discovered at month end.
+- If it does not, somebody still has to say so, because "the file opened on my
+  laptop" is not evidence that it will open in a container.
+
 ### Also worth settling in the same conversation
 
 - **Who pays.** Resources cost money and someone owns the budget line. A "Contributor on a resource group" request is usually approved much faster when it names a cost centre and an approximate monthly figure.

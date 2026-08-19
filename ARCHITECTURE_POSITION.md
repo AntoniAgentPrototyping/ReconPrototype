@@ -282,13 +282,14 @@ review that currently happens by eye.
 once the store exists; premature before it.
 
 **Brand rules console — defer, and re-scope.** The honest position is that there is
-very little to configure yet. `config/brand_rules.yaml` is **13 lines with exactly one
-rule type** (`invoice_grouping: separate | combined`), and the rules that actually
-drive invoice splits are hardcoded in `finance_template.py:90-92` as substring
-matches on store names. A console today would surface a single dropdown while the
-consequential logic stayed in code — and the substring matching carries its own risk,
-since a future storefront named "Kao Beauty Partner" would be swept into the KAO
-invoice silently.
+very little to configure yet. `config/brand_rules.yaml` was **13 lines with exactly one
+rule type** (`invoice_grouping: separate | combined`) — and on 2026-08-18 it was deleted,
+because it turned out nothing read it: its only consumer was a `classify()` function that
+had no callers. The rules that actually drive invoice splits are hardcoded in
+`finance_template.py:90-92` as substring matches on store names. A console today would
+surface a single dropdown while the consequential logic stayed in code — and the substring
+matching carries its own risk, since a future storefront named "Kao Beauty Partner" would
+be swept into the KAO invoice silently.
 
 The valuable work is consolidating those rules into a versioned configuration store
 first. Two requirements for it:

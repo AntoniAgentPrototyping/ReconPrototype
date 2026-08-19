@@ -130,6 +130,53 @@ def test_a_missing_manifest_is_unavailable_not_verified(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Can this deployment verify AT ALL — asked before an edit, not after (A2)
+# ---------------------------------------------------------------------------
+
+def _manifest(root, *windows):
+    import json
+    (root / "tests" / "goldens").mkdir(parents=True, exist_ok=True)
+    (root / "tests" / "goldens" / "manifest.json").write_text(
+        json.dumps({"windows": {w: {"workbook": {"sheets": []}} for w in windows}}),
+        encoding="utf-8")
+
+
+def test_a_container_says_it_cannot_verify_rather_than_looking_ready(tmp_path):
+    """**The A2 failure, stated as a test.** No image ships `tests/`, so the canary
+    is unreachable in every container this system currently builds — and the config
+    editor presented the gate as working right up to the moment it silently could
+    not run. The capability is now answered BEFORE an edit, and the two causes are
+    distinguished because their fixes are unrelated: a missing manifest is not
+    something an operator can fix from inside the product, a missing input is."""
+    cap = verification.capability(_HasUploads("2026-05_l1/lazada"), tmp_path)
+    assert cap["can_verify"] is False
+    assert cap["reason"] == "no_digests"
+    assert "tests/goldens/manifest.json" in cap["detail"]
+
+
+def test_digests_with_no_window_is_a_different_answer_from_no_digests(tmp_path):
+    """A digest with nothing to compare against. Seeding the demo window fixes this
+    one, which is exactly why it must not share a message with the other."""
+    _manifest(tmp_path, "2026-05_l1/lazada")
+    cap = verification.capability(_NoUploads(), tmp_path)
+    assert cap["can_verify"] is False
+    assert cap["reason"] == "no_inputs"
+
+
+def test_a_ready_deployment_names_its_window_and_whether_it_is_real(tmp_path):
+    _manifest(tmp_path, "2026-05_l1/lazada", "2026-05_demo/lazada")
+    real = verification.capability(_HasUploads("2026-05_l1/lazada"), tmp_path)
+    assert real["can_verify"] is True and real["strong"] is True
+    assert real["window"] == "2026-05_l1/lazada"
+
+    demo = verification.capability(_HasUploads("2026-05_demo/lazada"), tmp_path)
+    assert demo["can_verify"] is True
+    assert demo["strong"] is False, "a synthetic canary is the weaker claim"
+    assert "SYNTHETIC" in demo["detail"], (
+        "and the UI decides how loud to be from this text, so it has to say so")
+
+
+# ---------------------------------------------------------------------------
 # Comparison
 # ---------------------------------------------------------------------------
 
@@ -166,13 +213,19 @@ def test_no_committed_digest_counts_as_everything_moved():
 # ---------------------------------------------------------------------------
 
 def test_a_harmless_change_reports_not_applicable(editor_client, repo):
-    """Most changes — a tolerance, an alias, a roster addition — move nothing, and
-    saying so is the outcome `oracle_rev` could never report because it could not
-    tell "unchanged" from "unknown"."""
+    """Most changes — a tolerance, a roster addition — move nothing, and saying so
+    is the outcome `oracle_rev` could never report because it could not tell
+    "unchanged" from "unknown".
+
+    Since migration 008 the claim is read off the ROW rather than inferred from a
+    dotted path: `config_tolerances.invalidates_goldens` is false because
+    `src/tieout.py` reports variances and writes no workbook cell.
+    """
     admin = editor_client("recon.admin")
     proposal = admin.post("/config/proposals", json={
-        "edits": [{"op": "set", "path": ["tolerances", "tiktok", "pv_sum_vnd"],
-                   "value": 13000}],
+        "edits": [{"table": "config_tolerances", "op": "upsert",
+                   "key": {"platform": "tiktok", "name": "pv_sum_vnd"},
+                   "values": {"vnd": 13000}}],
         "summary": "the team widened their own PV sum check"}).json()
     admin.post(f"/config/proposals/{proposal['id']}/approve", json={})
     applied = admin.post(f"/config/proposals/{proposal['id']}/apply").json()
@@ -188,7 +241,8 @@ def test_a_goldens_affecting_change_is_verified_or_honestly_unavailable(
     `unavailable` — and it must SAY so rather than reporting a pass."""
     admin = editor_client("recon.admin")
     proposal = admin.post("/config/proposals", json={
-        "edits": [{"op": "set", "path": ["vat_factors", "default"], "value": 1.10}],
+        "edits": [{"table": "config_scalars", "op": "upsert",
+                   "key": {"key": "vat_factors.default"}, "values": {"value": 1.10}}],
         "summary": "the 8% concession has ended"}).json()
     admin.post(f"/config/proposals/{proposal['id']}/approve", json={})
     applied = admin.post(f"/config/proposals/{proposal['id']}/apply").json()
@@ -204,8 +258,8 @@ def test_a_goldens_affecting_change_is_verified_or_honestly_unavailable(
 
 
 def test_a_verification_failure_never_undoes_the_applied_change(
-        editor_client, sandbox_settings, monkeypatch):
-    """The config is on disk and in git by the time this runs. Claiming success is
+        editor_client, repo, monkeypatch):
+    """The change is in the config tables by the time this runs. Claiming success is
     the one unacceptable outcome; failing the apply would be almost as bad, because
     the change has already landed."""
     from service import config_store, verification as verification_mod
@@ -217,14 +271,14 @@ def test_a_verification_failure_never_undoes_the_applied_change(
 
     admin = editor_client("recon.admin")
     proposal = admin.post("/config/proposals", json={
-        "edits": [{"op": "set", "path": ["vat_factors", "default"], "value": 1.10}],
+        "edits": [{"table": "config_scalars", "op": "upsert",
+                   "key": {"key": "vat_factors.default"}, "values": {"value": 1.10}}],
         "summary": "applied while the canary is broken"}).json()
     admin.post(f"/config/proposals/{proposal['id']}/approve", json={})
     applied = admin.post(f"/config/proposals/{proposal['id']}/apply")
 
     assert applied.status_code == 200
     assert applied.json()["verification"]["state"] == State.FAILED
-    # And the change really is on disk.
-    assert config_store.read_value(
-        config_store.read_text(sandbox_settings.config_dir),
-        ["vat_factors", "default"]) == 1.10
+    # And the change really did land — in the rows an unpinned run renders from.
+    assert config_store.read_value(repo.render_config(),
+                                   ["vat_factors", "default"]) == 1.10

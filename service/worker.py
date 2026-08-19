@@ -17,11 +17,23 @@ job state. If this file grew a calculation it would be a second, unverified
 compute layer and the numbers a finance user reads in a browser would stop being
 the numbers `tools/full_run.py` produces (docs/06-DECISIONS.md#d24).
 
-**One job at a time, per process.** Not a thread pool — `settings["_vat_sku"]`
-is a mutable back-channel inside the settings dict, and two runs sharing one
-dict cross-contaminate VAT rates (docs/02-ARCHITECTURE.md#import-hygiene). A
-fresh context per job is what keeps that safe, and concurrency comes from running
-more worker PROCESSES, which is what `FOR UPDATE SKIP LOCKED` is for.
+**One job at a time, per process.** Not a thread pool. Two reasons, and the order
+changed on 2026-08-19:
+
+1. **Memory.** A window's frames peak well into the GBs, and peak RSS is the
+   binding constraint on the container (`docs/10-ROADMAP.md` reads it for the
+   engine-port trigger). Two windows in one process is the one way to double it.
+2. **Per-run mutable state.** `build_context` returns a fresh settings dict per job
+   and `apply_partial_roster` writes into it, so a cached context would leak a
+   roster relaxation from one window into the next.
+
+The *original* first reason was `settings["_vat_sku"]`, a mutable back-channel
+inside the settings dict that would have cross-contaminated VAT rates between
+windows (defect 1.9). That channel is gone — the map is `RunContext.vat_sku`, a
+field on a frozen dataclass — so it is no longer the argument for this design, and
+`tests/service/test_worker.py::test_each_job_gets_its_own_settings_dict` now asserts
+it has not come back. The design itself is unchanged: concurrency comes from
+running more worker PROCESSES, which is what `FOR UPDATE SKIP LOCKED` is for.
 """
 
 from __future__ import annotations
@@ -35,12 +47,12 @@ import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
-from src import pipeline
+from src import master_summary, pipeline
 from src.pipeline import RunStatus
 
 from .artifacts import ArtifactStore, build_artifact_store
 from .config import ServiceSettings
-from .models import Job, JobState
+from .models import Job, JobKind, JobState
 from .repository import Repository
 from .runlog import QueueRunLog, RepositoryLogSink
 
@@ -51,6 +63,10 @@ class JobOutcome:
     run_id: int
     status: RunStatus
     artifacts: list[str]
+    # What this job queued next, if anything (M8 Phase 3). Carried here rather
+    # than written to the run log, because the log has already been flushed and
+    # stored by the time the chain runs — see `_chain_month_master`.
+    chained: str | None = None
 
 
 class Worker:
@@ -72,9 +88,37 @@ class Worker:
         """
         self._stopping = True
 
+    def heartbeat_path(self) -> Path:
+        """Where this worker says it is alive (**C2**).
+
+        A file, not an HTTP endpoint. The worker has no server and giving it one
+        to answer a healthcheck would mean a port, a framework and a second thing
+        that can fail — in a process whose entire job is to hold one settlement
+        run at a time.
+
+        Touched at the top of every loop turn. That makes it a real liveness
+        signal rather than a "the process exists" signal: a worker wedged inside
+        `pipeline.run` stops touching it, which is exactly the state that needs
+        noticing. The threshold has to allow for a long run — see the Dockerfile,
+        which sets it from the lease rather than from the poll interval.
+        """
+        return self.settings.scratch_root / "worker.alive"
+
+    def _touch_heartbeat(self) -> None:
+        try:
+            path = self.heartbeat_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(self.settings.worker_id, encoding="utf-8")
+        except OSError:                                         # pragma: no cover
+            # A worker that cannot write its heartbeat is a worker that will be
+            # reported unhealthy, which is the correct outcome. It must not be a
+            # worker that crashes instead of doing its job.
+            pass
+
     def serve(self, *, once: bool = False, drain: bool = False) -> list[JobOutcome]:
         outcomes: list[JobOutcome] = []
         while not self._stopping:
+            self._touch_heartbeat()
             self.repo.reclaim_expired()
             job = self.repo.claim(self.settings.worker_id, self.settings.lease_seconds)
             if job is None:
@@ -99,6 +143,9 @@ class Worker:
                           flush_interval_s=self.settings.log_flush_seconds)
         scratch = Path(self.settings.scratch_root) / f"job-{job.id}"
 
+        if job.kind is JobKind.MONTH_MASTER:
+            return self._execute_month_master(job, run_id, log, scratch)
+
         try:
             # Which RULES this run uses, decided before it starts. A window that
             # has run before is pinned to the config it ran under, so an edit
@@ -112,6 +159,7 @@ class Worker:
             # reads the same files as different stores (service/materialize.py).
             mat = self._materialize(job, scratch, resolved, log)
             partial = self._roster_declared_partial(job, log)
+            refs = self._references(job, log)
 
             # A fresh settings dict per job — see the module docstring.
             ctx = pipeline.build_context(
@@ -119,7 +167,7 @@ class Worker:
                 config_dir=self.settings.config_dir,
                 input_root=mat.input_root,
                 output_root=scratch,
-                refs=job.refs, log=log, partial_roster=partial,
+                refs=refs, log=log, partial_roster=partial,
                 settings_text=resolved.content if resolved else None)
 
             result = pipeline.run(ctx)
@@ -132,13 +180,20 @@ class Worker:
                 self._settle_config(job, run_id, resolved, result)
             self._settle_uploads(run_id, mat, result)
             log.flush()
+            # After the log is flushed and the artifacts are stored — see the
+            # method's docstring for why both orderings matter.
+            chained = self._chain_month_master(job, result)
 
             self.repo.finish_run(
                 run_id, status=result.status, findings=result.findings,
                 checks=result.checks, metrics=result.metrics.to_dict(),
                 roster_missing=mat.roster_missing,
+                # B1: a `ReconHardStop` message is already written for a human,
+                # and `docs/09-OPERATIONS.md` is written against these strings, so
+                # it passes through untouched. The class-name prefix is dropped —
+                # it was jargon in front of a sentence, and nothing asserts on it.
                 error=None if result.error is None
-                else f"{type(result.error).__name__}: {result.error}")
+                else (str(result.error) or type(result.error).__name__))
             self.repo.finish_job(job.id, JobState.DONE)
 
             # A hard stop is a job that ran and a run that concluded "nothing was
@@ -146,22 +201,145 @@ class Worker:
             # either way; retrying bad input just produces the same answer
             # (docs/06-DECISIONS.md#d3).
             self._cleanup(scratch, keep=result.error is not None)
-            return JobOutcome(job.id, run_id, result.status, stored)
+            return JobOutcome(job.id, run_id, result.status, stored, chained=chained)
 
         except BaseException as exc:                                # noqa: BLE001
             # Reaching here means the WORKER broke, not the run: run() catches
             # data problems itself and returns HARD_STOP. So record it against
             # the job as an infrastructure failure and leave the scratch
             # directory behind for diagnosis.
-            detail = f"{type(exc).__name__}: {exc}"
+            from . import failures
+
+            detail = failures.technical(exc)
             try:
+                # B1: the traceback goes to the LOG, which is where detail belongs
+                # and which the run page already renders on demand. Not a disclosure
+                # improvement — both routes are VIEWER — but the first thing a
+                # person sees stops being a stack trace.
                 log.warn(f"worker failure: {detail}")
+                log.warn("".join(traceback.format_exception(exc)).rstrip())
                 log.flush()
             except Exception:                                       # pragma: no cover
                 pass
             self.repo.finish_run(run_id, status=RunStatus.HARD_STOP, findings=[],
-                                 error=f"worker failure: {detail}\n"
-                                       f"{''.join(traceback.format_exception(exc))}")
+                                 error=failures.humanise(exc))
+            # `jobs.error` stays technical: the job record is the operator's view
+            # (`service/admin.py job list`), not the finance user's.
+            self.repo.finish_job(job.id, JobState.ERROR, error=detail)
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            return JobOutcome(job.id, run_id, RunStatus.HARD_STOP, [])
+
+    # -- the month-end master (M8 Phase 3) ----------------------------------
+
+    def _chain_month_master(self, job: Job, result) -> str | None:
+        """Queue the month's master after a window that produced a workbook.
+
+        Returns a one-line description for the caller to record, or None.
+
+        **Runs AFTER this run's artifacts are stored, and writes nothing to the
+        run log.** Both halves were found by tests already in the tree.
+
+        *After the artifacts*, because the master reads each window's
+        `finance_file.xlsx` out of the artifact store. Queue it first and another
+        worker can claim it in the gap before `_store_artifacts` commits, which
+        would exclude this very window from its own month's master.
+
+        *Not into the run log*, because `write_artifacts` has already written
+        `run_log.txt` by this point. A line added here would exist in the database
+        copy and not in the stored one, and
+        `test_the_stored_log_and_the_database_log_are_the_same_log` exists to say
+        those two must be the same log. The queued job is visible on the board and
+        in `python -m service.admin job list`, which is where a queued job belongs.
+
+        **Best-effort.** The settlement workbook is already written and stored; a
+        cross-month aggregation that cannot even be QUEUED must not turn a good
+        settlement run into a failed one (task 3.4).
+
+        `ActiveJobExists` is the normal case, not an error: several windows of a
+        month commonly finish close together, and the master already queued will
+        read whichever windows have finished when it runs. A second would build
+        the same file twice.
+        """
+        if result.status is RunStatus.HARD_STOP:
+            return None
+        from .models import ALL_PLATFORMS
+        from .month_master import month_of
+        from .repository import ActiveJobExists
+
+        month = month_of(job.period)
+        try:
+            chained, created = self.repo.enqueue(
+                ALL_PLATFORMS, month, kind=JobKind.MONTH_MASTER.value,
+                requested_by=f"run {result.context.period}",
+                priority=-1)          # behind settlement work: it is a summary
+        except ActiveJobExists:
+            return f"month-end master for {month} already queued"
+        except Exception as exc:                                # noqa: BLE001
+            return (f"could not queue the month-end master for {month}: "
+                    f"{type(exc).__name__}: {exc} (this window's finance file is "
+                    f"unaffected)")
+        return (f"queued the month-end master for {month} (job {chained.id})"
+                if created else None)
+
+    def _execute_month_master(self, job: Job, run_id: int, log, scratch: Path) -> JobOutcome:
+        """Consolidate a month's finished windows. Its own run, log and artifacts.
+
+        Adds no arithmetic: `src/master_summary.build` does the aggregation and
+        returns an unwritten Workbook, and `pipeline.write_artifacts` writes it —
+        the same single writer the settlement path uses (D31).
+        """
+        from src import config as src_config
+
+        from . import month_master
+
+        try:
+            settings = src_config.load_settings(self.settings.config_dir)
+            log.section(f"MONTH-END MASTER {job.period}")
+            coverage, windows = month_master.collect(
+                self.repo, self.store, job.period, scratch=scratch, log=log,
+                built_by=job.requested_by or "")
+
+            ctx = pipeline.RunContext(
+                platform=job.platform, period=job.period,
+                input_root=scratch, output_root=scratch,
+                config_dir=self.settings.config_dir, settings=settings, log=log)
+            result = pipeline.RunResult(context=ctx, workbook_name="month_master.xlsx")
+            result.workbook = master_summary.build(
+                coverage, windows, month_master.brand_map(self.settings.config_dir))
+
+            written = pipeline.write_artifacts(result)
+            stored = self._store_artifacts(job, run_id, written)
+
+            # A partial master is NOT a variance — nothing disagrees. It is a
+            # master that does not yet cover the month, which is the normal state
+            # for most of it. UNVERIFIED says "completed, but do not read this as
+            # the month's total", which is exactly right.
+            status = RunStatus.OK if coverage.complete else RunStatus.UNVERIFIED
+            findings = [("unverified",
+                         f"{platform} {period} is not in this master — {why}")
+                        for platform, period, why in coverage.missing]
+            log.add(f"  status: {status.name}")
+            log.flush()
+
+            self.repo.finish_run(run_id, status=status, findings=findings,
+                                 checks=[], metrics=result.metrics.to_dict())
+            self.repo.finish_job(job.id, JobState.DONE)
+            self._cleanup(scratch, keep=False)
+            return JobOutcome(job.id, run_id, status, stored)
+
+        except BaseException as exc:                            # noqa: BLE001
+            from . import failures
+
+            detail = failures.technical(exc)
+            try:
+                log.warn(f"month-end master failed: {detail}")
+                log.warn("".join(traceback.format_exception(exc)).rstrip())
+                log.flush()
+            except Exception:                                   # pragma: no cover
+                pass
+            self.repo.finish_run(run_id, status=RunStatus.HARD_STOP, findings=[],
+                                 error=failures.humanise(exc))
             self.repo.finish_job(job.id, JobState.ERROR, error=detail)
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
@@ -205,6 +383,34 @@ class Worker:
                      f"{declaration['declared_by']}: {declaration['reason']}")
             return True
         return False
+
+    def _references(self, job: Job, log) -> dict:
+        """The team's figures this run gets to be checked against (A3).
+
+        Read from the WINDOW, the same way `partial_roster` is: a re-run must make
+        the same claim the first run did, and `jobs.refs` is per job. A job that
+        carries its own refs still wins — `tools/devrun.py --refs` and the M4 api
+        both pass them explicitly, and an explicit answer is not overridden by a
+        standing one (`service/references.merge`).
+
+        Logged either way. "This run was compared against figures supplied by X" and
+        "nothing corroborated this run" are different claims and the log must not
+        leave them looking the same.
+        """
+        from . import references as references_lib
+
+        record = (self.repo.window_references(job.platform, job.period)
+                  if hasattr(self.repo, "window_references") else None)
+        merged = references_lib.merge((record or {}).get("refs"), job.refs)
+        if record is not None:
+            log.add(f"  reference totals supplied by {record['supplied_by']} on "
+                    f"{record['supplied_at']:%Y-%m-%d}: "
+                    f"{references_lib.summarise(job.platform, merged)}")
+        elif not merged.get("grand"):
+            log.warn(f"no reference totals for {job.platform} {job.period} — this "
+                     f"run will report UNVERIFIED, meaning it completed but nothing "
+                     f"corroborated its numbers")
+        return merged
 
     def _settle_uploads(self, run_id: int, mat, result) -> None:
         """Attribute the files this run read.
@@ -347,6 +553,8 @@ def main(argv: list[str] | None = None) -> int:
     for o in outcomes:
         print(f"  job {o.job_id} -> run {o.run_id}: {o.status.name} "
               f"({len(o.artifacts)} artifact(s))")
+        if o.chained:
+            print(f"      {o.chained}")
     # Worker exit status reports the WORKER, not the reconciliation: a run with
     # variances is a successful worker (the variance is recorded and readable).
     # An operator wanting the run's verdict reads run.exit_code.

@@ -4,7 +4,9 @@ Verified, reproducible, with locations. **Do not re-discover these.** Two sectio
 
 Status key: `OPEN` · `PINNED` (an `xfail(strict)` test asserts the broken behaviour) · `SCHEDULED` (a milestone owns it).
 
-**As of 2026-08-13 there are no `PINNED` entries left.** The eleven strict xfails that had pinned 1.1–1.6 since M0 are all gone — closed in M2 (1.1, 1.2, 1.3) and M2.5 (1.4, 1.5, 1.6). What remains open below is either a smaller item in 1.10, the date half of 1.6, or a residual named inside a fixed entry. The suite baseline is now `91 passed, 3 skipped` with **no xfails**, which means the drift detector is empty rather than quiet: a new gap needs a new pinned test.
+**This page was audited against the code on 2026-08-19**, and roughly a third of what it called open had already been fixed. Corrections are written in place, with the wrong text quoted, rather than deleted — a register that silently rewrites itself is not an audit trail, and the same discipline already applied to the sensitivity-labelled files (diagnosed wrong twice, both recorded). Corrected: 1.6's date residual and the 1.10 date bullet (`date_formats` shipped), 1.7's scheduling clause (M2 closed without it; the record is D10), the 1.10 provenance bullet (three claims, three different answers), 2.3's description of a route deleted in M6, 2.4's digest half (**closed, and the fix it proposed was measured to fail**), 2.5's "no ahead-of-time pinning" clause, and 2.12's decision citation. One gap was found *by* the audit and added: artifact downloads are never digest-checked.
+
+**As of 2026-08-13 there are no `PINNED` entries left.** The eleven strict xfails that had pinned 1.1–1.6 since M0 are all gone — closed in M2 (1.1, 1.2, 1.3) and M2.5 (1.4, 1.5, 1.6). What remains open below is either a smaller item in 1.10 or a residual named inside a fixed entry. The date half of 1.6 was closed in M8 (2026-08-18), leaving its own named residual: date formats are inferred rather than declared. The suite baseline is now `91 passed, 3 skipped` with **no xfails**, which means the drift detector is empty rather than quiet: a new gap needs a new pinned test.
 
 ---
 
@@ -150,7 +152,7 @@ Per-store input folders hid this; multi-tenant API pulls would remove that accid
 
 **Measured zero-delta, not assumed:** across both May windows, 0 order_ids appear in more than one store, both merges return identical row counts either way (58,131 TikTok / 125,595 Shopee), and no `(store, order_id)` group's minimum creation date differs from its global minimum. All three golden manifests came out unchanged.
 
-*Residual, deliberately not changed:* `tieout.py` still groups per order and keys `SourceReference.order_ids` on `order_id` alone. Under a collision its coverage check could count a store's order as present because another store has that ID. Closing it means keying the reference composite too, which is a change to a control and wants its own measured pass.
+*Residual — **CLOSED 2026-08-19**, see [2.9](#29-tieoutpy-still-keys-its-coverage-reference-on-order_id-alone--fixed-2026-08-19).* `tieout.py` kept grouping per order and keying `SourceReference.order_ids` on `order_id` alone. It got the measured pass this paragraph asked for, and the pass found two more faults of the same origin than the one recorded here — including one that *understated* the reconciling item rather than missing a breach.
 
 ### 1.6 Silent numeric and date coercion — **FIXED (M2.5, 2026-08-13)** (numeric; date part still open)
 
@@ -162,7 +164,17 @@ Per-store input folders hid this; multi-tenant API pulls would remove that accid
 
 Delta was stated in advance and confirmed exactly: **workbook digests unchanged** (the stored cellsets still hash to the committed workbook manifest), `fingerprint_digest` moved on TikTok and Shopee because money-column null counts collapsed to zero, and Lazada did not move at all. Column sums use `skipna`, so no sum changed.
 
-*Still open — the date half of this entry.* `pd.to_datetime(errors="coerce")` has the same shape and is untouched, along with `to_number` handling only two literal formats (a currency symbol or an unexpected separator now hard-stops rather than becoming 0, which is the improvement, but the format list itself has not grown).
+*The date half — **FIXED (M8, 2026-08-18)**.* `pd.to_datetime(errors="coerce")` had the same shape as the numeric bug and no counter at all. It is arguably the worse of the two: an unreadable amount becomes a wrong number, an unreadable date becomes a **missing** one, because `finance_template` groups on `.dt.month` and pandas drops a `NaN` group key by default — so the row's money leaves the invoice with nothing said.
+
+`ingest.report_undated` now counts unreadable dates per column and reports them, mirroring `report_unparseable` but defaulting to `warn` rather than `hard_stop`: a blank settlement date is legitimate (`apply_settlement_bounds` already keeps and reports undated rows), so stopping on one would refuse windows that are fine. `date_coercion: hard_stop` is available for an operator who has decided otherwise.
+
+`ingest.parse_dates` also captures the pandas warning that fires when a file's own format contradicts the configured `dayfirst` — previously written to stderr and lost. **It fires on real data today:** TikTok income is `%Y/%m/%d` while `dayfirst.tiktok` is `true`, measured on `2026-05_w1`, both date columns, zero unreadable rows. pandas detects the year-first format and overrides the setting, so the dates are right — but only because the first row of that column is unambiguous. A column whose first value has a day ≤ 12 takes the other branch and transposes silently.
+
+*The residual — **CLOSED (M8 Phase 3, 2026-08-19)**.* The durable fix named here was an explicit `date_formats.<platform>.<kind>` in the contract, and it landed ([D54](06-DECISIONS.md#d54)): `config/settings.yaml:160-171` carries all seven platform/kind pairs, `ingest.date_format` (`src/ingest.py:177-184`) is the single accessor for `src/`, `service/` and `tools/`, `parse_dates` skips inference entirely when given a format, and Lazada parses **per variant** because weekly (`%d-%b-%Y`) and daily (`%d %b %Y`) genuinely disagree (`src/lazada.py:182-192`). Every value was measured against real May *and* July exports and all eight golden windows regenerated with no cell moved. `dayfirst` survives in the config but is consulted only where `date_formats` has no entry — which is now nowhere on a live read path; the one open thing about it is [open question 16](11-OPEN-QUESTIONS.md) (`dayfirst.shopee` carries an unresolved *"TODO verify"*), which is a question about a setting nothing reads rather than a defect.
+
+*What is still open from this entry, restated precisely:* `to_number` handles two literal number styles (`"standard"`, `"vietnamese"`, `src/ingest.py:84-99`) selected by a single **global** `settings["number_style"]`. The asymmetry with `date_formats` is the point — a month where one platform exports Vietnamese-styled amounts and another exports standard cannot be expressed at all. The failure mode is at least loud: unparseable amounts hard-stop through `report_unparseable`.
+
+*This paragraph said "still open" until 2026-08-19, after the fix had shipped.* Corrected here rather than deleted, because a register that quietly rewrites itself is not an audit trail.
 
 ### 1.7 No error handling in the production driver — **PARTLY FIXED (M1)** `SCHEDULED`
 
@@ -170,32 +182,47 @@ Delta was stated in advance and confirmed exactly: **workbook digests unchanged*
 
 *Fixed in M1:* `pipeline.run()` returns a `RunResult` in every case, recording the exception on `result.error` and setting `RunStatus.HARD_STOP`. `write_artifacts()` always runs, so the log is always written. Verified by the smoke test, which asserts a hard stop still produces a log and leaves no partial workbook.
 
-*Still open:* the write itself is not atomic, so a `PermissionError` on `finance_file.xlsx` — a finance file left open in Excel, which is routine operator behaviour, not an edge case — still fails the write. It is now reported rather than silent. Atomic write-and-rename is M2.
+*The residual — **FIXED (2026-08-19)**, register item D10.* All four writers in `write_artifacts` now go through `pipeline._write_atomically`: a sibling `<name>.tmp`, then `os.replace`. The temp file is a sibling deliberately — `os.replace` is only atomic within one filesystem, so a temp dir elsewhere would silently degrade to copy-then-delete. Each writer (`finance_template.write_workbook`, `export.write_exceptions_file`, `RunLog.write`, and the metrics JSON) takes a `write_to` override so **composing** writes stays `write_artifacts`'s job and no writer invents a temp path of its own; `QueueRunLog.write` passes it through, keeping the subclass substitutable ([D34](06-DECISIONS.md#d34)).
+
+**What it buys, and what it does not.** It buys: a crash, a full disk or a killed worker mid-write can no longer leave a truncated `finance_file.xlsx` — and a truncated one still *opens* in Excel, so the failure being removed is a finance file that looks current and is short some tabs. It does **not** buy writing over a file Excel holds open: on Windows `os.replace` raises `PermissionError` in that case too. What changed there is that the previous artifact now survives intact and the failure is reported (`service/failures.py` already translates `PermissionError` into a sentence naming the file). `tests/test_atomic_writes.py` asserts both halves, including the locked-destination case, so the limit is pinned rather than merely described.
+
+*The scheduling clause in this entry was also wrong.* It read "Atomic write-and-rename is M2." M2 closed without it; **D10** in [14-PRODUCTION-READINESS](14-PRODUCTION-READINESS.md) recorded that correctly (*"Scoped to M2, never landed"*) and is where the status lives. An entry should not claim a milestone that has closed.
 
 ### 1.8 Two VAT sources of truth — **FIXED (M1)**
 
 **Resolved in M1.** `recon.py:67` read `settings["vat_rate"]` (`0.08`) while `masters.py:116` reads `vat_factors.default` (`1.08`) — different keys, different representations. Only the second was ever used in production, and `recon.py` was deleted, so one source of truth remains. `masters.py:80` still carries a literal `!= 1.08` used only for a log count.
 
-### 1.9 Shared mutable state via the config dict — `OPEN` `CONTAINED (M4)`
+### 1.9 Shared mutable state via the config dict — **FIXED (2026-08-19)**
 
-`settings["_vat_sku"]` is injected by `pipeline.build_context` (it moved out of `tools/full_run.py` in M4) and read inside `calculate.py` — the config dict used as a data channel. Two concurrent runs sharing one settings dict would cross-contaminate VAT rates.
+`settings["_vat_sku"]` was injected by `pipeline.build_context` (it moved out of `tools/full_run.py` in M4) and read inside `calculate.py` — the config dict used as a data channel. Two concurrent runs sharing one settings dict would cross-contaminate VAT rates.
 
-*Contained, not fixed, in M4.* M4 is the milestone that made this reachable: a worker is the first thing that runs more than one window in one process. Three things hold it:
+*Contained in M4, fixed in M8.* M4 made it reachable — a worker is the first thing that runs more than one window in one process — and contained it three ways: `build_context` per job, one job at a time per worker process, and no module-scope caching of a settings dict.
 
-- the worker calls `build_context` **per job**, so each run gets its own dict — pinned by `tests/service/test_worker.py::test_each_job_gets_its_own_settings_dict`, which asserts the two `id(settings)` values differ;
-- one job at a time per worker process, stated in `service/worker.py`'s docstring and in the Dockerfile — concurrency comes from more processes, which is what `FOR UPDATE SKIP LOCKED` is for;
-- nothing caches a settings dict at module scope.
+**Containment was the only thing standing between the pattern and wrong tax on an invoice, and it was doing that job invisibly.** A leading underscore in a dict is not a signature: it cannot be type-checked, it does not appear in `compute_sku_columns_tiktok`'s parameter list, and a reader of that function had no way to know the single most consequential input to the VAT calculation arrived out of band. The proof that the shape spreads is that **it had already been copied**: `_masters_source` and `_masters_searched` were added later by the same reasoning, and this entry never mentioned them.
 
-The back-channel itself is unchanged, so this stays `OPEN`. What changed is that the way you would hit it now fails a test.
+*Fixed* by three fields on the frozen `RunContext` — `vat_sku`, `masters_source`, `masters_searched` — and an explicit `vat_sku` parameter on both `compute_sku_columns_*`. **Lazada already had the right shape** (`pipeline.py` passed its VAT map as an argument), so this is the M2.5 situation again: the correct pattern was already in the codebase for one of three platforms.
+
+*One-job-per-process stays*, but its stated justification changed, because it was resting on this defect. The reasons now are memory (a window's frames peak well into the GBs, and peak RSS is the binding container constraint) and the settings dict still being per-run mutable state (`apply_partial_roster` writes into it). `service/worker.py`, `deploy/Dockerfile` and `build_context`'s docstring were updated so none of them argues from a channel that no longer exists.
+
+`test_each_job_gets_its_own_settings_dict` keeps its `id()` assertion and gains the ones that stop a silent revert: no key beginning with `_` may appear in a run's settings, and the VAT map must arrive as a field. A future `settings["_vat_sku"] = ...` would restore the channel while every other test still passed.
 
 ### 1.10 Smaller items
 
 - ~~**`exceptions.xlsx` is never written in production**~~ — fixed in M2; `pipeline.write_artifacts` writes it whenever any exception sheet is populated.
-- **In-place mutation of a passed-in frame** — `finance_template.py:159` does `df.loc[dup, c] = None`. Currently safe because callers pass locally-built frames, but it is latent aliasing and the reason for the `pandas<3` pin.
-- **Lazada config is code, not YAML** — column maps, sheet names, filename regex and bucket names live in `src/lazada.py:58-99` while TikTok/Shopee use `settings.yaml`.
-- **A group-by inconsistency inside Lazada** — one promo aggregation omits the null-key handling its sibling has, so null-product promo rows are dropped from the promo pool while the revenue side keeps them.
-- **Date-format inconsistency** — one reader is config-driven `dayfirst`, another parses month-first. Real TikTok files arrive as `%Y/%m/%d` while config documents `dd/mm/yyyy`; pandas coped silently, but a stricter parser will not.
-- **No run provenance** — `run_log.txt` is free text with no input hashes, config version or per-row lineage. "Why did this row get this number?" is unanswerable after the fact. The parity fingerprints are the first step toward fixing this.
+- ~~**In-place mutation of a passed-in frame**~~ — **fixed (2026-08-19).** `_blank_repeats` copies before blanking. **The hazard was sharper than this entry said**, and worth recording because it changes the item from cosmetic to load-bearing: in each caller the blanked column is a *duplicate of a sibling column in the same frame* — `"Source.Name"` and `"Source.Name non repeat"` are both `df["store"]`. Under pandas 2.x the dict-of-Series constructor copies, so they are distinct arrays; under a no-copy construction they would share storage and blanking the "non repeat" column would **empty the real store column on invoice tabs**. That is the concrete thing the `pandas<3` pin stands in front of. The pin **stays**: Copy-on-Write changes far more than one function, and lifting it still needs its own measured golden run. No cell moved (copy semantics are identical under pandas 2.x).
+- ~~**Lazada config is code, not YAML**~~ — **fixed in M8/1.7 (2026-08-18).** `WEEKLY_MAP`, `DAILY_MAP`, `SHEETS` and `STORE_PATTERN` moved into `column_maps.lazada`, `sheet_names.lazada` and `store_from_filename.lazada`; `src/lazada.py` reads them through `column_map()` / `sheet_name()` / `store_pattern()`, which hard-stop rather than falling back to a copy. The four modules in `service/` and `tools/` that imported the constants now go through the contract, and the four Lazada golden windows re-ran unmoved. **The bucket names are still code** — `REVENUE_BUCKET` and `PROMO_BUCKETS` in `src/lazada.py`, alongside `finance_template.py`'s invoice buckets, which is [A14](14-PRODUCTION-READINESS.md) and its own commit.
+- ~~**A group-by inconsistency inside Lazada**~~ — **fixed (2026-08-19).** The promo aggregation in `lazada.revenue_lines` lacked the `dropna=False` its revenue-side sibling twelve lines above had, so a promo row with a null product name (or SKU) left the pool while its revenue counterpart stayed. **The direction is what made this the priority among the smaller items:** promo amounts are credits that *reduce* the invoiced unit price (`price_ka = (credits + promo) / units / VAT`), so a dropped promo row makes `price_ka` too **high** — an over-statement, billing the client too much. Every other open defect in this area under-states.
+
+  *Measured before the edit:* **0 null `sku_id` and 0 null `product_name` promo rows across all nine staged Lazada windows** (May `l1`–`l4`, July `l1`–`l5`), so the divergence was latent and no cell moved — the four Lazada goldens regenerate unchanged. Closed while the direction of the error was known rather than after an export arrives with a blank product name.
+
+  *The warning was part of the fix.* `revenue_lines` warns when promo does not fully match, and its text attributed the remainder to "the team's pairing" — the same sentence for a genuinely orphaned promo charge and for a key the grouping had thrown away, which is [1.1](#11-the-tie-out-checks-cannot-fail--fixed-m2-2026-08-13)'s shape at small scale. Now that both sides handle nulls identically the remainder really is the orphan class, and the message says so. The orphan class is real: **−30,845 VND on July `l2` and −22,486 VND on `l3`**, both with zero null keys. `tests/test_lazada_promo_pairing.py` covers all of it — `revenue_lines` had no unit coverage at all before, being reachable only through four windows of workbook goldens.
+- ~~**Date-format inconsistency**~~ — **fixed (M8 Phase 3, 2026-08-19).** No reader parses month-first any more; every raw-text date parse in `src/` goes through `parse_dates` with an explicit measured format from `date_formats` ([D54](06-DECISIONS.md#d54)). The remaining bare `pd.to_datetime` calls (`src/finance_template.py:240,354,355,395,396`; `src/pipeline.py:374`) re-parse already-typed columns and are harmless. See 1.6 above.
+- **No run provenance** — three separate claims, and they now have three different answers. Split so nobody closes the wrong one:
+  - *`run_log.txt` is unstructured* — **open, both paths.** `src/runlog.py:7-41` is a `list[str]`; `service/runlog.py:50-57` subclasses it deliberately so the text cannot drift from the CLI's, adding a `seq` and a DB mirror rather than structure.
+  - *No input hashes or config version* — **open for a CLI run, closed for a service run.** A service run records `runs.config_version_id` and `config_was_pinned`, logs the version and its digest into the run log (`service/worker.py:435-436`), stores the full config text content-addressed in `config_versions`, writes a per-file `materialized.json` with `sha256`/`object_key`/`upload_id`, digest-verifies every materialised input before it is read, and records a `sha256` per artifact. A `tools/devrun.py` run records none of it: `build_context` reads `settings.yaml` off disk and no digest is taken. **That asymmetry is itself the finding** — the developer path is the one with no provenance.
+  - *No per-row lineage* — **open, and the real remaining gap.** Nothing associates an output cell with the input rows that produced it. The closest thing is `source_file`, carried on Lazada ledger rows into the workbook, which is file-level. Owned by the unified transaction store in [10-ROADMAP](10-ROADMAP.md); the upload order index added for [2.12](#212-a-windows-order-export-does-not-cover-the-orders-it-settles--open-found-2026-08-19-july-month-end-tie) is its first additive piece.
+
+  *Struck from this entry 2026-08-19:* "The parity fingerprints are the first step toward fixing this." They were not. `tools/fingerprint.py` is golden-gate machinery with **zero** references in `service/`; what became run provenance was the config-version table and the upload digest chain, by an unrelated route. (`run_exceptions.fingerprint` is a different concept — a stable exception identity.)
 
 ---
 
@@ -225,14 +252,18 @@ One real change came out of building it: the Dockerfile copied `pyproject.toml` 
 
 ### 2.3 There is no upload or staging endpoint — **FIXED (M5, 2026-08-14)**
 
-`POST /uploads` accepts a raw export, strips it to the configured columns, quarantines the result, and `POST /uploads/{id}/stage` moves it into the window folder the CLI reads. Two properties carried over from existing controls rather than invented:
+`POST /uploads` accepts a raw export, strips it to the configured columns, and stores the sanitized result in the object bucket. Two properties carried over from existing controls rather than invented:
 
 - **The PII strip is the pipeline's own allowlist.** `ingest.read_parts` keeps exactly the columns in that platform's column map; the uploader applies the same map from the same config, so there is no second list of PII column names to maintain and go stale. The unstripped original never outlives the request.
 - **A byte-identical re-upload is refused** by a unique constraint on the content hash — the double-pull class, one instance of which carried 5.97B VND of double-invoicing risk ([D9](06-DECISIONS.md#d9)).
 
 Rewriting an export before the verified pipeline reads it is a real risk, and it is gated rather than assumed: `test_a_sanitized_window_produces_the_committed_golden` sanitizes a real window and demands the workbook match the committed digest cell for cell.
 
-*Still open:* the mis-pull class itself. Uploading is now possible; **deciding which window an export belongs to is still `tools/stage_exports.py`'s job**, and the api takes the period as a parameter rather than deriving it from settlement dates.
+*This entry described a staging endpoint that no longer exists.* `POST /uploads/{id}/stage` was **deleted in M6** — the bucket is the window, so there is no staging step, and `service/materialize.py` assembles the scratch tree at run time instead (`service/api.py:1094-1095`). An operator reading the old text would look for a route that is gone. The M6 shape is better than what this entry claimed; the claim was simply not updated.
+
+*Still open:* the mis-pull class itself. Uploading is possible; **deciding which window an export belongs to is still `tools/stage_exports.py`'s job**, and `POST /uploads` takes `period` as a form field validated for *character safety only* (`_safe_period`) — no settlement date is ever read. `stage_exports.py` has five settlement-date controls the api has none of, and one of them, `find_outliers`, detects exactly the mis-pull shape (a file whose settlement range starts earlier than its siblings'). The api has only the content-hash uniqueness constraint, which catches a byte-identical re-upload *into the same window* — and the defining property of a mis-pull is that it goes into a different one.
+
+**This is materially more expensive than one sentence implies, and [2.12](#212-a-windows-order-export-does-not-cover-the-orders-it-settles--open-found-2026-08-19-july-month-end-tie) is the price tag:** 4,527,401,608 VND of July understatement, two instances of which are confirmed byte-identical mis-pulled order files. The fix is a port of `_read_dates` + `find_outliers` behind the upload endpoint, reusing code that already exists and is already measured against eight windows.
 
 ### 2.4 Artifacts are local-filesystem only — **FIXED (M6, 2026-08-17)**
 
@@ -244,7 +275,15 @@ Rewriting an export before the verified pipeline reads it is a real risk, and it
 
 *Verified end to end, not asserted:* through the compose stack on Docker 29.7.2, an uploaded window ran in the worker, its artifacts landed under `s3://recon-artifacts/...`, and `GET /runs/1/artifacts/finance_file.xlsx` returned **14,924 bytes** — a valid 12-tab workbook — streamed through the api's own authorization. Deliberately **not** a presigned URL: that is a credential in a query string `service/auth.py` never sees.
 
-*Still open, and named:* `ObjectStore` has no retry/backoff beyond botocore's three attempts, and nothing verifies a downloaded object's digest against the recorded `sha256` before the pipeline reads it. The digest is stored and could be checked; today a silently truncated download would be caught only by the tie-out.
+*The retry half — `ACCEPTED`.* `service/objects.py:212-219` configures `retries={"max_attempts": 3, "mode": "standard"}` explicitly, with the rationale in place: *"Three tries, then fail loudly. A settlement run must not hang for minutes on a store that is simply down."* The register's original phrasing was factually right — that is what botocore would have done anyway — but the value is now a decision rather than an accident, and the reasoning argues *against* raising it. Remaining resilience surface, unnamed elsewhere: no circuit breaker and no explicit connect/read timeouts, so botocore's 60s defaults apply.
+
+*The digest half — **STRUCK. Closed by [2.10](#210-materialised-objects-are-not-digest-checked-before-the-pipeline-reads-them--fixed-m825-2026-08-18), and the fix it proposed was measured to FAIL.*** This paragraph used to say *"the digest is stored and could be checked"*, meaning `uploads.sha256`. Implementing exactly that failed **every healthy window** on the first run, because `uploads.sha256` digests the bytes the user handed over while the store holds the sanitized rewrite — different bytes, deliberately ([D52](06-DECISIONS.md#d52)). The working control is `materialize.verify_digest` against `object_sha256` (migration `010`), called on every materialised file before anything reads it. **Left standing, this text would send the next reader to reimplement the version that does not work.**
+
+*The opposite direction — unnamed until 2026-08-19, and **FIXED** the same day.* The artifact **download** path: the worker records a `sha256` per artifact and nothing ever compared it, so a truncated or replaced workbook would reach a finance user looking authoritative. Same failure shape as 2.10, same digest already stored, opposite direction of travel.
+
+`api.download_artifact` now verifies before serving, on both paths — `artifacts.sha256_of` for a local file, `artifacts.sha256_of_chunks` for a streamed object. A mismatch is **502** (the api did its job; storage returned something else) with both digests named, and there is no warning tier: a differing digest on the file the team invoices from has no benign cause.
+
+Two deliberate details. **Verify-then-serve, not verify-while-serving:** the store is read twice rather than buffering a 30 MB workbook in the api, which would undo the reason `stream()` exists — and aborting mid-stream would leave the client holding partial bytes. **A NULL digest is refused, not backfilled:** hashing the stored file now would certify the object store against itself and pass even if the bytes had already been replaced ([D26](06-DECISIONS.md#d26), the argument `010_object_digest.sql` made for uploads). The cost is stated rather than hidden — artifacts from runs predating the digest column stop being downloadable, and a re-run regenerates them.
 
 ### 2.5 Config is not yet period-versioned, and there is no config audit trail — **FIXED (M5, 2026-08-14)**
 
@@ -254,7 +293,15 @@ Rewriting an export before the verified pipeline reads it is a real risk, and it
 
 A hard stop pins nothing: a run that produced no workbook should not freeze the rules, because the fix for it may well be a config change.
 
-*Still open:* the pin is automatic and per-window. There is no way to say "this month runs under version 7" ahead of time, and unpinning is an admin action with a warning rather than a workflow.
+*The "no way to pin ahead of time" clause was **STALE**.* `POST /config/pins` (admin, `service/api.py:1360-1365`) takes `platform`, `period`, `config_version_id` and a `reason`, validates the version exists, and upserts — so it serves both as an ahead-of-time pin and as a re-pin, with a CLI equivalent at `service/admin.py:211-221` and a `GET` to list them. What remains true is narrower: the pin is **per-window**, so "this month runs under version 7" is one call per window (~14 a month), and `service/admin.py`'s explanatory line — *"a window is pinned by its first run that produces a workbook"* — describes only the automatic path.
+
+*The sharper half — **FIXED (2026-08-19)**.* **Unpinning destroyed the evidence.** `DELETE /config/pins/{platform}/{period}` bare-deleted the `period_config` row, so afterwards nothing recorded that the window had been pinned, to which version, or why it was released — only a docstring warning and a line printed to stdout. In a system whose entire M5/M6 rationale is the audit trail, and which records `config_proposals.self_approved` as a *generated* column precisely so it cannot be set to a convenient value, the one act on the config path that leaves no trace was the consequential one: after an unpin, a re-run of that window may not reproduce the invoice it was booked from.
+
+Migration `014_pin_events.sql` adds append-only `config_pin_events`. Both the automatic pin (`worker._settle_config`) and a manual one write an event **in the same transaction as the upsert**, so current state and its history cannot disagree. Unpinning requires a `reason` — 422 without one — reads the released version *inside* the transaction (after the delete there is nowhere left to look it up), and takes its actor from the session, never the body. `GET /config/pins` returns `events` alongside `pins` in one response on purpose: an unpinned window has no `pins` row at all, so a caller reading only current state cannot distinguish "never pinned" from "pinned and released", which is the whole question the history answers. `service.admin config pins` prints both.
+
+The table is append-only *by construction* — no update or delete path is written against it anywhere in `service/`, and the `action` check keeps the vocabulary closed so a third verb needs a migration.
+
+*The pin being automatic is deliberate and stays:* `service/worker.py:439-453` records the version on the run and pins only when the run produced a workbook — a hard stop pins nothing, because the fix for it may well be a config change.
 
 ### 2.6 The run log in Postgres contains store names — `ACCEPTED`
 
@@ -278,17 +325,46 @@ A hard stop pins nothing: a run that produced no workbook should not freeze the 
 
 *What M6 adds, and its equivalent inspection:* login, the accounts screen, the window/upload screen, and the sectioned config editor did not exist when 2.8 was written. They are covered by 479 service tests and by an end-to-end pass through the compose stack (bootstrap → sign in → temp-password gate → rotate → upload → queue → run → download a valid workbook), but **the same limit applies to their screens**: there is still no browser automation, so claims about rendering are claims about code that compiles and an API that answers. Treat the first real session on the new screens the way the first session on the old ones went.
 
-### 2.9 `tieout.py` still keys its coverage reference on `order_id` alone — `OPEN` (unchanged by M4, M5 or M6)
+*And again after M8 (2026-08-18).* Phases 2 and 4 added a reference-totals form, a verification-capability notice, error/not-found/loading boundaries, a self-refreshing run page, re-run and cancel controls, confirmation dialogs and a reclaim button. All of it type-checks and builds; the service halves are tested. **None of it has been clicked.** This entry stays closed because it names the *old* screens, but the limit it describes now covers three generations of UI and is not shrinking. A browser test harness is the thing that would actually retire it.
 
-Carried forward from M2.5, restated here only so it is not read as something a later milestone introduced or fixed. Joins key on `(store, order_id)`; the tie-out's coverage reference does not.
+### 2.9 `tieout.py` still keys its coverage reference on `order_id` alone — **FIXED (2026-08-19)**
+
+Carried forward from M2.5 through M4, M5 and M6. Joins keyed on `(store, order_id)`; the tie-out's coverage reference did not.
+
+**It was three faults, not one, and they fail in opposite directions.** Only the first was on the register:
+
+| Site | Under a collision |
+|---|---|
+| Order coverage (check 1) | differenced bare id sets, so an order with no lines of its own counted as covered because *another* store had that id — **blind** |
+| `partition` | filed that order's settlement as "matched", inflating the reference total and **shrinking the ~21% reconciling item** a reviewer is told to watch for changes in |
+| Per-order conservation (check 3) | `groupby("order_id")` with `settled=first()` summed both stores' rebuilt revenue against one store's settlement — **noisy**, a variance manufactured from correct data |
+
+The second is the quietest and the worst: money left the invoice through a door that reported less traffic than it carried.
+
+**Fixed** by one identity function, `tieout.pairs`, used by both sides of every comparison — which also closed a stringification asymmetry that would otherwise have produced phantom breaches (`per_store` keyed through `str(k)`, the SKU side through `.astype(str)`). `SourceReference.order_ids` became `order_keys`; `partition` takes `present_keys`; `from_income` now *requires* `store` rather than silently degrading to id-only keying; the dead `orders` field is derived from the key set. `pipeline.py`'s `unmatched_orders` exception sheet keys the same way, for the same reason — it had been omitting the row an operator needs most.
+
+**The template was already in the same file.** `RevenueCrossing` (Shopee's money crossing) was built composite from the start, with the reference defining the population and an absent order counting as a shortfall of its whole value. Checks 2 and 4 were already store-keyed. Lazada needs nothing — it takes no `SourceReference`.
+
+**Why this mattered more on Shopee than the original wording suggested:** `SHOPEE_MONEY` is `None`, so checks 3 and 4 never run there. Order coverage was Shopee's **only** order-population control, and this was the defect in it. On TikTok the `rebuilt total == referenced total` row is an accidental backstop — but it names no order and no store.
+
+*Evidence.* `tools/measure_order_id_collisions.py` is committed rather than ad-hoc (the M2.5 measurement was a scratch script nobody kept, which is why this claim had to be re-derived): **0 collisions across 8,399,255 distinct order ids** — 522,201 over the four May golden windows and 7,877,054 over the nine July ones, orders and income, both platforms. So the change is output-identical on today's data and only bites the case it exists for. **The golden gate was re-run over all eight windows at zero tolerance: no cell moved.** Three regression tests in `tests/test_silent_failures.py` cover the three faults, each pinned first as `xfail(strict)` and unpinned only after XPASS ([D22](06-DECISIONS.md#d22)). Each also carries a **discriminator** — an assertion that the pre-fix comparison would still have passed — so the proof of the original blindness stays in the suite after the marker is gone.
+
+*Named residual, deliberately not changed:* `finance_template.py:345` groups the TikTok return tab's per-order total on `order_id` alone. It writes workbook cells, so unlike everything above it is a golden-moving change and wants its own commit and its own measured delta.
 
 *Renumbered from 2.7 in M6* — there were two defects numbered 2.7, which made "defect 2.7" ambiguous in exactly the register that exists to remove ambiguity.
 
-### 2.10 Materialised objects are not digest-checked before the pipeline reads them — `OPEN` (new in M6)
+### 2.10 Materialised objects are not digest-checked before the pipeline reads them — **FIXED (M8/2.5, 2026-08-18)**
 
-`uploads.sha256` records the bytes that were accepted, and `service/materialize.py` downloads by key without comparing. A silently truncated or replaced object would reach `read_parts` and be caught only by a tie-out — or not at all, if it happened to still parse.
+`service/materialize.py` downloaded by key and compared nothing. A silently truncated or replaced object would reach `read_parts` and be caught only by a tie-out — or not at all, if it happened to still parse. Every claim the upload boundary makes, PII stripping included, was a claim about a file the run might not have been reading.
 
-Cheap to fix (the digest is already stored and already computed on `put`); named here rather than done because it belongs with a retry/verify policy for the object store, not bolted onto the download call.
+`materialize.verify_digest` now streams the sha256 of each materialised file and refuses a mismatch. A mismatch is a hard failure with no warning tier: an object store returning different bytes under one key, a truncated download and two windows colliding in scratch all arrive looking identical, and each is a reason to stop rather than to invoice.
+
+**This entry said the wrong thing, and the fix is not what it described.** It read "`uploads.sha256` records the bytes that were accepted … cheap to fix (the digest is already stored)". Implementing exactly that failed every healthy window on the first run, because the two values were never comparable:
+
+* `uploads.sha256` digests the bytes the **user handed over**. It is the provenance record and the unique constraint that refuses a byte-identical re-upload — the M2.5 double-pull control moved to the door.
+* What is stored under `object_key` is the **sanitized rewrite**: PII columns removed, one sheet, written by openpyxl. Different bytes, deliberately.
+
+Migration `010_object_digest.sql` adds `object_sha256`, recorded at upload from the sanitized bytes. **No backfill.** Recomputing it for existing rows means reading whatever is in the store today and writing that down as the expected value, which certifies the store against itself and would pass even if the bytes had already been replaced — the [D26](06-DECISIONS.md#d26) failure. `NULL` therefore means "uploaded before this check existed" and is refused, not trusted; such an upload has to be re-uploaded to be runnable.
 
 ### 2.11 The config verification run is synchronous and single-window — `ACCEPTED` (new in M6)
 
@@ -297,7 +373,77 @@ Applying a goldens-affecting config change runs one canary window inline, in the
 * The apply request takes as long as the canary run (~3s for the Lazada window, longer for TikTok or Shopee). Queuing it would put the answer on the board where nobody connects it to the edit, so it is inline on purpose.
 * **One** window is checked, not all eight. A change that moves cells only in a window the canary is not is reported as `verified`. That is a real limit of the claim, which is why the stored result names the window it used.
 
+*Three things have moved since this entry was written (recorded 2026-08-19, status unchanged):*
+
+* **Whether the canary can run at all is now answered up front.** `verification.capability()` distinguishes `no_digests` from `no_inputs` because the fixes differ. This matters more than it sounds: the golden manifest lives under `tests/` and no container image ships it, so in every containerised deployment this system has produced, `UNAVAILABLE` was the *only* reachable verdict — 2.11's "one window, not eight" was really "zero windows" there. The window preference order is `2026-05_l1/lazada` → `w1/tiktok` → `s1/shopee` (Lazada first because it is the ~3s window), falling back to the synthetic demo window labelled `strong=False` rather than counted as equal.
+* **Whether the canary runs is caller-decided, not inferred.** `invalidating` comes from the `invalidates_goldens` column on the edited config rows; an unknown counts as invalidating, and an empty list returns `NOT_APPLICABLE`. That mechanism decides coverage more than the window count does.
+* **A failed canary is deliberately non-fatal.** By the time it runs, the config is already applied, so the verdict is `FAILED` with the exception named rather than a rollback — which means **"applied but unverified" is a state an operator can reach**, and it belongs in this entry's list of consequences.
+
 ---
+
+### 2.12 A window's order export does not cover the orders it settles — `OPEN` (found 2026-08-19, July month-end tie)
+
+**Found by the first external month-end comparison** ([07-VERIFICATION](07-VERIFICATION.md)),
+which is the argument for doing that comparison at all. Eleven of 205 store-window
+cells across July's TikTok and Shopee tabs disagree with the team's master, and
+every one of them is this. **Lazada is unaffected** — it is a fee-event ledger with
+no order files at all, and it reproduces the reference exactly.
+
+`explode_to_sku_tiktok` joins a window's GOOD income to the ORDER files staged in
+that window's folder. But an order settled in `w2` may have been *created* days
+earlier, so its SKU lines live in the `01-07` folder's order export and not in
+`08-14`'s. Those lines are simply absent, the income row matches nothing, and the
+revenue leaves the invoice through the documented "~21% unmatched" door — quietly,
+because that door is expected to have traffic.
+
+Measured on July `w2`, order-id match rate of a store's own window income against
+the order files staged with it, versus against the whole month's:
+
+| store | own folder | whole month | money short vs the team's master |
+|---|---|---|---|
+| purite | 58.2% | 99.8% | 1,444,052,986 |
+| abbott pediasure | 33.8% | 99.9% | 941,081,056 |
+| mondelez kinh do | 85.4% | 100.0% | 6,992,600 |
+| similac | 92.0% | 100.0% | 1,788,000 |
+
+Also `curel` w5 (23,807,000) and `unilever homecare` w4 (73,000).
+
+**Shopee has it too, and worse in one window.** `masan` in `s4` (29-31 July) matches
+only **33.1%** of its income order-ids against the order files staged with it, and
+**95.6%** against the month's — a 2,106,036,476 VND understatement in one cell. The
+other four Shopee cells are small (`lashe` s2, `sanofi` s1/s3, `masan` s1).
+
+Total understatement against the team's July master: **4,527,401,608 VND** —
+2,417,721,642 on TikTok (~1.6% of its month) and 2,109,679,966 on Shopee (~2.0%).
+
+**Two of these are a mis-pull in the raw data, confirmed by digest.**
+`11. Order Purite 14.7.xlsx` (w2) is byte-identical to `12. Order Purite 7.7.xlsx`
+(w1) — sha `9bd3750061f4` — and the w2 Mondelez folder holds a file still named
+`7.7`, byte-identical to w1's (`f7e3dda0d99a`). The team exported the same order
+file twice and labelled it for the later window. Nothing downstream can recover
+from that; the lines were never pulled.
+
+**Do not "fix" this by pooling the month's order files.** Measured: pooling every
+July TikTok order export into `w2` takes the match rate to ~100% and the window
+total to **183,102,704,362 VND** against a reference of 40,060,544,029 — a 4.5×
+over-count. The same order line appears in several exports, `dedupe_rows: false`
+is deliberate ([D5](06-DECISIONS.md#d5) — byte-identical order lines are
+legitimate; this entry cited D14 until 2026-08-19, which is "compare stored
+artifacts, not live processes" and has nothing to do with it), and the explode
+sums quantity per `(store, order_id, sku_id, sku_name, unit_price_gross)` bucket,
+so a second copy of a file **inflates quantity inside one SKU line** rather than
+adding rows. Any dedupe therefore has to act on raw order rows *before* that
+groupby, and a dedupe keyed on `(store, order_id, sku)` alone is **not safe**:
+the same SKU legitimately appears twice in one order as a normal unit and a gift
+variant (`docs/05-DOMAIN-RULES.md` — promo pairing must include product name),
+and row content cannot distinguish that from a re-pulled copy. The discriminator
+that exists is **file-level provenance** — `source_file` on every row, per-file
+sha256 in `staging.json`, and `uploads.sha256` / `object_sha256` in Postgres.
+
+**What is NOT the cause, checked and cleared:** the `2026-07_w2` settlement bound.
+It drops 24,555 income rows, and **24,546 of 24,546 distinct order ids among them
+are already present in w1** — 100%, zero unique. The bound is correct and removing
+it would double-count.
 
 ## Part 2 — Defects found in the team's own files
 

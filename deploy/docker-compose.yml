@@ -167,6 +167,15 @@ services:
     # would cross-contaminate. FOR UPDATE SKIP LOCKED is what makes N processes
     # safe.
     restart: unless-stopped
+    # C6: Docker's default is 10 seconds, and a TikTok window takes 171. So every
+    # `compose down` or redeploy SIGKILLed a worker partway through building a
+    # workbook — leaving a job leased, a run in flight, and a half-written .xlsx
+    # in scratch. The worker handles SIGTERM by finishing the job in hand and then
+    # exiting (`Worker.stop`); this is the time to let it do that.
+    #
+    # 400s covers the longest measured run (269s Shopee) with headroom. It is a
+    # ceiling, not a wait: a worker that is idle exits immediately.
+    stop_grace_period: 400s
 
   web:
     build:

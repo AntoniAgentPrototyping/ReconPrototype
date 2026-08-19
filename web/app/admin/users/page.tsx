@@ -7,6 +7,8 @@ import UserActions from "./user-actions";
 
 export const dynamic = "force-dynamic";
 
+export const metadata = { title: "Người dùng" };
+
 function when(value: string | null): string {
   return value ? new Date(value).toLocaleString() : "never";
 }

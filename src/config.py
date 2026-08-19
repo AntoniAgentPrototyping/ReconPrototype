@@ -33,12 +33,6 @@ def load_settings(config_dir: Path) -> dict:
     return load_yaml(config_dir / "settings.yaml")
 
 
-def invoice_grouping(brand: str, brand_rules: dict) -> str:
-    brands = brand_rules.get("brands") or {}
-    rule = (brands.get(brand) or {}).get("invoice_grouping")
-    return rule or (brand_rules.get("defaults") or {}).get("invoice_grouping", "combined")
-
-
 def column_map(settings: dict, platform: str, kind: str) -> dict[str, str]:
     maps = settings.get("column_maps") or {}
     cmap = (maps.get(platform) or {}).get(kind)

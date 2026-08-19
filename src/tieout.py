@@ -49,6 +49,45 @@ from .runlog import RunLog
 PASS, BREACH, INFO = "PASS", "BREACH", "INFO"
 
 
+def pairs(frame: pd.DataFrame) -> frozenset:
+    """Order identity as `(store, order_id)` — the only key this module compares on.
+
+    **Mechanism.** An order id is unique per store, not globally. The joins moved to
+    the composite in M2.5, but this module kept differencing bare id sets, which was
+    carried as a named residual and registered as defect 2.9.
+
+    **Consequence, three ways.** A settled order with no lines of its own counted as
+    covered because a *different* store had that id; `partition` then filed its money
+    as matched, inflating the reference total and shrinking the ~21% reconciling item a
+    reviewer is told to watch; and per-order conservation summed both stores' rebuilt
+    revenue against one store's settlement, manufacturing a variance out of correct
+    data. Blind one way, noisy the other.
+
+    **Why one function.** The two sides used to stringify differently — `per_store`
+    keys through `str(k)` while the SKU side used `.astype(str)`. Comparing sets built
+    by two spellings is how a fix like this introduces a phantom breach, so both sides
+    go through here. See docs/08-KNOWN-DEFECTS.md#29.
+
+    **Measured before it shipped:** `tools/measure_order_id_collisions.py` (committed,
+    because M2.5's version of this measurement was a scratch script nobody kept and
+    the claim had to be re-derived) reports **0 collisions across 8,399,255 distinct
+    order ids** — 522,201 over the four May golden windows and 7,877,054 over the nine
+    July ones, orders and income, TikTok and Shopee. So this is output-identical on
+    today's data and only bites the case it exists for, the same posture as
+    `src/stitch.py`'s composite.
+    """
+    if not len(frame):
+        return frozenset()
+    return frozenset(zip(frame["store"].astype(str), frame["order_id"].astype(str)))
+
+
+def pair_series(frame: pd.DataFrame) -> pd.Series:
+    """Row-aligned `(store, order_id)` tuples, for masking a frame by membership."""
+    return pd.Series(
+        list(zip(frame["store"].astype(str), frame["order_id"].astype(str))),
+        index=frame.index, dtype=object)
+
+
 @dataclass(frozen=True)
 class SourceReference:
     """Totals captured upstream of the transformation being checked.
@@ -63,7 +102,7 @@ class SourceReference:
     """
 
     label: str
-    order_ids: frozenset
+    order_keys: frozenset
     settlement: float
     per_store: Mapping[str, float]
     orders: int
@@ -73,15 +112,22 @@ class SourceReference:
                     label: str = "income") -> "SourceReference":
         if money_col not in income.columns:
             raise KeyError(f"reference money column {money_col!r} not in the income frame")
+        # `store` is required, not optional. Every caller has it — classify aggregates
+        # on a key list beginning with it — and a reference that silently dropped to
+        # id-only keying is the defect this signature closes (2.9). A missing column is
+        # a wiring error, so it reads like one.
+        if "store" not in income.columns:
+            raise KeyError("reference frame has no 'store' column; order identity is "
+                           "(store, order_id) — see docs/08-KNOWN-DEFECTS.md#29")
         money = income[money_col].fillna(0)
-        per_store = (income.assign(_m=money).groupby("store")["_m"].sum().to_dict()
-                     if "store" in income.columns else {})
+        per_store = income.assign(_m=money).groupby(income["store"].astype(str))["_m"].sum().to_dict()
+        keys = pairs(income)
         return cls(
             label=label,
-            order_ids=frozenset(income["order_id"].astype(str)),
+            order_keys=keys,
             settlement=float(money.sum()),
             per_store={str(k): float(v) for k, v in per_store.items()},
-            orders=int(income["order_id"].nunique()),
+            orders=len(keys),
         )
 
 @dataclass(frozen=True)
@@ -240,7 +286,7 @@ def _crossing_rows(sku_level: pd.DataFrame, x: RevenueCrossing, tolerance: float
     return rows
 
 
-def partition(income: pd.DataFrame, *, money_col: str, present_order_ids,
+def partition(income: pd.DataFrame, *, money_col: str, present_keys: frozenset,
               label: str = "income") -> tuple[SourceReference, float, int]:
     """Split the income frame into (matched reference, unmatched money, unmatched orders).
 
@@ -248,15 +294,65 @@ def partition(income: pd.DataFrame, *, money_col: str, present_order_ids,
     the conservation check below stays exact. Folding a 21% silent-drop
     allowance into a tolerance instead would repeat the original mistake: a
     threshold wide enough never to fire.
+
+    `present_keys` is a set of `(store, order_id)` tuples from `pairs(sku_level)`.
+    It took bare ids until 2026-08-19, which filed one store's line-less order as
+    matched whenever another store happened to share its id — understating the
+    reconciling item by exactly the money that left the invoice (2.9).
     """
-    present = set(map(str, present_order_ids))
-    ids = income["order_id"].astype(str)
-    matched, unmatched = income[ids.isin(present)], income[~ids.isin(present)]
+    keys = pair_series(income)
+    in_sku = keys.isin(present_keys)
+    matched, unmatched = income[in_sku], income[~in_sku]
     return (
         SourceReference.from_income(matched, money_col=money_col, label=f"{label}:matched"),
         float(unmatched[money_col].fillna(0).sum()) if len(unmatched) else 0.0,
-        int(unmatched["order_id"].nunique()) if len(unmatched) else 0,
+        len(pairs(unmatched)),
     )
+
+
+def coverage_by_store(income: pd.DataFrame, *, money_col: str,
+                      present_keys: frozenset) -> pd.DataFrame:
+    """Per store: how much settled money reached no SKU line in this window.
+
+    The reconciling total has been reported since M2, but only as one number for the
+    whole window, and that is why [defect 2.12](../docs/08-KNOWN-DEFECTS.md) went
+    unnoticed for three months: a store whose order export does not cover the orders
+    it settles looks exactly like the window's ordinary ~21% traffic once both are
+    added together. Per store they do not look alike at all.
+
+    **Not a threshold, and deliberately so.** Measured on the golden windows, the
+    entire ~21% on `2026-05_w1` is ONE store (Unilever Homecare at 21.2%, with Mars at
+    0.0%) — a window that reproduces the team's figures and has a committed golden. So
+    a store sitting far above its siblings is *not* by itself evidence of anything,
+    and any absolute or leave-one-out threshold built on this shape would fire on
+    known-good data. What this returns is a measurement for the log, the exception
+    sheet and month-over-month comparison; the failable check with no legitimate
+    traffic is the cross-window one (`service/order_index.py`), because the legitimate
+    class has lines in *no* window.
+
+    Columns: store, orders, unmatched_orders, money, unmatched_money, unmatched_share.
+    """
+    if not len(income) or money_col not in income.columns:
+        return pd.DataFrame(columns=["store", "orders", "unmatched_orders", "money",
+                                     "unmatched_money", "unmatched_share"])
+    keys = pair_series(income)
+    money = income[money_col].fillna(0)
+    rows = []
+    for store, idx in income.groupby(income["store"].astype(str)).groups.items():
+        g_keys, g_money = keys.loc[idx], money.loc[idx]
+        g_unmatched = ~g_keys.isin(present_keys)
+        total = float(g_money.sum())
+        short = float(g_money[g_unmatched].sum())
+        rows.append({
+            "store": store,
+            "orders": len(set(g_keys)),
+            "unmatched_orders": len(set(g_keys[g_unmatched])),
+            "money": round(total, 2),
+            "unmatched_money": round(short, 2),
+            "unmatched_share": round((short / total * 100) if total else 0.0, 2),
+        })
+    return pd.DataFrame(rows).sort_values("unmatched_money", ascending=False,
+                                          ignore_index=True)
 
 
 def _row(name: str, expected: float, actual: float, tolerance: float,
@@ -287,7 +383,8 @@ def _tolerances(settings: dict, platform: str) -> dict:
 def run_checks(sku_level: pd.DataFrame, reference: SourceReference, settings: dict,
                log: RunLog, *, platform: str, money_col: str | None = None,
                unmatched_money: float = 0.0, unmatched_orders: int = 0,
-               crossing: RevenueCrossing | None = None) -> pd.DataFrame:
+               crossing: RevenueCrossing | None = None,
+               coverage: pd.DataFrame | None = None) -> pd.DataFrame:
     """Verify the SKU-level frame against an independently-captured reference.
 
     Four checks, each crossing a boundary the previous implementation did not:
@@ -307,15 +404,18 @@ def run_checks(sku_level: pd.DataFrame, reference: SourceReference, settings: di
     money_tol = float(tol.get("conservation_vnd", 1.0))
     results: list[dict] = []
 
-    sku_orders = set(sku_level["order_id"].astype(str)) if len(sku_level) else set()
+    sku_keys = pairs(sku_level) if len(sku_level) else frozenset()
 
-    # 1 — order coverage
-    missing = reference.order_ids - sku_orders
+    # 1 — order coverage, on (store, order_id). See `pairs`.
+    missing = reference.order_keys - sku_keys
+    lost_by_store = sorted({s for s, _ in missing})
     results.append(_row(
         "Order coverage: every referenced order reaches the SKU level",
         expected=0.0, actual=float(len(missing)), tolerance=0.0,
-        detail=(f"{len(missing):,} of {len(reference.order_ids):,} referenced orders absent"
-                if missing else f"all {len(reference.order_ids):,} orders present"),
+        detail=(f"{len(missing):,} of {len(reference.order_keys):,} referenced orders absent, "
+                f"across {len(lost_by_store)} store(s): {', '.join(lost_by_store[:5])}"
+                f"{'…' if len(lost_by_store) > 5 else ''}"
+                if missing else f"all {len(reference.order_keys):,} orders present"),
         kind="coverage"))
 
     # 2 — store coverage
@@ -340,7 +440,10 @@ def run_checks(sku_level: pd.DataFrame, reference: SourceReference, settings: di
     # produce a check that fires on correct data — which is how a control gets
     # switched off. It is named as an open gap instead (see below).
     if money_col and money_col in sku_level.columns and len(sku_level):
-        per_order = sku_level.groupby("order_id").agg(
+        # Grouped on (store, order_id). Keyed on the id alone this summed two stores'
+        # rebuilt revenue against `first()`'s single settlement figure, so a collision
+        # produced a variance from correct data rather than missing a real one (2.9).
+        per_order = sku_level.groupby(["store", "order_id"]).agg(
             rebuilt=("amount_with_vat", "sum"), settled=(money_col, "first"))
         deviation = (per_order["rebuilt"] - per_order["settled"]).abs()
         worst = float(deviation.max()) if len(deviation) else 0.0
@@ -361,7 +464,10 @@ def run_checks(sku_level: pd.DataFrame, reference: SourceReference, settings: di
 
         # 4 — per store, so offsetting errors cannot cancel
         if "store" in sku_level.columns and reference.per_store:
-            by_store = sku_level.groupby("store")["amount_with_vat"].sum()
+            # `.astype(str)` on both sides: `per_store`'s keys are stringified, so a
+            # non-str store label here would miss its own reference entry and report
+            # the store's whole total as a gap.
+            by_store = sku_level.groupby(sku_level["store"].astype(str))["amount_with_vat"].sum()
             worst_store, worst_gap = "", 0.0
             for store, expected in reference.per_store.items():
                 gap = abs(float(by_store.get(store, 0.0)) - float(expected))
@@ -395,6 +501,33 @@ def run_checks(sku_level: pd.DataFrame, reference: SourceReference, settings: di
             unmatched_money,
             f"{unmatched_orders:,} order(s); matches the team's VLOOKUP behaviour, "
             f"but is reported rather than silent"))
+
+    # The same money, broken out per store (defect 2.12). The window total above has
+    # been reported since M2 and is what let 4.5B VND of July understatement hide: on
+    # the TikTok golden window the whole ~21% belongs to ONE storefront, so a total
+    # reads identically whether the cause is that store's ordinary traffic or an order
+    # export that does not cover the orders its window settles. Per store it does not.
+    #
+    # INFO, not a threshold. Measured: the legitimate class runs to 21.2% on a window
+    # that reproduces the team's figures with a committed golden, so no absolute or
+    # leave-one-out level separates good from bad here. What does have zero legitimate
+    # traffic is "these lines exist in ANOTHER window's export", which needs the upload
+    # index to see and is checked in `service/`.
+    if coverage is not None and len(coverage):
+        worst = coverage.iloc[0]
+        named = ", ".join(
+            f"{r['store']} {r['unmatched_share']:.0f}%"
+            for _, r in coverage.head(5).iterrows() if r["unmatched_money"])
+        results.append(_info(
+            "Order-file coverage per store (settlement with no lines in THIS window)",
+            float(coverage["unmatched_money"].sum()),
+            f"{len(coverage)} store(s); worst {worst['store']} at "
+            f"{worst['unmatched_share']:.1f}% of its settlement "
+            f"({worst['unmatched_money']:,.0f} VND over "
+            f"{worst['unmatched_orders']:,} order(s))"
+            + (f" — {named}" if named else "")
+            + ". A store's share CHANGING month over month is the signal; the level "
+              "is not, since the legitimate class reaches 21% (docs/08 2.12)"))
 
     frame = pd.DataFrame(results)
     _log(frame, log)

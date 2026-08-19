@@ -235,9 +235,10 @@ def test_a_viewer_may_not_propose_a_config_change(make_client):
     """"Any user may request a change" means any USER. A read-only account that
     can rewrite the rules it is not trusted to run is not read-only."""
     client = make_client("recon.viewer")
-    r = client.post("/config/proposals",
-                    json={"path": ["vat_factors", "default"], "value": 1.10,
-                          "summary": "a viewer should not be able to do this"})
+    r = client.post("/config/proposals", json={
+        "edits": [{"table": "config_scalars", "op": "upsert",
+                   "key": {"key": "vat_factors.default"}, "values": {"value": 1.10}}],
+        "summary": "a viewer should not be able to do this"})
     assert r.status_code == 403
 
 
@@ -407,6 +408,9 @@ EXPECTED: dict[tuple[str, str], Role] = {
     ("GET", "/jobs"): Role.VIEWER,
     ("GET", "/jobs/{job_id}"): Role.VIEWER,
     ("POST", "/jobs/{job_id}/cancel"): Role.USER,
+    # C1: closes out someone else's in-flight work, and can end a run that was
+    # going to finish if a lease expired on a slow-but-live worker. ADMIN.
+    ("POST", "/jobs/reclaim"): Role.ADMIN,
 
     ("GET", "/runs/{run_id}"): Role.VIEWER,
     ("GET", "/runs/{run_id}/log"): Role.VIEWER,
@@ -435,11 +439,15 @@ EXPECTED: dict[tuple[str, str], Role] = {
     # not the rank.
     ("POST", "/windows/roster"): Role.USER,
     ("DELETE", "/windows/{platform}/{period}/roster"): Role.USER,
+    # A3: the team's own totals. USER, not VIEWER — supplying these decides whether
+    # a run is called verified, which is a claim about money.
+    ("PUT", "/windows/{platform}/{period}/references"): Role.USER,
+    ("DELETE", "/windows/{platform}/{period}/references"): Role.USER,
 
     ("GET", "/config"): Role.VIEWER,
-    # The sectioned form and the evidence it renders are a READ of the same file
-    # `GET /config` already returns verbatim, so it is no more privileged.
-    ("GET", "/config/schema"): Role.VIEWER,
+    # The tables and the evidence they render are a READ of the same contract
+    # `GET /config` already returns verbatim, so they are no more privileged.
+    ("GET", "/config/tables"): Role.VIEWER,
     # Computing a diff commits nothing — but it is USER, matching `POST
     # /config/proposals`, because a viewer who cannot propose has no use for a
     # preview of a proposal and it would only be an odd hole in the surface.

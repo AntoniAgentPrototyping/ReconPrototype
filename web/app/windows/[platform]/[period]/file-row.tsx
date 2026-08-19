@@ -43,7 +43,7 @@ export default function FileRow({
           <div className="muted small">read by a run — kept for reconstruction</div>
         )}
         {result && (
-          <div className={`notice ${result.ok ? "good" : "bad"}`} style={{ marginTop: 6 }}>
+          <div className={`notice ${result.ok ? "good" : "bad"}`} aria-live="polite" style={{ marginTop: 6 }}>
             {result.message}
           </div>
         )}

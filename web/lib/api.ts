@@ -220,6 +220,10 @@ export type BoardRow = {
   config_was_pinned: boolean;
   finding_count: number | null;
   job_count: number;
+  /** 'window' for a settlement run, 'month_master' for the month-end summary
+   *  (M8 Phase 3). The api already splits these into separate lists, so a board
+   *  row is always a window; this is here for the master rows. */
+  kind?: "window" | "month_master";
 };
 
 // ---------------------------------------------------------------------------
@@ -292,6 +296,43 @@ export type WindowPlan = {
   roster_declaration: RosterDeclaration | null;
   /** What `POST /jobs` will do with this window as it stands. */
   ready: boolean;
+};
+
+/**
+ * One reference figure the team can supply (A3).
+ *
+ * Served by the API from `service/references.py` rather than defined here, so a key
+ * the pipeline stopped comparing cannot leave a form field quietly collecting a
+ * number nothing checks.
+ */
+export type ReferenceField = {
+  key: string;
+  label: string;
+  help: string;
+  /** Served, not translated here — see `service/references.py`. Putting the
+   *  Vietnamese in this layer would re-create, one language later, exactly the
+   *  drift the served spec exists to prevent. */
+  label_vi: string;
+  help_vi: string;
+};
+
+export type WindowReferences = {
+  platform: string;
+  period: string;
+  refs: { grand?: Record<string, number>; grand_tolerance?: number };
+  supplied_by: string;
+  supplied_at: string;
+  note: string | null;
+};
+
+export type WindowDetail = {
+  platform: string;
+  period: string;
+  roster_declaration: RosterDeclaration | null;
+  reference_fields: ReferenceField[];
+  references: WindowReferences | null;
+  references_summary: string;
+  references_summary_vi: string;
 };
 
 /** The file kinds each platform has. Mirrors service/naming.KINDS_BY_PLATFORM;
@@ -374,62 +415,109 @@ export type Proposal = {
   decided_at: string | null;
   decision_note: string | null;
   applied_version_id: number | null;
-  /** The operations that were requested, since M6. Absent on an M5 proposal, which
-   *  recorded only the resulting file — which is why one of those cannot be
-   *  replayed. */
-  edits?: { op: string; path: string[]; value?: unknown; key?: string }[] | null;
+  /** The operations that were requested. Absent on an M5 proposal, which recorded
+   *  only the resulting file — which is why one of those cannot be replayed. */
+  edits?: ConfigRowEdit[] | null;
+  /** Which editor produced `edits`. "path" is the pre-M8 dotted-path editor and its
+   *  proposals can neither be applied nor replayed against the config tables. */
+  edit_model?: "path" | "row" | null;
   rebased_from?: number | null;
   /** Computed by the database: the approver was the author. Permitted, recorded. */
   self_approved?: boolean;
 };
 
-/** One editable setting, with the comment block that justifies its current value. */
-export type ConfigField = {
-  path: string[];
-  /** Wire format only. NEVER rendered — see service/config_schema.py. */
-  dotted: string;
-  label: string;
-  widget:
+/** One row operation. `table`, `key` and column names are WIRE FORMAT ONLY — no
+ *  user ever sees one, which `test_a_wire_name_is_never_part_of_the_rendered_payload`
+ *  holds on the server side. */
+export type ConfigRowEdit = {
+  table: string;
+  op: "upsert" | "delete";
+  key: Record<string, unknown>;
+  values?: Record<string, unknown>;
+  /** The reason, stored in the row's own `evidence` column. Required on a new row:
+   *  it is what makes the entry defensible in six months, and unlike a comment it
+   *  cannot end up captioning the entry below it. */
+  evidence?: string;
+};
+
+/** One column of a config table: what it holds and which control draws it. */
+export type ConfigColumn = {
+  name: string;
+  kind:
+    | "text"
+    | "bool"
+    | "int"
     | "money_vnd"
     | "number"
+    | "date"
     | "enum"
-    | "bool"
-    | "text"
-    | "string_list"
-    | "store_roster"
-    | "alias_map"
-    | "column_map"
-    | "date_bounds"
-    | "pattern"
-    | "locked"
-    | "dead";
-  reader: string;
+    | "json";
+  label: string;
   help: string;
-  invalidates_goldens: boolean;
+  nullable: boolean;
   options: { value: string; label: string }[];
-  on_means: string;
-  off_means: string;
-  locked_reason: string;
-  editable: boolean;
-  allows_new_keys: boolean;
-  value: unknown;
-  /** The comment block from settings.yaml itself, verbatim. */
-  evidence: string[];
+  default: unknown;
 };
 
-export type ConfigSection = {
-  key: string;
+/** One row, as served: its key, its values, and its own justification. */
+export type ConfigRow = {
+  key: Record<string, unknown>;
+  values: Record<string, unknown>;
+  /** The reason this row exists, from its own `evidence` column — not a comment
+   *  block lifted off the container, which could only ever caption the group. */
+  evidence: string;
+  changed_by: string | null;
+  changed_at: string | null;
+  source: string | null;
+  invalidates_goldens: boolean;
+  /** Set only on the single-settings table, whose rows carry their own labels. */
+  label: string | null;
+  help: string | null;
+  reader: string | null;
+  locked: boolean;
+  locked_reason: string;
+};
+
+export type ConfigTable = {
+  table: string;
   title: string;
   blurb: string;
-  per_platform: boolean;
-  fields: ConfigField[];
+  key: ConfigColumn[];
+  columns: ConfigColumn[];
+  /** A key column to split the rows on, so a roster reads as three lists rather
+   *  than one 42-row table with a platform column nobody scans. */
+  grouped_by: string | null;
+  may_insert: boolean;
+  may_delete: boolean;
+  /** Quoted verbatim when an insert or delete is refused. A table that is closed
+   *  and cannot say why is a table nobody can argue with. */
+  closed_reason: string;
+  invalidates_goldens: boolean;
+  require_evidence: boolean;
+  min_evidence: number;
+  rows: ConfigRow[];
 };
 
-export type ConfigSchema = {
-  sections: ConfigSection[];
+/**
+ * Whether this deployment can check a goldens-affecting edit AT ALL, answered
+ * before anyone makes one (A2). In every container this system currently builds
+ * the answer is no: the canary needs `tests/goldens/manifest.json` and no image
+ * ships `tests/`. The editor used to present the gate as working right up to the
+ * moment it silently could not run.
+ */
+export type VerificationCapability = {
+  can_verify: boolean;
+  reason: "ready" | "no_digests" | "no_inputs";
+  detail: string;
+  window?: string;
+  strong?: boolean;
+};
+
+export type ConfigTables = {
+  tables: ConfigTable[];
   sha256: string;
-  canonical_fields: string[];
   operations: string[];
+  verification: VerificationCapability;
 };
 
 export type ConfigVersion = {

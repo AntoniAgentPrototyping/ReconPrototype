@@ -1,7 +1,15 @@
 """Stage 3 — Classify.
 
-Tags each income line OK / WRITTEN (returned) / ZERO_REVENUE per the team's
-rules, and attaches the invoice grouping from brand_rules.yaml.
+Two ports of the team's own Power Query, one per platform: `classify_tiktok_income`
+and `classify_shopee_income`. `src/pipeline.py` calls exactly those.
+
+A generic `classify()` lived here until 2026-08-18, tagging lines
+OK / WRITTEN / ZERO_REVENUE and attaching an invoice grouping read from
+`config/brand_rules.yaml`. It had **no callers** — a survivor of the M1 placeholder
+deletion, and the last reader of that config file. Deleted with the goldens
+unchanged, which is the proof it was unreachable ([D19](../docs/06-DECISIONS.md#d19)).
+The real invoice split is still the substring bucket list in
+`finance_template.py:90-92`, which is where to look for it.
 """
 
 from __future__ import annotations
@@ -9,12 +17,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .config import invoice_grouping
 from .runlog import RunLog
-
-STATUS_OK = "OK"
-STATUS_WRITTEN = "WRITTEN"
-STATUS_ZERO = "ZERO_REVENUE"
 
 # TikTok statuses ported from the team's Power Query (Income_Final query,
 # Thanh_recon V1/V2 M code, steps "Added Custom3"/"Grouped Rows"):
@@ -42,25 +45,6 @@ TIKTOK_GROUP_SUM_COLUMNS = [
     "subtotal_after_seller_discounts", "subtotal_before_discounts",
     "refund_subtotal_after_sd", "refund_subtotal_before_sd",
 ]
-
-
-def classify(income: pd.DataFrame, brand_rules: dict, log: RunLog) -> pd.DataFrame:
-    df = income.copy()
-    refund = df["actual_refund"].fillna(0)
-    net = df["net_revenue"].fillna(0)
-    df["status"] = np.where(refund != 0, STATUS_WRITTEN, np.where(net == 0, STATUS_ZERO, STATUS_OK))
-
-    # Invoice grouping is config, not code: separate-invoice brands split out,
-    # everything else lands in the combined group.
-    df["invoice_group"] = [
-        brand if invoice_grouping(brand, brand_rules) == "separate" else "combined"
-        for brand in df["brand"]
-    ]
-
-    counts = df["status"].value_counts()
-    for status in (STATUS_OK, STATUS_WRITTEN, STATUS_ZERO):
-        log.add(f"  {status}: {int(counts.get(status, 0))}")
-    return df
 
 
 def classify_tiktok_income(income: pd.DataFrame, log: RunLog) -> pd.DataFrame:

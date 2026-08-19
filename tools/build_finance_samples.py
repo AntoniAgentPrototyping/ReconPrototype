@@ -25,7 +25,8 @@ from src.runlog import RunLog  # noqa: E402
 OUT = ROOT / "output" / "samples_for_nu"
 
 
-def sample_tiktok(period: str, settings: dict, meta: dict, log: RunLog) -> Path:
+def sample_tiktok(period: str, settings: dict, meta: dict, log: RunLog,
+                  vat_sku: dict | None = None) -> Path:
     d = ROOT / "input" / period / "tiktok"
     orders = ingest.read_parts(d / "orders", config.column_map(settings, "tiktok", "orders"),
                                "orders", settings, log, "tiktok")
@@ -35,14 +36,15 @@ def sample_tiktok(period: str, settings: dict, meta: dict, log: RunLog) -> Path:
     cl = classify.classify_tiktok_income(income, log)
     good = cl[cl["check_status"] == classify.CHECK_GOOD]
     sku = calculate.explode_to_sku_tiktok(good, orders, log)
-    sku = calculate.compute_sku_columns_tiktok(sku, settings, log)
+    sku = calculate.compute_sku_columns_tiktok(sku, settings, log, vat_sku)
     wb, checks = finance_template.build_tiktok(sku, settings, meta, log)
     path = OUT / f"Tiktok result {meta['label']} For KA.xlsx"
     finance_template.write_workbook(wb, path, checks, log)
     return path
 
 
-def sample_shopee(period: str, settings: dict, meta: dict, log: RunLog) -> Path:
+def sample_shopee(period: str, settings: dict, meta: dict, log: RunLog,
+                  vat_sku: dict | None = None) -> Path:
     d = ROOT / "input" / period / "shopee"
     orders = ingest.read_parts(d / "orders", config.column_map(settings, "shopee", "orders"),
                                "orders", settings, log, "shopee")
@@ -51,14 +53,18 @@ def sample_shopee(period: str, settings: dict, meta: dict, log: RunLog) -> Path:
     orders, income = ingest.derive_brand(orders, settings, log), ingest.derive_brand(income, settings, log)
     cl = classify.classify_shopee_income(income, log)
     sku = calculate.explode_to_sku_shopee(cl, orders, log)
-    sku = calculate.compute_sku_columns_shopee(sku, settings, log)
+    sku = calculate.compute_sku_columns_shopee(sku, settings, log, vat_sku)
     wb, checks = finance_template.build_shopee(sku, settings, meta, log)
     path = OUT / f"shopee result For KA {meta['label']}.xlsx"
     finance_template.write_workbook(wb, path, checks, log)
     return path
 
 
-def sample_lazada(period: str, settings: dict, meta: dict, log: RunLog) -> Path:
+def sample_lazada(period: str, settings: dict, meta: dict, log: RunLog,
+                  vat_sku: dict | None = None) -> Path:
+    # `vat_sku` is accepted and ignored: Lazada loads its own map below, and a
+    # uniform signature keeps the dispatcher in main() from special-casing one
+    # platform.
     fee_types = lazada.load_fee_type_map(ROOT / "config", log, settings)
     vat_sku = lazada.load_vat_sku(ROOT / "config", log, settings)
     ledger = lazada.read_ledger(ROOT / "input" / period / "lazada", settings, log)
@@ -83,12 +89,12 @@ def main() -> int:
     log = RunLog()
     settings = config.load_settings(ROOT / "config")
     from src.masters import load_masters
-    settings["_vat_sku"] = load_masters(ROOT / "config", settings, log)["vat_sku"]
+    vat_sku = load_masters(ROOT / "config", settings, log)["vat_sku"]
     meta = {"label": args.label, "period_label": args.label, "month_label": args.month}
 
     log.section(f"FINANCE TEMPLATE SAMPLE {args.platform} {args.period}")
     fn = {"tiktok": sample_tiktok, "shopee": sample_shopee, "lazada": sample_lazada}[args.platform]
-    path = fn(args.period, settings, meta, log)
+    path = fn(args.period, settings, meta, log, vat_sku)
     log.add(f"  sample ready: {path}")
     return 0
 

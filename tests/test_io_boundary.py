@@ -44,7 +44,11 @@ IO_NAMES = frozenset({
 # writing down why, which is exactly the conversation the lint exists to force.
 ALLOWED: dict[str, frozenset[str]] = {
     # --- the read boundary -------------------------------------------------
-    "ingest.py": frozenset({"read_excel", "read_csv", "ExcelFile"}),
+    # `open` added 2026-08-19 for `rights_protected`, which reads the first bytes of
+    # a file to answer "is this encrypted?" before any Excel reader touches it. A
+    # READ, in the module that is already the read boundary, and declared here rather
+    # than exempted — widening this table is meant to be a visible act.
+    "ingest.py": frozenset({"read_excel", "read_csv", "ExcelFile", "open"}),
     "lazada.py": frozenset({"read_excel"}),
     "config.py": frozenset({"open"}),
     "masters.py": frozenset({"open", "open_workbook"}),
@@ -57,7 +61,15 @@ ALLOWED: dict[str, frozenset[str]] = {
     # because that is the granularity of this table — which is too coarse for
     # the invariant that actually matters ("run() writes nothing"), so
     # test_run_writes_nothing below checks it per FUNCTION.
-    "pipeline.py": frozenset({"mkdir", "write_text"}),
+    #
+    # `unlink` added 2026-08-19 for `_write_atomically`, which writes each artifact
+    # to a sibling `.tmp` and `os.replace`s it into place, then removes the temp file
+    # if the write failed (register D10 / defect 1.7). Note the lint cannot see the
+    # `os.replace` itself: "replace" is deliberately absent from IO_NAMES because
+    # `Series.replace` and `str.replace` are everywhere in this codebase, so adding it
+    # would be false positives rather than coverage. The write it guards — `save`,
+    # `to_excel`, `write_text` — is already granted and is what the temp path changes.
+    "pipeline.py": frozenset({"mkdir", "write_text", "unlink"}),
     # RunLog is the audit-trail sink, not compute. Writing run_log.txt from here
     # is the point of the class.
     "runlog.py": frozenset({"write_text"}),

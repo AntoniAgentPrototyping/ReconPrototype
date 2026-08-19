@@ -1,69 +1,23 @@
-"use client";
+import { LoginForm } from "./login-form";
+import { currentLang } from "@/lib/lang";
 
-import { useActionState } from "react";
+export const dynamic = "force-dynamic";
 
-import { signIn, type ActionResult } from "../actions";
+export const metadata = { title: "Đăng nhập" };
 
 /**
- * Sign in with a username and password.
+ * A server shell around the sign-in form, added in Phase 5 so the page can be
+ * rendered in the reader's language.
  *
- * Entra ID SSO is still the destination and is still blocked on a tenant app
- * registration that needs directory permissions (docs/13-ENTRA-SETUP.md). When it
- * lands, this page becomes a redirect and nothing else in the app changes — which
- * is MORE true now than it was under token paste, because the credential the
- * browser holds is already an opaque server-side session rather than the identity
- * itself.
+ * The form itself has to stay a client component — it uses `useActionState` for the
+ * pending state and the error — and a client component cannot read cookies or
+ * headers. So the language is resolved here and passed down, which is the same shape
+ * every other localized page in this app uses.
  *
- * Both fields live in one <form> so a password manager saves them as a pair.
+ * This page in particular must be translatable: it is the one screen a person sees
+ * *before* they have an account, and telling somebody in English that their password
+ * is wrong is not much help if English is why they cannot read the form.
  */
-export default function LoginPage() {
-  const [state, action, pending] = useActionState<ActionResult | null, FormData>(signIn, null);
-
-  return (
-    <>
-      <h1>Sign in</h1>
-      <p className="lede">
-        Your session is stored in an httpOnly cookie and is never readable by JavaScript.
-      </p>
-
-      <div className="panel" style={{ maxWidth: 620 }}>
-        {state && !state.ok && <div className="notice bad">{state.message}</div>}
-
-        <form action={action}>
-          <label htmlFor="username">Username</label>
-          <input
-            id="username"
-            name="username"
-            type="text"
-            autoComplete="username"
-            autoCapitalize="none"
-            autoCorrect="off"
-            spellCheck={false}
-            required
-            style={{ width: "100%", marginBottom: 12 }}
-          />
-
-          <label htmlFor="password">Password</label>
-          <input
-            id="password"
-            name="password"
-            type="password"
-            autoComplete="current-password"
-            required
-            style={{ width: "100%", marginBottom: 12 }}
-          />
-
-          <button type="submit" disabled={pending}>
-            {pending ? "Signing in…" : "Sign in"}
-          </button>
-        </form>
-      </div>
-
-      <p className="muted small" style={{ maxWidth: 620 }}>
-        No account? They are created by an admin, or on the server for the very first one —{" "}
-        <span className="mono">python -m service.admin user create</span>. Creating the first
-        identity needs database access, which is more access than using one; that is deliberate.
-      </p>
-    </>
-  );
+export default async function LoginPage() {
+  return <LoginForm lang={await currentLang()} />;
 }

@@ -5,11 +5,11 @@ scaffold-era layout, superseded by `src/finance_template.py` (which emits the
 team's own invoicing-template shape) and reachable only from the deleted
 `recon.py`.
 
-**Not yet wired into production.** `tools/full_run.py` never calls this, so
-exception rows are computed and dropped — see docs/08-KNOWN-DEFECTS.md. The
-seam now carries them on `RunResult.exceptions`; connecting that to this writer
-is an M2 task, because it adds an output file and therefore changes what a run
-produces.
+**Wired in since M2.** `pipeline.write_artifacts` calls this whenever any
+exception sheet is populated, so the rows the seam carries on
+`RunResult.exceptions` reach a file instead of being computed and dropped
+(docs/08-KNOWN-DEFECTS.md#110). This docstring claimed otherwise until
+2026-08-19, and cited `tools/full_run.py`, which became `tools/devrun.py` in M6.
 """
 
 from __future__ import annotations
@@ -27,6 +27,12 @@ EXCEPTION_TABS = [
     ("unknown_skus", "Unknown SKUs"),
     ("tieout_breaches", "Tie-out Breaches"),
     ("zero_revenue", "Zero Revenue"),
+    # Added 2026-08-19 for defect 2.12. One row per store: settled money, how much of
+    # it reached no SKU line in this window, and the share. The reconciling total has
+    # been reported since M2 but only per WINDOW, and on the TikTok golden window the
+    # whole ~21% is a single store — so a total cannot distinguish that window's
+    # ordinary traffic from a store whose order export does not cover what it settles.
+    ("order_coverage", "Order Coverage"),
 ]
 
 
@@ -39,10 +45,16 @@ def _tab(df: pd.DataFrame, columns: dict[str, str]) -> pd.DataFrame:
 
 
 
-def write_exceptions_file(path: Path, exceptions: dict[str, pd.DataFrame], log: RunLog) -> int:
-    """One tab per exception type, always all four tabs (empty = nothing to look at)."""
+def write_exceptions_file(path: Path, exceptions: dict[str, pd.DataFrame], log: RunLog,
+                          *, write_to: Path | None = None) -> int:
+    """One tab per exception type, always all four tabs (empty = nothing to look at).
+
+    `write_to` overrides where the bytes land without changing what `path` names, so
+    `pipeline.write_artifacts` can stage an atomic write. See `write_workbook` for
+    why the temp path belongs to the caller.
+    """
     total = 0
-    with pd.ExcelWriter(path, engine="openpyxl") as xw:
+    with pd.ExcelWriter(write_to or path, engine="openpyxl") as xw:
         for key, sheet in EXCEPTION_TABS:
             df = exceptions.get(key, pd.DataFrame())
             if df.empty and not len(df.columns):

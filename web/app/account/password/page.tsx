@@ -6,6 +6,8 @@ import PasswordForm from "./password-form";
 
 export const dynamic = "force-dynamic";
 
+export const metadata = { title: "Mật khẩu" };
+
 /**
  * Change your own password.
  *

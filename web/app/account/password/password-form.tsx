@@ -18,7 +18,9 @@ export default function PasswordForm() {
   return (
     <div className="panel" style={{ maxWidth: 620 }}>
       {state && (
-        <div className={`notice ${state.ok ? "good" : "bad"}`}>{state.message}</div>
+        <div className={`notice ${state.ok ? "good" : "bad"}`} aria-live="polite">
+          {state.message}
+        </div>
       )}
 
       <form action={action}>
