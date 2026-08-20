@@ -184,13 +184,13 @@ def roster_gap(settings: dict, platform: str,
 def canonical_store(settings: dict, platform: str, store: str) -> str:
     """The store after `store_aliases`, which is what the roster is checked against.
 
-    `TODO-HUMAN` is an unresolved alias and must resolve to itself, not to the
-    literal string — `read_parts` skips those too, and mapping a real store onto a
-    placeholder would put "TODO-HUMAN" in the roster comparison.
+    Kept as a name here because callers and tests use it, but the arithmetic moved
+    into `src/ingest.py` on 2026-08-20 so the roster preview, the pipeline's own
+    reads and the cross-window borrow cannot drift apart on what a store is called.
     """
-    aliases = (settings.get("store_aliases") or {}).get(platform) or {}
-    mapped = aliases.get(store)
-    return mapped if mapped and mapped != "TODO-HUMAN" else store
+    from src import ingest
+
+    return ingest.canonical_store(settings, platform, store)
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +284,130 @@ def materialize_window(repo, settings, platform: str, period: str, *,
         json.dumps(result.provenance(), indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8")
     return result
+
+
+def materialize_predecessor_orders(repo, settings, platform: str, period: str, *,
+                                   scratch: Path, log, domain_settings: dict,
+                                   objects=None, strict: bool = False) -> int:
+    """Also download the ORDER files of earlier same-month windows.
+
+    `src/backfill.py` answers "which earlier window exported this order's lines?" by
+    reading sibling folders under the input root. On the CLI that root is the staged
+    tree and every window is already there. On the service the root is a scratch dir
+    the worker just built from *this* window's uploads, so the siblings do not exist
+    and report mode would find nothing — not because there is nothing to find, but
+    because nothing was downloaded. This closes that difference.
+
+    Only `orders`, and only predecessors: income is never re-read
+    ([D9](../docs/06-DECISIONS.md#d9) already owns which settlement rows belong to a
+    window), and a later window must not change an earlier one's answer.
+
+    **Called only when the resolved config asks for it.** Under
+    `cross_window_order_backfill: off` this is not called at all, so a deployment that
+    has not opted in downloads nothing extra. Returns the number of files added.
+
+    Digests are verified exactly as the window's own files are — these bytes reach the
+    same reader and, under `apply`, the same invoice.
+
+    **One failure policy, and `strict` selects which half applies** (2026-08-20). Under
+    `report` every predecessor problem — unplannable names, a missing object, a digest
+    mismatch, two uploads with one filename — warns and skips that window: report mode's
+    contract is that it changes nothing, and a run that dies over a *sibling* window's
+    file is a control firing on the wrong window. Under `apply` every one of them
+    refuses, because the same bytes are about to become invoice lines. Until this
+    existed the three cases disagreed: naming and missing-object warned while a digest
+    mismatch hard-stopped a report-mode run, and a filename collision — fatal for the
+    window's own files — was silently resolved last-one-wins here.
+    """
+    if not hasattr(repo, "uploads_for_window"):
+        return 0
+
+    from .objects import ObjectNotFound, upload_store
+    objects = objects if objects is not None else upload_store(settings)
+    target_root = Path(scratch) / "input"
+
+    # The window labels backfill will look for, decided by the SAME function the
+    # pipeline uses — only the source of candidates differs (window labels out of
+    # Postgres here, directories on the CLI). Two spellings of "which window is
+    # earlier" is exactly the drift this whole defect is made of.
+    from src.backfill import predecessor_labels
+
+    if not hasattr(repo, "month_windows"):
+        return 0
+    month = period.split("_", 1)[0]
+    candidates = [row["period"] for row in repo.month_windows(month)
+                  if row.get("platform") == platform]
+
+    def _degrade(message: str, exc: Exception | None = None):
+        """Refuse under `apply`, warn and skip under `report`. See the docstring."""
+        if strict:
+            raise MaterializationError(
+                f"{message} Under cross_window_order_backfill: apply these bytes would "
+                f"supply invoice lines for {period}, so this is a refusal rather than a "
+                f"warning. Fix that window's uploads, or set the mode to `report`."
+            ) from exc
+        log.warn(f"cross-window: {message}")
+
+    added = 0
+    for label in predecessor_labels(period, candidates):
+        rows = [r for r in repo.uploads_for_window(platform, label)
+                if r.get("kind") == "orders" and r.get("object_key")]
+        if not rows:
+            continue
+
+        by_name: dict[str, dict] = {}
+        collided = False
+        for row in rows:
+            existing = by_name.get(row["filename"])
+            if existing is not None:
+                # Fatal for the window's OWN files (see materialize_window). It was
+                # silently last-one-wins here until 2026-08-20, which let a stale
+                # upload quietly become the borrowed bytes.
+                _degrade(f"two different {platform}/orders uploads in {label} are both "
+                         f"named {row['filename']!r} (uploads {existing['id']} and "
+                         f"{row['id']}), so it is ambiguous which bytes {label} would "
+                         f"lend and that window is skipped.")
+                collided = True
+                break
+            by_name[row["filename"]] = row
+        if collided:
+            continue
+
+        try:
+            planned = naming.plan_window(list(by_name), platform, "orders",
+                                         domain_settings)
+        except naming.NamingError as exc:
+            _degrade(f"cannot name {platform}/orders files in {label}, so that window "
+                     f"cannot be checked for borrowed lines ({exc})", exc)
+            continue
+
+        for item in planned:
+            row = by_name[item.original]
+            target = naming.target_path(target_root, label, platform, "orders",
+                                        item.name)
+            try:
+                objects.download_to(row["object_key"], target)
+            except ObjectNotFound as exc:
+                _degrade(f"upload {row['id']} ({item.original}) in {label} is recorded "
+                         f"but absent from the store, so {item.store!r} cannot be "
+                         f"checked for borrowed lines", exc)
+                continue
+            try:
+                verify_digest(target, row, item)
+            except MaterializationError as exc:
+                # A digest failure used to hard-stop even a report-mode run, which broke
+                # report's inertness over a file this window does not own.
+                _degrade(f"{label}'s order file for {item.store!r} does not match what "
+                         f"was stored, so that window cannot be used for borrowed "
+                         f"lines ({exc})", exc)
+                target.unlink(missing_ok=True)
+                continue
+            added += 1
+
+    if added:
+        log.add(f"  cross-window: {added} predecessor order file(s) materialized for "
+                f"comparison (defect 2.12)")
+    return added
 
 
 def _log(result: Materialization, log, platform: str, period: str) -> None:

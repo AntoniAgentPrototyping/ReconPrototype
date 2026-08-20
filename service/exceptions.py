@@ -43,6 +43,12 @@ IDENTITY_COLUMNS: dict[str, tuple[str, ...]] = {
     # window the entire 21% is one store, so the total looks the same whether the
     # cause is legitimate or an order export that does not cover its own window.
     "order_coverage": ("store",),
+    # One row per order settled here whose lines were exported with an earlier
+    # window. Keyed on the order, NOT on the window that holds it: the same order
+    # recurring run after run means the export was never re-pulled, and that is the
+    # thing worth chasing. Including `source_window` would make a re-pull that moved
+    # the lines to a different sibling look like a brand-new exception.
+    "cross_window_orders": ("store", "order_id"),
 }
 
 # Rows whose identity columns are all missing fall back to hashing the whole

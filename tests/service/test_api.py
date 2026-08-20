@@ -372,6 +372,69 @@ def test_an_artifact_whose_stored_bytes_changed_is_refused(
         "the refusal must name both digests so an operator can tell which side moved")
 
 
+def _as_object_store(store, monkeypatch) -> None:
+    """Make a local store behave like S3: no local view, streams by key.
+
+    Not a mock of the digest check — the api still runs the real
+    `sha256_of_chunks` over the real `_iter_file`. The only thing replaced is the
+    store's *addressing*, which is exactly what differs between
+    `LocalArtifactStore` and `S3ArtifactStore` (`open` returns None there). Needed
+    because `LocalArtifactStore.stream` delegates to its own `open`, so blanking
+    `open` alone would disable streaming too and the handler would 404.
+    """
+    from service.artifacts import _iter_file
+
+    real_open = store.open
+
+    def _stream(uri, *, chunk=1 << 20):
+        path = real_open(uri)
+        return _iter_file(path, chunk) if path is not None else None
+
+    monkeypatch.setattr(store, "stream", _stream)
+    monkeypatch.setattr(store, "open", lambda uri: None)
+
+
+def test_a_tampered_artifact_is_refused_on_the_streamed_path_too(
+        client, repo, store, tmp_path, monkeypatch):
+    """The same refusal, through the other branch of the handler.
+
+    `download_artifact` verifies twice over: `sha256_of` for a store with a local
+    view, `sha256_of_chunks` for one that can only stream. The test above covers the
+    first — and a containerised deployment on MinIO/S3 only ever takes the second, so
+    until 2026-08-20 the covered branch was the one the real deployment never uses.
+    """
+    run_id, art = _stored_artifact(client, repo, store, tmp_path)
+    repo.record_artifact(run_id, name=art.name, uri=art.uri, bytes_=art.bytes,
+                         sha256=art.sha256)
+
+    local = store.open(art.uri)
+    assert local is not None, "this fixture's store must have a local view"
+    local.write_bytes(b"tampered bytes, same key")
+    _as_object_store(store, monkeypatch)
+
+    got = client.get(f"/runs/{run_id}/artifacts/finance_file.xlsx")
+    assert got.status_code == 502, got.status_code
+    assert "does NOT match" in got.json()["detail"]
+    assert art.sha256[:12] in got.json()["detail"]
+
+
+def test_an_intact_artifact_downloads_on_the_streamed_path(
+        client, repo, store, tmp_path, monkeypatch):
+    """Control for the streamed branch: verifying must not cost the ordinary path.
+
+    Worth its own case because the handler streams the object TWICE — once to
+    digest, once to serve. A store whose bytes could only be read once would pass
+    the tamper test above and hand the client an empty file.
+    """
+    run_id, art = _stored_artifact(client, repo, store, tmp_path, content=b"good bytes")
+    repo.record_artifact(run_id, name=art.name, uri=art.uri, bytes_=art.bytes,
+                         sha256=art.sha256)
+    _as_object_store(store, monkeypatch)
+
+    got = client.get(f"/runs/{run_id}/artifacts/finance_file.xlsx")
+    assert got.status_code == 200 and got.content == b"good bytes"
+
+
 def test_an_artifact_recorded_before_digests_existed_is_refused(
         client, repo, store, tmp_path):
     """A NULL digest is refused, not trusted, and NOT backfilled.

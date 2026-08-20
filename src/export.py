@@ -33,6 +33,11 @@ EXCEPTION_TABS = [
     # whole ~21% is a single store — so a total cannot distinguish that window's
     # ordinary traffic from a store whose order export does not cover what it settles.
     ("order_coverage", "Order Coverage"),
+    # One row per order this window settles whose SKU lines were exported with an
+    # EARLIER window, naming that window and file, plus whether this run used them.
+    # Unlike Order Coverage above, this class has zero legitimate traffic: the
+    # ordinary reconciling orders have lines in no window at all.
+    ("cross_window_orders", "Cross-window Orders"),
 ]
 
 
@@ -47,7 +52,11 @@ def _tab(df: pd.DataFrame, columns: dict[str, str]) -> pd.DataFrame:
 
 def write_exceptions_file(path: Path, exceptions: dict[str, pd.DataFrame], log: RunLog,
                           *, write_to: Path | None = None) -> int:
-    """One tab per exception type, always all four tabs (empty = nothing to look at).
+    """One tab per entry in `EXCEPTION_TABS`, always all of them (empty = nothing to
+    look at).
+
+    Counted rather than named: this said "all four tabs" until 2026-08-20, by which
+    point there were six — a tab was added twice without the sentence moving.
 
     `write_to` overrides where the bytes land without changing what `path` names, so
     `pipeline.write_artifacts` can stage an atomic write. See `write_workbook` for

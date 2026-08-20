@@ -44,7 +44,8 @@ import yaml
 KEY_ORDER = (
     "vat_factors", "masters_file", "reader_engine", "tolerances",
     "window_settlement_bounds", "number_style", "numeric_coercion",
-    "drop_unmapped_columns", "dedupe_rows", "dayfirst", "date_formats",
+    "drop_unmapped_columns", "dedupe_rows", "cross_window_order_backfill",
+    "dayfirst", "date_formats",
     "skip_rows_after_header",
     "file_formats", "sheet_names", "sheet_patterns", "header_rows",
     "store_from_filename", "stores_optional", "expected_stores", "store_to_brand",
@@ -258,6 +259,12 @@ REQUIRED_KEYS = (
     "vat_factors", "masters_file", "tolerances", "number_style",
     "numeric_coercion", "drop_unmapped_columns", "dedupe_rows", "file_formats",
     "store_from_filename", "expected_stores", "column_maps",
+    # Absent means `off`, which is the SAFE direction (today's behaviour, and every
+    # golden was produced under it) — so this is not a DANGEROUS_DEFAULT. It is
+    # required anyway, for the reason `drop_unmapped_columns` is: a contract that
+    # does not state whether it borrows lines across windows is a contract nobody
+    # can audit, and stating it is what this file is for.
+    "cross_window_order_backfill",
 )
 
 

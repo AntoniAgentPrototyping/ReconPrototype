@@ -42,6 +42,7 @@ KNOWN_KEYS = frozenset({
     "file_formats", "sheet_names", "sheet_patterns", "header_rows",
     "store_from_filename", "stores_optional", "expected_stores", "store_to_brand",
     "store_aliases", "column_maps",
+    "cross_window_order_backfill",
 })
 
 # Scalars, in render order. (dotted key, reader module, label, help).
@@ -65,6 +66,11 @@ SCALARS: tuple[tuple[str, str, str, str], ...] = (
     ("file_formats", "src/ingest.py", "Accepted file extensions",
      "Uploads are always stored as .xlsx regardless; this governs a window staged "
      "directly on disk."),
+    ("cross_window_order_backfill", "src/backfill.py",
+     "Orders whose lines are in an earlier period's file",
+     "'off' ignores them. 'report' measures them and names the file that has them, "
+     "changing no number. 'apply' uses those lines when building the invoice, which "
+     "DOES change totals. July was short 4,527,401,608 VND because nothing looked."),
 )
 
 # The PII control, and the only locked row.

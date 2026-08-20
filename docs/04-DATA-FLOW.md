@@ -32,7 +32,7 @@ input/<window>/shopee/{orders,income}/*.xlsx
 input/<window>/lazada/{Weekly,Daily}/*.xlsx        either or both
 ```
 
-**Never mix two windows' order exports** — re-exports drift, and cross-window overlap is a real, material failure mode (see [12-CHANGE-HISTORY](12-CHANGE-HISTORY.md)).
+**Never mix two windows' order exports in one window's folders** — re-exports drift, and cross-window overlap is a real, material failure mode (see [12-CHANGE-HISTORY](12-CHANGE-HISTORY.md)). This remains the staging rule, and the qualifier was added on 2026-08-19 because the pipeline now does something adjacent that is *not* this: under `cross_window_order_backfill` it may borrow **one order's** lines from a predecessor window, per order, from exactly one window, never pooled ([D59](06-DECISIONS.md#d59)). The rule's intent — a re-export must not silently change a window's numbers — is now enforced by a *check* rather than by folder discipline alone: borrowed lines enter the tie-out's matched population, so drifted quantities breach conservation instead of passing.
 
 ## Staging
 

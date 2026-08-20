@@ -43,6 +43,7 @@ from typing import Mapping
 
 import pandas as pd
 
+from .backfill import CrossWindowResult
 from .lazada import REVENUE_BUCKET
 from .runlog import RunLog
 
@@ -384,7 +385,8 @@ def run_checks(sku_level: pd.DataFrame, reference: SourceReference, settings: di
                log: RunLog, *, platform: str, money_col: str | None = None,
                unmatched_money: float = 0.0, unmatched_orders: int = 0,
                crossing: RevenueCrossing | None = None,
-               coverage: pd.DataFrame | None = None) -> pd.DataFrame:
+               coverage: pd.DataFrame | None = None,
+               cross_window: "CrossWindowResult | None" = None) -> pd.DataFrame:
     """Verify the SKU-level frame against an independently-captured reference.
 
     Four checks, each crossing a boundary the previous implementation did not:
@@ -528,6 +530,31 @@ def run_checks(sku_level: pd.DataFrame, reference: SourceReference, settings: di
             + (f" — {named}" if named else "")
             + ". A store's share CHANGING month over month is the signal; the level "
               "is not, since the legitimate class reaches 21% (docs/08 2.12)"))
+
+    # Settlement whose order lines exist in an EARLIER window's export. Unlike the row
+    # above, this class has **zero legitimate traffic**: the ordinary ~21% reconciling
+    # orders have lines in no window at all, because the team's own VLOOKUP drops them
+    # too. An order whose lines sit in a sibling window is an order export that does
+    # not cover what its window settles (defect 2.12).
+    #
+    # INFO in `report` mode because nothing has been changed; in `apply` mode it is
+    # still INFO, because by then the lines ARE in the frame and the *checks* are what
+    # judge them — a borrowed order's rebuilt revenue has to tie to its settlement like
+    # any other, so a drifted re-export breaches conservation rather than being waved
+    # through here.
+    if cross_window is not None and cross_window.reports:
+        state = "APPLIED" if cross_window.applied else "NOT applied"
+        results.append(_info(
+            f"Settlement whose order lines exist in an earlier window ({state})",
+            float(cross_window.money),
+            f"{cross_window.orders_found:,} order(s), "
+            f"{cross_window.lines:,} line(s) — "
+            + "; ".join(f"{r.orders:,} from {r.window}" for r in cross_window.reports)
+            + (". These lines are in the frame and their rebuilt revenue is checked "
+               "like any other order's"
+               if cross_window.applied else
+               ". Set cross_window_order_backfill: apply to use them; this run did "
+               "not, so this money is still outside the invoice")))
 
     frame = pd.DataFrame(results)
     _log(frame, log)

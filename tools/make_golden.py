@@ -208,8 +208,11 @@ def main(argv: list[str] | None = None) -> int:
 
     log = RunLog()
     # Built through the production helper, so the golden cannot drift from what
-    # a real run does — including the _vat_sku back-channel, which is
-    # load-bearing and would silently change numbers if it diverged.
+    # a real run does — the VAT-per-SKU map and the masters provenance are
+    # `RunContext` fields, and a generator that assembled them itself would
+    # silently produce a different number. (This comment named the
+    # `settings["_vat_sku"]` back-channel as "load-bearing" until 2026-08-20;
+    # that channel was removed on 2026-08-19 — defect 1.9.)
     # partial_roster is applied INSIDE build_context since M4, so the CLI, this
     # generator and the service worker share one implementation of the
     # relaxation rather than three that can drift apart.

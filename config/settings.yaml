@@ -124,6 +124,33 @@ drop_unmapped_columns: true
 # one-period-folder-per-settlement-window layout instead.
 dedupe_rows: false
 
+# An order settled in this window may have been CREATED earlier, so its SKU lines
+# sit in a previous window's order export and the explode finds nothing. The
+# revenue then leaves the invoice through the documented "~21% unmatched" door,
+# quietly, because that door is expected to have traffic. July's first external
+# month-end comparison measured 4,527,401,608 VND going out that way — 11 of 205
+# store-window cells, every one this cause (docs/08-KNOWN-DEFECTS.md#212).
+#
+#   off     today's behaviour, bit for bit. Every committed golden was produced
+#           under this.
+#   report  measure it: a tie-out INFO row, an exceptions sheet and log lines
+#           naming which window holds the lines. Changes NO number — the orders
+#           frame handed to the explode is untouched.
+#   apply   borrow those lines before the explode. This MOVES CELLS.
+#
+# Currently `report`, deliberately: `off` would leave the code path unexercised
+# until the day it is trusted with money, and the outputs report mode adds are in
+# none of the golden manifest's fields.
+#
+# Do NOT "fix" this by pooling the month's order files instead. Measured: pooling
+# every July TikTok order export into w2 takes that window to 183,102,704,362 VND
+# against a reference of 40,060,544,029 — a 4.5x over-count, because the same
+# order line appears in several exports and the explode sums quantity per
+# (store, order_id, sku_id, sku_name, unit_price_gross) bucket, so a second copy
+# inflates quantity INSIDE one SKU line rather than adding a visible row.
+# Borrowing takes each order from exactly ONE window (src/backfill.py, D59).
+cross_window_order_backfill: report
+
 # Date parsing: set true per platform if exports use dd/mm/yyyy text dates.
 # TikTok confirmed dd/mm/yyyy (probe with false produced impossible Jan-Dec
 # ranges for a May-only window).

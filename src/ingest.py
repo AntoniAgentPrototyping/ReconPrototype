@@ -363,18 +363,36 @@ def store_from_filename(filename: str, pattern: str) -> str:
 _store_from_filename = store_from_filename
 
 
-def read_parts(
-    folder: Path, colmap: dict[str, str], kind: str, settings: dict, log: RunLog, platform: str
-) -> pd.DataFrame:
-    """Read every file part in `folder`, rename to canonical columns, dedupe."""
+def export_files(folder: Path, settings: dict) -> list[Path]:
+    """The export files in one folder, in the order a run reads them.
+
+    One place for the `file_formats` rule and the sort, so a second caller cannot
+    end up reading a different set of files — or the same files in a different
+    order, which for `read_parts` decides row order and therefore every downstream
+    digest. Returns empty for a folder that is not there; callers that require one
+    raise their own refusal (`read_parts` does).
+    """
     if not folder.is_dir():
-        raise ReconHardStop(f"Input folder not found: {folder}")
-
+        return []
     suffixes = tuple(s.lower() for s in settings.get("file_formats", [".xlsx", ".csv"]))
-    files = sorted(p for p in folder.iterdir() if p.suffix.lower() in suffixes)
-    if not files:
-        raise ReconHardStop(f"No {kind} files found in {folder} (expected {suffixes})")
+    return sorted(p for p in folder.iterdir() if p.suffix.lower() in suffixes)
 
+
+def read_files(
+    files: list[Path], colmap: dict[str, str], kind: str, settings: dict,
+    log: RunLog, platform: str
+) -> list[pd.DataFrame]:
+    """Read a named list of export files into one frame each, canonically named.
+
+    Extracted from `read_parts` (whose signature and behaviour are unchanged) so
+    that a second caller can read *some* files out of a folder rather than all of
+    them: `src/backfill.py` needs one store's order files from a predecessor window
+    and must read them through **this** code path, not a copy of it. The reading
+    rules here are the ones every verified number was produced under — the broken
+    `<dimension>` fallback, the NFC header normalisation, the sheet regex, the junk
+    row skip, the PII drop — and a second implementation of any of them is how the
+    upload sanitizer silently worked for one platform out of three for a milestone.
+    """
     sheet = ((settings.get("sheet_names") or {}).get(platform) or {}).get(kind)
     # Regex alternative to sheet_names: platforms that split data across
     # numbered sheets (Shopee income: "Doanh thu", "Doanh thu - 1", ...) get
@@ -434,6 +452,22 @@ def read_parts(
             df = df[[c for c in df.columns if c in keep]]
         log.add(f"  {f.name}: {len(df)} rows" + (f" (headers not found: {missing})" if missing else ""))
         frames.append(df)
+    return frames
+
+
+def read_parts(
+    folder: Path, colmap: dict[str, str], kind: str, settings: dict, log: RunLog, platform: str
+) -> pd.DataFrame:
+    """Read every file part in `folder`, rename to canonical columns, dedupe."""
+    if not folder.is_dir():
+        raise ReconHardStop(f"Input folder not found: {folder}")
+
+    suffixes = tuple(s.lower() for s in settings.get("file_formats", [".xlsx", ".csv"]))
+    files = export_files(folder, settings)
+    if not files:
+        raise ReconHardStop(f"No {kind} files found in {folder} (expected {suffixes})")
+
+    frames = read_files(files, colmap, kind, settings, log, platform)
 
     combined = pd.concat(frames, ignore_index=True)
     before = len(combined)
@@ -456,6 +490,67 @@ def read_parts(
             f"Update column_maps.{kind} in settings.yaml to match the real export headers."
         )
 
+    return normalize_parts(combined, kind, settings, log, platform)
+
+
+def canonical_store(settings: dict, platform: str, store: str) -> str:
+    """One store name through `store_aliases`, or itself if unmapped.
+
+    The single-value form of what `normalize_parts` applies to a whole column, for
+    the callers that must decide from a FILENAME before any frame exists — the
+    roster preview (`service/materialize`) and the cross-window borrow's file
+    prefilter (`src/backfill`). Both used to carry their own copy of this
+    arithmetic; the borrow's copy did not exist at all, which is how an aliased
+    store's predecessor files came to be skipped (defect 2.12's report-mode gap,
+    2026-08-20).
+
+    `TODO-HUMAN` is an unresolved alias and must resolve to itself, not to the
+    literal string — `normalize_parts` skips those too, and mapping a real store
+    onto a placeholder would put "TODO-HUMAN" in the roster comparison.
+    """
+    aliases = (settings.get("store_aliases") or {}).get(platform) or {}
+    mapped = aliases.get(store)
+    return mapped if mapped and mapped != "TODO-HUMAN" else store
+
+
+def normalize_parts(
+    combined: pd.DataFrame, kind: str, settings: dict, log: RunLog, platform: str,
+    *, where: str | None = None,
+) -> pd.DataFrame:
+    """The post-read rules every verified number was produced under.
+
+    Required columns, numeric coercion, date parsing, store/order_id stripping and
+    `store_aliases` — everything `read_parts` used to do inline after `read_files`.
+
+    Extracted 2026-08-20 because it turned out to have a second caller. The
+    cross-window borrow (`src/backfill.py`) read predecessor files through
+    `read_files` and then hand-rolled two `.strip()` calls, so borrowed frames got
+    **no aliases and no numeric coercion**. The alias half was live and silent: the
+    borrow's `needed` set holds canonical stores while a filename says `Pediasure`,
+    so July's 941,081,056 VND Abbott recovery reported as zero. One spelling, two
+    callers — the same lesson as the `_vat_sku` back-channel ([D28]).
+
+    Deliberately NOT included, because they are per-*window* policies rather than
+    per-frame rules: the part-file concatenation, `dedupe_rows` (borrowing must never
+    dedupe — an order legitimately holds two identical SKU lines, D5), the
+    "N part(s), M rows" log line, and the `REQUIRED_COLUMNS` check. That last one is
+    `read_parts`' own contract about a *window's* export being complete enough to
+    invoice from; a predecessor read for comparison is held to the narrower bar
+    below — the two columns this function itself touches. `where` overrides the label
+    the coercion reports are filed under, so a borrowed frame's warnings name the
+    window they came from instead of impersonating this window's own read.
+    """
+    where = where or f"{platform}/{kind}"
+    # Narrower than REQUIRED_COLUMNS on purpose (see above). For `read_parts` this can
+    # never fire — REQUIRED_COLUMNS is a superset and is checked first — so this is a
+    # contract for the second caller, not a second check for the first.
+    missing_identity = [c for c in ("store", "order_id") if c not in combined.columns]
+    if missing_identity:
+        raise ReconHardStop(
+            f"{where}: no {missing_identity} column after header mapping, so these rows "
+            f"cannot be identified. Check column_maps.{kind} and store_from_filename "
+            f"against the real export headers.")
+
     style = settings.get("number_style", "standard")
     dayfirst = bool((settings.get("dayfirst") or {}).get(platform, False))
     unparseable: dict[str, int] = {}
@@ -465,18 +560,18 @@ def read_parts(
             n_bad = int(combined[col].isna().sum())
             if n_bad:
                 unparseable[col] = n_bad
-    report_unparseable(unparseable, f"{platform}/{kind}", style, settings, log)
+    report_unparseable(unparseable, where, style, settings, log)
     undated: dict[str, int] = {}
     fmt = date_format(settings, platform, kind)
     for col in DATE_COLUMNS[kind]:
         if col in combined.columns:
             before_bad = int(combined[col].isna().sum())
-            combined[col] = parse_dates(combined[col], dayfirst, f"{platform}/{kind}",
+            combined[col] = parse_dates(combined[col], dayfirst, where,
                                         col, log, fmt=fmt)
             n_bad = int(combined[col].isna().sum()) - before_bad
             if n_bad:
                 undated[col] = n_bad
-    report_undated(undated, f"{platform}/{kind}", dayfirst, settings, log, fmt=fmt)
+    report_undated(undated, where, dayfirst, settings, log, fmt=fmt)
     combined["store"] = combined["store"].astype(str).str.strip()
     combined["order_id"] = combined["order_id"].astype(str).str.strip()
 

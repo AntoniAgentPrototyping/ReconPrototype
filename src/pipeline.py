@@ -31,7 +31,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import calculate, classify, config, finance_template, ingest, lazada, masters, tieout
+from . import (backfill, calculate, classify, config, finance_template, ingest, lazada,
+               masters, tieout)
 from .metrics import RunMetrics
 from .runlog import RunLog
 
@@ -436,8 +437,19 @@ def _run_tiktok(ctx: RunContext, out: RunResult) -> None:
     with m.stage("classify", "compute", rows_out=lambda: len(cl)):
         cl = classify.classify_tiktok_income(income, log)
     good = cl[cl["check_status"] == classify.CHECK_GOOD]
+    # Orders this window settles whose SKU lines were exported with an EARLIER window
+    # (defect 2.12). Before the explode, because that is the join this is about. In
+    # `report` mode `xw.orders is orders` and nothing moves; only `apply` extends the
+    # frame, which is why the stage's row count is the honest place for the change to
+    # show up.
+    with m.stage("cross_window_orders", "io", rows_out=lambda: len(xw.orders)):
+        xw = backfill.resolve(
+            input_root=ctx.input_root, period=ctx.period, platform="tiktok",
+            orders=orders, settled=good, money_col=TIKTOK_MONEY,
+            colmap=config.column_map(settings, "tiktok", "orders"),
+            settings=settings, log=log)
     with m.stage("explode_to_sku", "compute", rows_out=lambda: len(sku)):
-        sku = calculate.explode_to_sku_tiktok(good, orders, log)
+        sku = calculate.explode_to_sku_tiktok(good, xw.orders, log)
 
     # Reference captured HERE — from the income frame, before the money math —
     # so everything compute_sku_columns does is inside the checked span.
@@ -449,7 +461,12 @@ def _run_tiktok(ctx: RunContext, out: RunResult) -> None:
 
     with m.stage("compute_sku_columns", "compute", rows_out=lambda: len(sku)):
         sku = calculate.compute_sku_columns_tiktok(sku, settings, log, ctx.vat_sku)
-    out.frames.update(classified=cl, good=good, sku=sku)
+    # `orders` stays what THIS window exported; `borrowed_orders` is what came from a
+    # predecessor. Kept apart rather than merged so that under `apply` mode both
+    # questions are still answerable — "what did this window's files contain" and
+    # "which lines did the explode get from elsewhere" — instead of one frame that
+    # silently answers neither.
+    out.frames.update(classified=cl, good=good, sku=sku, borrowed_orders=xw.borrowed)
 
     with m.stage("build_workbook", "serialize"):
         out.workbook, out.checks = finance_template.build_tiktok(
@@ -460,7 +477,7 @@ def _run_tiktok(ctx: RunContext, out: RunResult) -> None:
         out.tieout = tieout.run_checks_tiktok(
             sku, reference, settings, log, money_col=TIKTOK_MONEY,
             unmatched_money=unmatched_money, unmatched_orders=unmatched_orders,
-            coverage=coverage)
+            coverage=coverage, cross_window=xw)
     out.consume_tieout()
 
     per_store = {
@@ -485,6 +502,8 @@ def _run_tiktok(ctx: RunContext, out: RunResult) -> None:
     # ~21% on this platform's golden window is a SINGLE store, which is why a window
     # total could not distinguish ordinary traffic from defect 2.12.
     out.exceptions["order_coverage"] = coverage
+    # Which order came from which earlier window, and whether this run used it.
+    out.exceptions["cross_window_orders"] = backfill.exception_rows(xw)
     out.exceptions["tieout_breaches"] = out.tieout[out.tieout["result"] == "BREACH"]         if out.tieout is not None else None
 
     _tie(per_store, ctx.refs, log, out)
@@ -532,11 +551,23 @@ def _run_shopee(ctx: RunContext, out: RunResult) -> None:
 
     with m.stage("classify", "compute", rows_out=lambda: len(cl)):
         cl = classify.classify_shopee_income(income, log)
+    # See the note in `_run_tiktok`. Shopee held July's single worst cell — `masan` in
+    # `s4`, matching 33% of its income against the orders staged with it — so this is
+    # not a TikTok-only shape.
+    with m.stage("cross_window_orders", "io", rows_out=lambda: len(xw.orders)):
+        xw = backfill.resolve(
+            input_root=ctx.input_root, period=ctx.period, platform="shopee",
+            orders=orders, settled=cl, money_col="net_revenue",
+            colmap=config.column_map(settings, "shopee", "orders"),
+            settings=settings, log=log)
     with m.stage("explode_to_sku", "compute", rows_out=lambda: len(sku)):
-        sku = calculate.explode_to_sku_shopee(cl, orders, log)
+        sku = calculate.explode_to_sku_shopee(cl, xw.orders, log)
     with m.stage("compute_sku_columns", "compute", rows_out=lambda: len(sku)):
         sku = calculate.compute_sku_columns_shopee(sku, settings, log, ctx.vat_sku)
-    out.frames.update(orders=orders, income=income, classified=cl, sku=sku)
+    # See the note in `_run_tiktok`: `orders` is this window's own export, borrowed
+    # lines are recorded separately rather than folded in.
+    out.frames.update(orders=orders, income=income, classified=cl, sku=sku,
+                      borrowed_orders=xw.borrowed)
 
     with m.stage("build_workbook", "serialize"):
         out.workbook, out.checks = finance_template.build_shopee(
@@ -555,7 +586,7 @@ def _run_shopee(ctx: RunContext, out: RunResult) -> None:
         out.tieout = tieout.run_checks_shopee(
             sku, reference, settings, log, money_col=SHOPEE_MONEY,
             unmatched_money=unmatched_money, unmatched_orders=unmatched_orders,
-            crossing=revenue_crossing, coverage=coverage)
+            crossing=revenue_crossing, coverage=coverage, cross_window=xw)
     out.consume_tieout()
     per_store = {
         s: {"ok_pre_vat": float(g["amount_pre_vat"].sum()),
@@ -572,6 +603,7 @@ def _run_shopee(ctx: RunContext, out: RunResult) -> None:
     # turns "the door's traffic changed this month" into a query rather than a memory.
     out.exceptions["unmatched_orders"] = cl[
         ~tieout.pair_series(cl).isin(tieout.pairs(sku))]
+    out.exceptions["cross_window_orders"] = backfill.exception_rows(xw)
     out.exceptions["order_coverage"] = coverage
 
     _tie(per_store, ctx.refs, log, out)

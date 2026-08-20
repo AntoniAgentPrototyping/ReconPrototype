@@ -362,9 +362,30 @@ class Worker:
 
         domain = (src_config.parse_settings(resolved.content) if resolved is not None
                   else src_config.load_settings(self.settings.config_dir))
-        return materialize_lib.materialize_window(
+        result = materialize_lib.materialize_window(
             self.repo, self.settings, job.platform, job.period,
             scratch=scratch, log=log, domain_settings=domain)
+
+        # Earlier windows' ORDER files, but only if this window's config asks for the
+        # comparison. On the CLI every window is already a sibling directory; here the
+        # input root is a scratch dir holding only this window, so without this the
+        # cross-window report would find nothing and look like good news (defect 2.12).
+        # Read from the RESOLVED config, so a window pinned before the flag existed
+        # behaves exactly as it did then.
+        # Through `backfill.mode_of`, never a second reading of the key. A local
+        # `!= "off"` test here would answer the same question slightly differently —
+        # it accepted "OFF" and " off ", and it let a TYPO download files before
+        # `mode_of` hard-stopped inside `run()`. Two spellings of one setting is the
+        # drift this whole defect is made of (corrected 2026-08-20).
+        from src import backfill as backfill_lib
+
+        mode = backfill_lib.mode_of(domain)
+        if result.source == "uploads" and mode != "off":
+            materialize_lib.materialize_predecessor_orders(
+                self.repo, self.settings, job.platform, job.period,
+                scratch=scratch, log=log, domain_settings=domain,
+                strict=(mode == "apply"))
+        return result
 
     def _report_order_coverage(self, job: Job, log) -> None:
         """Say, before the run, which settled orders this window's own exports miss.

@@ -479,9 +479,64 @@ no number has changed. What exists now:
   whose uploads predate the index is indistinguishable from perfect coverage, so it is
   never rendered as "covered".
 
-**What is still open:** nothing borrows those lines yet, so no number has changed. That
-is C13/B1–B3 — one mechanism behind `cross_window_order_backfill: off|report|apply`,
-reporting in production before it ever moves money.
+**The fix exists and is running in `report` mode (2026-08-19).** `src/backfill.py`
+borrows an order's SKU lines from the **nearest same-month predecessor window** that has
+them — one window per order, all of that window's files, predecessors only, income never
+re-read ([D59](06-DECISIONS.md#d59)). It is one mechanism with three modes,
+`cross_window_order_backfill: off | report | apply`:
+
+* **`off`** — byte-for-byte the behaviour every committed golden was produced under.
+* **`report`** (the default now) — measures it and says so: a tie-out INFO row naming the
+  recoverable settlement, a `Cross-window Orders` exceptions sheet carrying which order
+  came from which window and file, and log lines. **No number changes.** Proven, not
+  argued: the money gate re-ran all eight windows under `report` at zero tolerance.
+* **`apply`** — concatenates the borrowed lines before the explode. This moves cells and
+  has not been switched on.
+
+*Why this is not pooling with extra steps.* Borrowed orders enter the tie-out's **matched**
+population, so TikTok's per-order conservation (1 VND) and Shopee's revenue crossing run
+*over the borrowed lines* — a predecessor re-export whose quantities drifted breaches a
+check rather than silently mis-invoicing.
+
+**The report mode that shipped on 2026-08-19 under-reported itself, fixed 2026-08-20.**
+`borrow_order_lines` read predecessor files through `ingest.read_files` and then
+hand-rolled two `.strip()` calls, so borrowed frames skipped everything `read_parts` does
+afterwards — including `store_aliases`. `needed` is built from frames that *did* go
+through `read_parts`, so it holds canonical store names, while the file prefilter compared
+the raw name a filename yields. `settings.yaml` maps `"Pediasure" -> "Abbott Pediasure"`
+because the order files drop the "Abbott", so **w1's Abbott files were skipped and
+941,081,056 VND of recoverable July settlement reported as zero.** The same shape hid
+Shopee's lowercase `lashe`. Measured after the fix: `2026-07_w2` reports 942,869,056 VND
+(was ~1,788,000) and `2026-07_s2` reports 173,429 — both now equal to what
+`tools/measure_order_coverage.py` had said all along, which is the point: the tool reads
+through `read_parts` and the pipeline did not, and *nothing compared the two*.
+
+Two things follow, and both are recorded rather than assumed. Borrowed frames now go
+through `ingest.normalize_parts` — the extracted post-read block — so they also get the
+numeric coercion the explode needs (it groups on `unit_price_gross` and SUMS `quantity`,
+so raw text is both a wrong bucket and an unsummable column: an `apply`-mode fault that
+had not yet been reachable). And no golden cell could move, because no golden window opens
+a predecessor at all — `s2`/`s3` have 100% own-window coverage, `w1`/`s1` have no
+predecessor, Lazada is not wired; re-verified at zero tolerance across all eight windows
+after the fix.
+
+*Why the tests did not catch it:* the synthetic fixtures configure no aliases and asserted
+on **string** quantities — a test suite written against the buggy path. Those assertions
+now read as numbers, and two new tests carry the alias shape with a discriminator.
+
+**One failure policy across the seam, also 2026-08-20.** An unreadable predecessor now
+warns and skips that window under `report` and refuses under `apply`, in both
+`src/backfill.py` and `service/materialize.py`. Before, the two disagreed with themselves:
+a digest mismatch hard-stopped a *report*-mode run (whose contract is that it changes
+nothing) while an unnameable file and a missing object beside it only warned, and two
+predecessor uploads sharing a filename were silently resolved last-one-wins where the
+window's own files refuse the same collision.
+
+**What is still open:** the flip to `apply`, with the measured per-window delta stated in
+advance and the golden windows re-baselined deliberately. Expected recovery is already
+measured: **942,869,056 VND** in `w2` from `w1`, **1,390,095,674** in `s4` from `s3`,
+173,429 in `s2` from `s1`. The two mis-pull cells recover **nothing** — their lines were
+never exported, and no mode can invent them.
 
 Measured cross-window recoverable settlement, which pre-states what a fix can and cannot
 return: **942,869,056 VND** in `w2` from `w1` (exactly abbott 941,081,056 + similac

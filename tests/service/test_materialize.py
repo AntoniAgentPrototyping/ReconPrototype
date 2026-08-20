@@ -11,6 +11,8 @@ same reason it does: this must run on a machine with no client data.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from service.repository import Repository
@@ -21,6 +23,8 @@ pytest.importorskip("pandas")
 pytest.importorskip("httpx")
 
 from tools.smoke_test import PERIOD, STORE, build_window          # noqa: E402
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture
@@ -286,3 +290,144 @@ def test_an_intact_window_passes_the_digest_check(
     run = repo.get_run(run_id)
     assert run.status is not RunStatus.HARD_STOP
     assert "does NOT match" not in (run.error or "")
+
+
+# ---------------------------------------------------------------------------
+# Predecessor order files — defect 2.12's cross-window comparison
+# ---------------------------------------------------------------------------
+#
+# On the CLI every window is a sibling directory under the staged input root, so
+# `src/backfill.py` can just look. Here the input root is a scratch dir the worker
+# built from THIS window's uploads, so without this the cross-window report would
+# find nothing — and finding nothing would look like good news.
+
+def _tiktok_orders(tmp_path, name: str, order_ids: list[str]):
+    import pandas as pd
+
+    from src import config as src_config
+
+    settings = src_config.load_settings(ROOT / "config")
+    colmap = src_config.column_map(settings, "tiktok", "orders")
+    id_header = next(raw for raw, canon in colmap.items() if canon == "order_id")
+    sheet = ((settings.get("sheet_names") or {}).get("tiktok") or {})["orders"]
+
+    path = tmp_path / name
+    with pd.ExcelWriter(path, engine="openpyxl") as w:
+        pd.DataFrame({id_header: order_ids}).to_excel(w, sheet_name=sheet, index=False)
+    return path
+
+
+def _upload_orders(client, tmp_path, name, period, order_ids):
+    path = _tiktok_orders(tmp_path, name, order_ids)
+    with path.open("rb") as fh:
+        r = client.post("/uploads", files={"file": (path.name, fh)},
+                        data={"platform": "tiktok", "period": period, "kind": "orders"})
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def test_an_earlier_windows_order_files_are_materialized_for_comparison(
+        repo, make_client, service_settings, tmp_path):
+    from service import materialize as materialize_lib
+    from src import config as src_config
+    from src.runlog import RunLog
+
+    client = make_client("recon.user")
+    _upload_orders(client, tmp_path, "1. order Purite 7.5.xlsx", "2026-05_w1", ["A-1"])
+    _upload_orders(client, tmp_path, "2. order Purite 14.5.xlsx", "2026-05_w2", ["B-1"])
+
+    scratch = tmp_path / "scratch"
+    added = materialize_lib.materialize_predecessor_orders(
+        repo, service_settings, "tiktok", "2026-05_w2",
+        scratch=scratch, log=RunLog(),
+        domain_settings=src_config.load_settings(ROOT / "config"))
+
+    assert added == 1
+    landed = list((scratch / "input" / "2026-05_w1" / "tiktok" / "orders").iterdir())
+    assert len(landed) == 1, landed
+    # Under the PREDECESSOR window's own uniform naming, because that is the layout
+    # `read_parts` — and therefore `backfill` — expects to find.
+    assert landed[0].suffix == ".xlsx"
+
+
+def test_the_window_being_run_is_not_re_materialized_as_its_own_predecessor(
+        repo, make_client, service_settings, tmp_path):
+    """`w1` has no predecessor, so this must download nothing rather than itself."""
+    from service import materialize as materialize_lib
+    from src import config as src_config
+    from src.runlog import RunLog
+
+    client = make_client("recon.user")
+    _upload_orders(client, tmp_path, "1. order Purite 7.5.xlsx", "2026-05_w1", ["A-1"])
+
+    scratch = tmp_path / "scratch"
+    added = materialize_lib.materialize_predecessor_orders(
+        repo, service_settings, "tiktok", "2026-05_w1",
+        scratch=scratch, log=RunLog(),
+        domain_settings=src_config.load_settings(ROOT / "config"))
+
+    assert added == 0
+    assert not (scratch / "input").exists()
+
+
+def _predecessor_with_altered_bytes(repo, make_client, service_settings, tmp_path):
+    """A `w1` whose stored order object no longer matches its recorded digest."""
+    from service import objects as object_lib
+
+    client = make_client("recon.user")
+    older = _upload_orders(client, tmp_path, "1. order Purite 7.5.xlsx",
+                           "2026-05_w1", ["A-1"])
+    _upload_orders(client, tmp_path, "2. order Purite 14.5.xlsx", "2026-05_w2", ["B-1"])
+    object_lib.upload_store(service_settings).put(
+        older["object_key"], b"not the file that was uploaded")
+
+
+def test_a_predecessors_altered_bytes_are_refused_under_apply(
+        repo, make_client, service_settings, tmp_path):
+    """These bytes reach the same reader and, under `apply`, the same invoice — so
+    they get the same digest check the window's own files get (2.10 / D52)."""
+    from service import materialize as materialize_lib
+    from service.materialize import MaterializationError
+    from src import config as src_config
+    from src.runlog import RunLog
+
+    _predecessor_with_altered_bytes(repo, make_client, service_settings, tmp_path)
+
+    with pytest.raises(MaterializationError) as exc:
+        materialize_lib.materialize_predecessor_orders(
+            repo, service_settings, "tiktok", "2026-05_w2",
+            scratch=tmp_path / "scratch", log=RunLog(),
+            domain_settings=src_config.load_settings(ROOT / "config"),
+            strict=True)
+    assert "does NOT match what was stored" in str(exc.value)
+
+
+def test_a_predecessors_altered_bytes_only_warn_under_report(
+        repo, make_client, service_settings, tmp_path):
+    """The other half of one policy (2026-08-20). Report mode's contract is that it
+    changes nothing, and a settlement run that DIES over a sibling window's corrupted
+    file has changed a great deal. The corrupt file is never handed to the pipeline —
+    it is dropped from scratch and named in the log.
+
+    This test asserted the refusal in BOTH modes until 2026-08-20, which is how the
+    inconsistency stayed invisible: a digest mismatch hard-stopped a report-mode run
+    while an unnameable file and a missing object beside it only warned.
+    """
+    from service import materialize as materialize_lib
+    from src import config as src_config
+    from src.runlog import RunLog
+
+    _predecessor_with_altered_bytes(repo, make_client, service_settings, tmp_path)
+    log = RunLog()
+    scratch = tmp_path / "scratch"
+
+    added = materialize_lib.materialize_predecessor_orders(
+        repo, service_settings, "tiktok", "2026-05_w2",
+        scratch=scratch, log=log,
+        domain_settings=src_config.load_settings(ROOT / "config"))
+
+    assert added == 0
+    assert any("does NOT match what was stored" in line for line in log.lines), log.lines
+    landed = scratch / "input" / "2026-05_w1" / "tiktok" / "orders"
+    assert not any(landed.iterdir()) if landed.is_dir() else True, (
+        "the unverified file was left where the pipeline would read it")

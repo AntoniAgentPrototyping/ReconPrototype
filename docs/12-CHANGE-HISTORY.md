@@ -517,10 +517,11 @@ hardening, so 2.9, D10, 1.9, the Lazada `dropna` divergence and the unpin audit 
 belonged to nobody. **The gate held: all eight golden windows re-run at zero tolerance,
 no cell moved**, and the fast suite went `840 → 874 passed, 3 skipped, 4 deselected`
 with every delta accounted for (+27 tests, +7 file-parametrized lint cases over five
-new files). With the order index and the upload date door that follow, the suite stands
+new files). With the order index and the upload date door that follow, the suite stood
 at **899 passed, 3 skipped, 4 deselected** (~6:21, read cache off), the money gate
 passes over all eight windows at zero tolerance, `tests/goldens/manifest.json` is
-untouched, and `tools/smoke_test.py` is 13/13.
+untouched, and `tools/smoke_test.py` is 13/13. (It is **937** as of 2026-08-20 — C13's
+backfill took it to 930 and the borrow-path fix below added 7.)
 
 *Recorded as a deviation:* all of it landed in **one** commit (`675f844`), because the
 working tree was already dirty in 123 files before the work started, so the per-commit
@@ -671,7 +672,80 @@ page shows it beside the roster preview. Three properties of that surface are de
   platform to re-export — and warns against the pooling anti-fix, because that is the
   intuitive wrong answer and it over-counts 4.5×.
 
-The borrowing fix itself is still to come, behind `cross_window_order_backfill`.
+**The borrowing mechanism now exists and runs in `report` mode (2026-08-19).**
+`src/backfill.py` answers "which earlier window exported this order's lines?" and can
+hand them to the explode; `cross_window_order_backfill: off | report | apply` decides
+whether it does. Detection and fix are deliberately the **same code path**, so the thing
+that eventually moves money is the thing that has been reporting in production first —
+rather than a second implementation written on the day it is trusted.
+
+*Report mode's inertness is proven, not argued.* Its only outputs are a tie-out INFO row,
+an exceptions sheet and log lines, and none of those is a field of the golden manifest:
+INFO rows never become variances (`consume_tieout` only promotes a `BREACH`), and
+`stage_row_counts` comes from an explicit list of fingerprinted functions that this does
+not touch. **The money gate re-ran all eight windows under `report` at zero tolerance and
+no cell moved.** A measured bonus: Shopee's own-window order coverage is 100% on the
+golden windows, so `s2` and `s3` reported "every settled order has lines in this window"
+and never opened a predecessor's files at all — the common path costs nothing.
+
+*Two things were extracted rather than copied, and that is the point.* `ingest.read_files`
+and `ingest.export_files` came out of `read_parts` (whose name, signature and behaviour
+are unchanged) so borrowing reads through the **same** reading rules every verified number
+was produced under — the broken-`<dimension>` fallback, NFC headers, the sheet regex, the
+junk-row skip, the PII drop. And `backfill.predecessor_labels` is one rule over two
+sources of candidates: directories on the CLI, window labels out of Postgres in
+`materialize_predecessor_orders`. Two spellings of "which window is earlier" is exactly
+the drift this defect is made of.
+
+*The worker had to learn to fetch them.* On the CLI every window is already a sibling
+directory; on the service the input root is a scratch dir holding only this window, so
+report mode would have found nothing — and finding nothing looks like good news.
+`materialize_predecessor_orders` downloads earlier windows' **order** files only, digest-
+checked exactly as the window's own are, and **only when the resolved config asks**: a
+window pinned before the flag existed behaves precisely as it did then.
+
+*Still not done:* the flip to `apply`. The recovery it would produce is already measured
+per window, and the two mis-pull cells recover nothing because their lines were never
+exported.
+
+**The borrow path was reading through only half of those rules — corrected 2026-08-20.**
+The extraction above stopped one function short. `read_files` was shared; everything
+`read_parts` does *after* it was not, so borrowed frames got no `store_aliases` and no
+numeric coercion. The alias half was live in `report` mode and silent: `needed` holds
+canonical store names while a filename holds what the platform exported, and
+`settings.yaml` maps `"Pediasure" -> "Abbott Pediasure"` because the order files drop the
+"Abbott" — so w1's Abbott files were skipped before anything read them and **941,081,056
+VND of July's measured recovery reported as zero.** `2026-07_w2` now reports 942,869,056
+VND against ~1,788,000 before, and `2026-07_s2` 173,429; both figures now equal
+`tools/measure_order_coverage.py`'s, and that agreement is the closure evidence, because
+the disagreement *was* the defect — the tool read through `read_parts` and the pipeline
+did not, and nothing compared them.
+
+The fix finishes the extraction rather than patching the caller: `ingest.normalize_parts`
+now holds the post-read rules (numeric coercion, dates, strip, aliases) with `read_parts`
+delegating to it, and `ingest.canonical_store` absorbed the copy that was living in
+`service/materialize.py` so the roster preview, the pipeline's reads and the borrow's file
+prefilter cannot drift on what a store is called. Proven output-identical by the money gate
+before the behaviour change went in, and again after: eight windows, zero tolerance, no
+cell moved either time — no golden window opens a predecessor, so none could.
+
+*Three things this pass declined to do, each checked rather than assumed.* Borrowed rows
+are **not** branded: the explode's groupby keeps five key columns and the SKU frame takes
+brand from the income side, so `derive_brand` there would be a call in the money path that
+changes nothing. The fan-out guard became a `ReconHardStop` instead of an `assert` (`python
+-O` deletes asserts, and it guards the one over-count that inflates an existing SKU line
+invisibly) but has **no test** — it is unreachable by construction, and driving it would
+assert a mock. And the `REQUIRED_COLUMNS` check stayed in `read_parts` as a window's own
+contract; `normalize_parts` guarantees only the two identity columns it touches.
+
+*One policy replaced three disagreeing ones.* An unreadable predecessor warns and skips
+under `report`, refuses under `apply` — same rule in `src/backfill.py` and
+`service/materialize.py`. Previously a digest mismatch hard-stopped a report-mode run
+while an unnameable file and a missing object only warned, and two predecessor uploads
+sharing a filename were silently last-one-wins where the window's own files refuse it.
+The worker's predecessor download also now asks `backfill.mode_of` instead of its own
+`!= "off"` test, which had accepted `"OFF"` and downloaded files before a typo could
+hard-stop inside `run()`.
 
 *The July measurement that will pre-state the fix's effect:* cross-window recoverable
 settlement is **942,869,056 VND** in `w2` from `w1` (exactly abbott 941,081,056 +

@@ -261,3 +261,71 @@ Per storefront, 17 of 18 match exactly and one differs by **1 VND**
   windows in settlement order, so the nth is compared with the nth — and the tool
   refuses to compare a platform at all if the two sides disagree on how many
   windows it has.
+
+## The cross-window order gate (2026-08-19)
+
+`cross_window_order_backfill: report` shipped as the default, so every run now measures
+whether an order it settles had its SKU lines exported with an *earlier* window
+([defect 2.12](08-KNOWN-DEFECTS.md), [D59](06-DECISIONS.md#d59)). The claim that needed
+proving is that measuring changes nothing.
+
+**The gate: all eight golden windows re-run under `report` at zero tolerance — no cell
+moved, and `tests/goldens/manifest.json` is byte-unchanged.** Run as
+`pytest tests/service/test_config_render.py::test_config_render_produces_the_committed_goldens`,
+which renders the contract from the config tables and regenerates every window, so it
+also proves the new key survives the table round trip.
+
+That result is not luck; report mode is manifest-neutral **by construction**, and the
+two reasons are worth stating because a future change could break either:
+
+* An INFO row is not a variance. `RunResult.consume_tieout` promotes only a `BREACH`
+  into `findings`, so `variances.json` — and therefore `variances_digest` — cannot see
+  the new row. Adding a *failable* check here would move that digest.
+* `stage_row_counts` comes from `tools/make_golden.STAGE_TARGETS`, an explicit list of
+  fingerprinted functions. Borrowing reads through `ingest.read_files`, which is **not**
+  on that list, while `read_parts` — which is — was left with its name, signature and
+  behaviour unchanged. Had borrowing called `read_parts`, every window with a
+  predecessor would have gained a fingerprint entry and the digest would have moved.
+
+**What the measurement found on the golden windows, which is why they could not move:**
+
+| Window | Predecessors | What report mode did |
+|---|---|---|
+| `2026-05_w1` / tiktok | none (first of its month) | nothing to compare against |
+| `2026-05_s1` / shopee | none | nothing to compare against |
+| `2026-05_s2`, `_s3` / shopee | s1; s2+s1 | *"every settled order has lines in this window"* — Shopee's own-window order coverage is 100%, so **no predecessor file was opened at all** |
+| `2026-05_l1..l4` / lazada | n/a | Lazada is a fee-event ledger with no order files; the step is not wired into `_run_lazada` |
+
+So the common path costs no extra I/O, which matters because order exports are the
+largest inputs in the tree.
+
+**Not verified, and named as such:** `apply` mode has never been run against real data.
+Its expected effect is measured (`w2` +942,869,056 VND from `w1`; `s4` +1,390,095,674
+from `s3`; `s2` +173,429) but measured by `tools/measure_order_coverage.py`, which is a
+*different* implementation of the same idea from the one that would execute. Agreement
+between the two is a check worth making at the flip, not an assumption to carry into it.
+
+**That check was made on 2026-08-20, and the two did not agree.** The tool reads through
+`ingest.read_parts`; the pipeline's borrow read through `read_files` only, so it never
+applied `store_aliases` — and `needed` holds canonical store names while a filename holds
+what the platform exported. `settings.yaml` maps `"Pediasure" -> "Abbott Pediasure"`
+because the order files drop the "Abbott", so `w1`'s Abbott files were skipped before
+anything read them: `2026-07_w2` reported **~1,788,000 VND** where the tool said
+942,869,056. The fix routes borrowed frames through the extracted `ingest.normalize_parts`
+(and canonicalises the filename prefilter), after which:
+
+| Window | Pipeline, report mode | `measure_order_coverage.py` | Agrees |
+|---|---|---|---|
+| `2026-07_w2` / tiktok | 942,869,056 VND, 825 orders from `w1` | 942,869,056 | yes |
+| `2026-07_s2` / shopee | 173,429 VND, 6 orders from `s1` | 173,429 | yes |
+| `2026-07_s4` / shopee | **not measurable this way** | 1,390,095,674 | — |
+
+`s4` cannot be confirmed by a CLI run: it hard-stops on the roster check
+(`check_stores`, which runs *before* the cross-window stage) because
+`xa_kho_gia_tot` and `Reckitt Sức Khỏe Sắc Đẹp` have order files in `s3` and none in
+`s4`. That is a pre-existing window-level roster gap, independent of this change — and
+itself an instance of 2.12's shape that the roster happens to catch loudly, where 2.12's
+own cases pass the roster and leak silently. Its figure remains the tool's.
+
+So the agreement is now evidence on two of the three windows, and the third is blocked on
+roster maintenance rather than on this mechanism. `apply` is still unrun.
