@@ -520,8 +520,9 @@ with every delta accounted for (+27 tests, +7 file-parametrized lint cases over 
 new files). With the order index and the upload date door that follow, the suite stood
 at **899 passed, 3 skipped, 4 deselected** (~6:21, read cache off), the money gate
 passes over all eight windows at zero tolerance, `tests/goldens/manifest.json` is
-untouched, and `tools/smoke_test.py` is 13/13. (It is **937** as of 2026-08-20 — C13's
-backfill took it to 930 and the borrow-path fix below added 7.)
+untouched, and `tools/smoke_test.py` is 13/13. (It is **940** as of 2026-08-20 — C13's
+backfill took it to 930, the borrow-path fix below added 7, and B1's falsification tests
+added 3.)
 
 *Recorded as a deviation:* all of it landed in **one** commit (`675f844`), because the
 working tree was already dirty in 123 files before the work started, so the per-commit
@@ -746,6 +747,55 @@ sharing a filename were silently last-one-wins where the window's own files refu
 The worker's predecessor download also now asks `backfill.mode_of` instead of its own
 `!= "off"` test, which had accepted `"OFF"` and downloaded files before a typo could
 hard-stop inside `run()`.
+
+**The safety property became a test before it became a default (2026-08-20).** D59 and
+the register had asserted since 2026-08-19 that a predecessor export whose quantities
+drifted *breaches* a check rather than being invoiced — the whole argument for why
+borrowing is not pooling with extra steps — and nothing drove it. Three tests now do,
+through the real `explode_to_sku_tiktok`, the real `compute_sku_columns_tiktok` and the
+real `run_checks_tiktok` rather than a re-implementation: a borrowed order reaches the SKU
+frame and ties to its settlement; the same fixture with one drifted quantity **BREACHES**
+per-order conservation; and an order the window already covers is not doubled by `apply`
+— asserted on the quantity *inside* the SKU bucket, because that is where the 4.5x
+over-count would hide rather than in a row count.
+
+**`cross_window_order_backfill: apply` is the default (2026-08-20).** The money move, and
+it moved no golden cell — which was **stated in advance, not discovered**: `needed` comes
+from `read_parts` frames on both sides, so no golden window borrows anything at all
+(`2026-05_w1`/`_s1` are first of their month; `_s2`/`_s3` have 100% own-window order
+coverage; the four Lazada windows have no order files). The money gate re-ran all eight at
+zero tolerance after the flip, `tests/goldens/manifest.json` is untouched, and **no golden
+was re-baselined for this change** — the one commit in this whole sequence that was
+entitled to move a baseline did not need to.
+
+What it does on real data: `2026-07_w2` applies **942,869,056 VND** across 825 orders
+(abbott 941,081,056 + similac 1,788,000), and per-order settlement conservation is
+**exact** — variance 0.00 against a 38,609,498,443 VND rebuilt total, at a 1 VND
+tolerance, with the borrowed lines in the frame. Its reconciling "settlement with no
+matching order lines" fell from ~2,394,101,094 to 1,451,232,038, of which Purite alone is
+1,444,139,986 — the byte-identical mis-pull that needs a platform re-pull, not code.
+`s2` applies 173,429 and `s4` 1,390,095,674. A **pinned** service window keeps the mode it
+was pinned to, so re-running July through the worker is a deliberate repin, not a
+side effect of this line changing.
+
+*The one that was nearly misread, recorded because the next reader will hit it too.*
+`2026-07_s4` under `apply` BREACHES Shopee's revenue crossing — per-order worst 893,000
+VND, total −95,928,999 — which reads exactly like the fix breaking a control. It is the
+reverse. The same window under `report`, same flags, breaches at total −2,111,292,476 with
+a per-order worst of 3,276,000; `apply` improves that crossing by **2,015,363,477 VND**
+and takes Masan's unmatched share from 66.8% to 3.0%. The breach is pre-existing in both
+modes: the check's own detail line reads "729 of 40,299 orders deviate, 729 absent from the
+SKU frame entirely" — orders with no lines in *any* export, which cannot tie by
+construction and need a platform re-pull.
+
+Two things that made the difference between diagnosing and guessing. The check names how
+many deviating orders are **absent** rather than only printing a variance, which is what
+separated "broke it" from "improved a pre-existing breach". And the baseline was
+**measured** — settings flipped back to `report`, the window re-run, the numbers compared —
+rather than reasoned about from the code. The first attempt to check this had grepped a
+pattern that did not match the `Check Revenue conservation` lines at all, so the earlier
+report-mode run appeared clean when it was not; a filter that silently excludes the lines
+you are looking for reads exactly like good news.
 
 *The July measurement that will pre-state the fix's effect:* cross-window recoverable
 settlement is **942,869,056 VND** in `w2` from `w1` (exactly abbott 941,081,056 +

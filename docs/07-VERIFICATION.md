@@ -318,14 +318,89 @@ anything read them: `2026-07_w2` reported **~1,788,000 VND** where the tool said
 |---|---|---|---|
 | `2026-07_w2` / tiktok | 942,869,056 VND, 825 orders from `w1` | 942,869,056 | yes |
 | `2026-07_s2` / shopee | 173,429 VND, 6 orders from `s1` | 173,429 | yes |
-| `2026-07_s4` / shopee | **not measurable this way** | 1,390,095,674 | — |
+| `2026-07_s4` / shopee | 1,390,095,674 VND, 10,524 orders from `s3` | 1,390,095,674 | yes |
 
-`s4` cannot be confirmed by a CLI run: it hard-stops on the roster check
-(`check_stores`, which runs *before* the cross-window stage) because
-`xa_kho_gia_tot` and `Reckitt Sức Khỏe Sắc Đẹp` have order files in `s3` and none in
-`s4`. That is a pre-existing window-level roster gap, independent of this change — and
-itself an instance of 2.12's shape that the roster happens to catch loudly, where 2.12's
-own cases pass the roster and leak silently. Its figure remains the tool's.
+`s4` needs `--partial-roster` to reach the cross-window stage at all, and that is worth
+separating from the defect. Two rostered stores — `xa_kho_gia_tot` and `Reckitt Sức Khỏe
+Sắc Đẹp` — have order files in `s3` and **none** in `s4`, so `check_stores` (which runs
+before the borrow) refuses the window. They are also unrecoverable by any mode: lines
+that were never exported exist in no window. The 1,390,095,674 VND is a *different*
+store, `masan`, which **does** have `s4` order files — they simply do not cover every
+order `s4` settles, which is 2.12's actual shape. So the roster stop is an unrelated
+window-level gap, not a limit on the mechanism.
 
-So the agreement is now evidence on two of the three windows, and the third is blocked on
-roster maintenance rather than on this mechanism. `apply` is still unrun.
+That run also exercised the fan-out guard against real data: unmatched orders fell from
+11,260 to 736 once `s3` supplied its share, then stayed at 736 through `s2` and `s1` —
+nearest predecessor wins and no order is taken twice. Read the totals of a
+`--partial-roster` run as evidence about the cross-window figure only; 20 stores were
+made optional, so they are not the month's numbers.
+
+All three windows now agree with the independent measurement.
+
+## `apply` mode, measured on real July data (2026-08-20)
+
+`cross_window_order_backfill: apply` became the default once the above agreed. What it
+does, per window, measured rather than projected:
+
+| Window | Applied | The check that matters |
+|---|---|---|
+| `2026-07_w2` / tiktok | 942,869,056 VND, 825 orders | per-order settlement conservation **exact** — variance 0.00 on a 38,609,498,443 VND rebuilt total, 1 VND tolerance, borrowed lines in the frame |
+| `2026-07_s2` / shopee | 173,429 VND, 6 orders | — (Shopee has no settlement conservation; `SHOPEE_MONEY` is None by design) |
+| `2026-07_s4` / shopee | 1,390,095,674 VND, 10,524 orders / 15,679 lines | revenue crossing improves by 2,015,363,477 VND — see below |
+
+**Golden windows: zero cells moved, stated in advance.** `needed` is derived from
+`read_parts` frames on both sides, so no golden window borrows anything at all. The money
+gate re-ran all eight at zero tolerance after the flip and **no golden was re-baselined**.
+
+**The s4 finding, because it was nearly misread as the opposite.** Under `apply`, s4's
+Shopee revenue crossing BREACHES — per-order worst 893,000 VND, total −95,928,999 against
+a 40,299 tolerance. That looks like the fix breaking a control. It is not: the same window
+under `report` breaches **harder**, and the check's own detail line is what distinguishes
+them ("729 of 40,299 orders deviate, 729 absent from the SKU frame entirely" — the
+deviation is orders with no lines anywhere, not drifted quantities).
+
+| s4, same window and flags | `report` | `apply` |
+|---|---|---|
+| Crossing total variance | −2,111,292,476 | **−95,928,999** |
+| Per-order worst | 3,276,000 | **893,000** |
+| Settlement with no matching lines | 1,456,557,607 (11,260 orders) | **66,461,933 (736)** |
+| Masan unmatched share | 66.8% | **3.0%** |
+
+So the crossing breach on `s4` is **pre-existing in both modes** — a window whose orders
+genuinely have no lines in any export cannot tie — and `apply` reduces it by 95.5%. The
+breach is worth keeping visible, not silencing: it is the residual that a platform re-pull
+has to close.
+
+*Method note worth keeping:* this was only decidable because the check reports how many
+deviating orders are **absent** versus drifted. A check that printed a variance alone would
+have left "the fix broke a control" indistinguishable from "the fix improved a pre-existing
+breach" without a full re-run — which is what the baseline run above had to do anyway, and
+what the detail line will save next time.
+
+### The July convergence, against the team's own month-end master
+
+`tools/compare_master.py --month 2026-07` after the flip. The gap this defect was measured
+at — **4,527,401,608 VND across 11 of 205 store-window cells** — is now **1,579,645,766**,
+and every cell that closed is one the measurement said would close:
+
+| Storefront | Before | After | Cause of the remainder |
+|---|---|---|---|
+| abbott pediasure | −941,081,056 | **0 — ties exactly** | recovered from `w1` |
+| similac | −1,788,000 | **0 — ties exactly** | recovered from `w1` |
+| masan | −2,106,036,476 | **−98,998,179** (95.3% closed) | bounded by `s3`'s own coverage |
+| purite | −1,444,052,986 | −1,444,052,986 | byte-identical `w2` mis-pull; lines never exported |
+| mondelez kinh do | −6,992,600 | −6,992,600 | same mis-pull shape |
+| curel | −23,807,000 | −23,807,000 | not cross-window; the month-spanning `w5` Curel file |
+| unilever homecare | −73,000 | −73,000 | not cross-window |
+| sanofi | −5,722,000 | −5,722,000 | not cross-window |
+| unilever ahc (lazada) | −1 | −1 | display rounding in their CSV |
+
+TikTok's `w2` window total closed by exactly **942,869,056** (38,609,498,443 against their
+40,060,544,029, from −2,393,914,642 before), and all five Lazada windows still reproduce to
+the dong. **Nothing moved that the measurement did not predict** — `w3`/`w4`/`w5`/`s1`/`s3`
+were measured to have no cross-window recoverable settlement and their cells are unchanged.
+
+The residual is now **dominated by one unrecoverable cause**: purite's 1,444,052,986 is 91%
+of what is left, and it is a platform re-pull, not code. An earlier draft of this plan
+expected `curel` and `unilever homecare` to recover here; the July measurement superseded
+that (`w3`/`w4`/`w5` recover nothing) and the run agrees with the measurement.

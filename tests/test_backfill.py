@@ -491,6 +491,151 @@ def test_the_exception_rows_carry_provenance_and_no_money(tmp_path):
                 if c in ("money", "net_revenue", "amount", "quantity")]
 
 
+# --- the safety property, through the REAL explode and the REAL checks --------
+#
+# D59's central claim, and the reason borrowing is not pooling with extra steps:
+# borrowed orders enter the tie-out's *matched* population, so a predecessor whose
+# quantities have drifted BREACHES a check instead of silently mis-invoicing. That
+# claim was asserted in docs/06 and docs/08 from 2026-08-19 with nothing driving
+# it; these three tests drive it, through `calculate.explode_to_sku_tiktok`,
+# `calculate.compute_sku_columns_tiktok` and `tieout.run_checks_tiktok` rather
+# than a re-implementation. TikTok because it is the platform where the
+# order-file-to-income crossing was measured exact (max deviation 0.0000 VND over
+# 44,129 real orders), so a 1 VND tolerance is meaningful.
+
+TIKTOK_COLMAP = {
+    "Order ID": "order_id",
+    "Seller SKU": "sku_id",
+    "Product Name": "sku_name",
+    "Quantity": "quantity",
+    "Unit Price": "unit_price_gross",
+    "SKU Seller Discount": "sku_seller_discount",
+}
+
+TIKTOK_SETTINGS = {
+    **SETTINGS,
+    "sheet_names": {PLATFORM: {"orders": "OrderSKUList"}},
+    "vat_factors": {"default": 1.08},
+    "tolerances": {PLATFORM: {"conservation_vnd": 1}},
+}
+
+
+def _tiktok_orders_file(root, window: str, store: str, rows) -> None:
+    """`rows` = (order_id, sku_id, qty, unit_price, seller_discount)."""
+    folder = root / window / PLATFORM / "orders"
+    folder.mkdir(parents=True, exist_ok=True)
+    frame = pd.DataFrame([
+        {"Order ID": oid, "Seller SKU": sku, "Product Name": f"P-{sku}",
+         "Quantity": qty, "Unit Price": price, "SKU Seller Discount": disc}
+        for oid, sku, qty, price, disc in rows])
+    with pd.ExcelWriter(folder / f"order {store}.xlsx", engine="openpyxl") as w:
+        frame.to_excel(w, sheet_name="OrderSKUList", index=False)
+
+
+def _through_the_pipeline(tmp_path, own_rows, income_rows, mode):
+    """orders -> backfill.resolve -> explode -> yellow columns -> the real checks."""
+    from src import calculate, tieout
+
+    log = RunLog()
+    own = pd.DataFrame([
+        {"store": s, "order_id": o, "sku_id": k, "sku_name": f"P-{k}",
+         "quantity": q, "unit_price_gross": p, "sku_seller_discount": d}
+        for s, o, k, q, p, d in own_rows])
+    income = pd.DataFrame([
+        {"store": s, "order_id": o, "subtotal_after_seller_discounts": m}
+        for s, o, m in income_rows])
+
+    xw = backfill.resolve(
+        input_root=tmp_path, period="2026-07_w2", platform=PLATFORM,
+        orders=own, settled=income, money_col="subtotal_after_seller_discounts",
+        colmap=TIKTOK_COLMAP,
+        settings={**TIKTOK_SETTINGS, "cross_window_order_backfill": mode}, log=log)
+
+    sku = calculate.explode_to_sku_tiktok(income, xw.orders, log)
+    sku = calculate.compute_sku_columns_tiktok(sku, TIKTOK_SETTINGS, log)
+    reference = tieout.SourceReference.from_income(
+        income, money_col="subtotal_after_seller_discounts", label="income")
+    checks = tieout.run_checks_tiktok(sku, reference, TIKTOK_SETTINGS, log,
+                                      cross_window=xw)
+    return sku, checks
+
+
+def _verdict(checks, needle: str) -> str:
+    row = checks[checks["check"].str.contains(needle, case=False, regex=False)]
+    assert len(row) == 1, f"expected exactly one {needle!r} check, got {len(row)}"
+    return row.iloc[0]["result"]
+
+
+def test_a_borrowed_order_reaches_the_sku_frame_and_ties_to_its_settlement(tmp_path):
+    """The apply-mode payload: revenue that used to leave through the ~21% door is
+    invoiced, and it passes the same conservation check the window's own lines pass.
+    """
+    # w1 exported SHARED: 2 x 500 with no discount, so the rebuild is 1,000.
+    _tiktok_orders_file(tmp_path, "2026-07_w1", "KAO", [("SHARED", "S1", 2, 500, 0)])
+    _tiktok_orders_file(tmp_path, "2026-07_w2", "KAO", [("MINE", "S2", 1, 300, 0)])
+
+    sku, checks = _through_the_pipeline(
+        tmp_path,
+        own_rows=[("KAO", "MINE", "S2", 1, 300, 0)],
+        income_rows=[("KAO", "MINE", 300.0), ("KAO", "SHARED", 1000.0)],
+        mode="apply")
+
+    assert set(sku["order_id"]) == {"MINE", "SHARED"}, "the borrowed order never arrived"
+    assert _verdict(checks, "Order coverage") == "PASS"
+    assert _verdict(checks, "order-file rebuild") == "PASS", (
+        "borrowed lines rebuilt a settlement that does not match the income")
+
+
+def test_a_drifted_predecessor_export_breaches_conservation(tmp_path):
+    """**The safety property.** Same fixture, one changed cell: w1 now says quantity 3
+    where the settlement was computed on 2. Under pooling this would silently inflate
+    an invoice; here it must fail a check instead.
+
+    This is what makes borrowing recoverable-with-evidence rather than a guess — the
+    lines are pulled through the controls the window's own lines pass, so a
+    re-exported file that no longer agrees with the money is caught.
+    """
+    _tiktok_orders_file(tmp_path, "2026-07_w1", "KAO", [("SHARED", "S1", 3, 500, 0)])
+    _tiktok_orders_file(tmp_path, "2026-07_w2", "KAO", [("MINE", "S2", 1, 300, 0)])
+
+    _, checks = _through_the_pipeline(
+        tmp_path,
+        own_rows=[("KAO", "MINE", "S2", 1, 300, 0)],
+        income_rows=[("KAO", "MINE", 300.0), ("KAO", "SHARED", 1000.0)],
+        mode="apply")
+
+    assert _verdict(checks, "order-file rebuild") == "BREACH", (
+        "a predecessor whose quantities drifted was invoiced silently")
+    # And the window's own order is not what broke it.
+    assert _verdict(checks, "Order coverage") == "PASS"
+
+
+def test_an_order_this_window_already_covers_is_not_doubled_by_apply(tmp_path):
+    """The 4.5x regression pin, asserted where it would actually show: through the
+    explode.
+
+    Pooling July's TikTok exports into `w2` measured a 4.5x over-count, and the
+    reason it is dangerous is that it is INVISIBLE — the groupby sums quantity per
+    `(store, order_id, sku_id, sku_name, unit_price_gross)` bucket, so a second copy
+    inflates an existing SKU line and adds no row to count. So the assertion is on
+    the quantity in that bucket, not on the row count.
+    """
+    # w1 holds a copy of the order w2 also exported — the re-pull shape.
+    _tiktok_orders_file(tmp_path, "2026-07_w1", "KAO", [("MINE", "S2", 1, 300, 0)])
+    _tiktok_orders_file(tmp_path, "2026-07_w2", "KAO", [("MINE", "S2", 1, 300, 0)])
+
+    own = [("KAO", "MINE", "S2", 1, 300, 0)]
+    income = [("KAO", "MINE", 300.0)]
+
+    off, off_checks = _through_the_pipeline(tmp_path, own, income, "off")
+    applied, applied_checks = _through_the_pipeline(tmp_path, own, income, "apply")
+
+    pd.testing.assert_frame_equal(off, applied), "apply doubled a covered order"
+    assert applied["quantity"].sum() == 1, "quantity was inflated inside the SKU line"
+    assert _verdict(off_checks, "order-file rebuild") == "PASS"
+    assert _verdict(applied_checks, "order-file rebuild") == "PASS"
+
+
 def test_a_window_whose_orders_are_all_covered_says_so_and_reads_nothing(tmp_path):
     """Shopee's real case: order coverage is 100% on every measured window, so the
     common path must cost nothing beyond the check itself."""

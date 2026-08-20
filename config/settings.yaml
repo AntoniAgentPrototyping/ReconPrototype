@@ -138,9 +138,30 @@ dedupe_rows: false
 #           frame handed to the explode is untouched.
 #   apply   borrow those lines before the explode. This MOVES CELLS.
 #
-# Currently `report`, deliberately: `off` would leave the code path unexercised
-# until the day it is trusted with money, and the outputs report mode adds are in
-# none of the golden manifest's fields.
+# Now `apply` (2026-08-20). It ran as `report` in production from 2026-08-19, and
+# the flip was taken on measured evidence rather than on the mechanism looking
+# right:
+#
+#   * Every golden window was pre-stated to move ZERO cells, and did. `2026-05_w1`
+#     and `_s1` are the first of their month so they have no predecessor at all;
+#     `_s2`/`_s3` report 100% own-window order coverage, so the borrow returns
+#     before opening a file; the four Lazada windows are a fee-event ledger with no
+#     order files and the step is not wired into `_run_lazada`. The money gate
+#     re-ran all eight at zero tolerance after the flip and no cell moved, so NO
+#     golden was re-baselined for this change.
+#   * The July recovery was measured twice, by two independent implementations that
+#     now agree: w2 942,869,056 VND (abbott 941,081,056 + similac 1,788,000),
+#     s4 1,390,095,674 (masan, bounded by s3's coverage), s2 173,429.
+#   * The safety property is tested, not just asserted: a predecessor export whose
+#     quantities have drifted BREACHES per-order conservation instead of being
+#     invoiced (tests/test_backfill.py, through the real explode and tie-out).
+#
+# `purite` and `mondelez kinh do` recover NOTHING and no mode can change that —
+# their w2 order files are byte-identical mis-pulls, so the lines were never
+# exported. That residual needs a platform re-pull.
+#
+# Service runs of a PINNED window keep whatever mode they were pinned to, which is
+# the point of pinning: re-running July on the service needs a deliberate repin.
 #
 # Do NOT "fix" this by pooling the month's order files instead. Measured: pooling
 # every July TikTok order export into w2 takes that window to 183,102,704,362 VND
@@ -149,7 +170,7 @@ dedupe_rows: false
 # (store, order_id, sku_id, sku_name, unit_price_gross) bucket, so a second copy
 # inflates quantity INSIDE one SKU line rather than adding a visible row.
 # Borrowing takes each order from exactly ONE window (src/backfill.py, D59).
-cross_window_order_backfill: report
+cross_window_order_backfill: apply
 
 # Date parsing: set true per platform if exports use dd/mm/yyyy text dates.
 # TikTok confirmed dd/mm/yyyy (probe with false produced impossible Jan-Dec

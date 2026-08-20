@@ -532,10 +532,51 @@ nothing) while an unnameable file and a missing object beside it only warned, an
 predecessor uploads sharing a filename were silently resolved last-one-wins where the
 window's own files refuse the same collision.
 
-**What is still open:** the flip to `apply`, with the measured per-window delta stated in
-advance and the golden windows re-baselined deliberately. Expected recovery is already
-measured: **942,869,056 VND** in `w2` from `w1`, **1,390,095,674** in `s4` from `s3`,
-173,429 in `s2` from `s1`. The two mis-pull cells recover **nothing** — their lines were
+**`apply` is now the default (2026-08-20) — the flip is done.** Every golden window was
+pre-stated to move **zero** cells and every one did: `needed` is computed from
+`read_parts` frames on both sides, so `w1`/`s1` (first of their month, no predecessor),
+`s2`/`s3` (100% own-window coverage, so the borrow returns before opening a file) and the
+four Lazada windows (no order files, not wired) borrow nothing at all. The money gate
+re-ran all eight at zero tolerance after the flip: **no cell moved, and no golden was
+re-baselined for this change.**
+
+On real July data, `2026-07_w2` now applies **942,869,056 VND** across 825 orders — and
+the check that matters passed: per-order settlement conservation is exact (variance 0.00
+against a 38,609,498,443 VND rebuilt total, 1 VND tolerance) *with the borrowed lines in
+the frame*. That is D59's safety property holding on real data rather than in a fixture,
+and it is the difference between this and pooling. The window's reconciling "settlement
+with no matching order lines" fell from ~2,394,101,094 to **1,451,232,038**, of which
+Purite alone is 1,444,139,986 (41.1% of its settlement) — the byte-identical mis-pull,
+which no mode can recover.
+
+On `2026-07_s4` the effect is larger and needs reading carefully, because it looks at
+first like a control breaking. Shopee's revenue crossing BREACHES under `apply` (per-order
+worst 893,000 VND, total −95,928,999). It also breaches under `report`, **harder**: total
+−2,111,292,476, per-order worst 3,276,000, with 11,260 orders unmatched against 736 and
+Masan at 66.8% unmatched against 3.0%. So `apply` improves that crossing by
+2,015,363,477 VND. The breach is pre-existing in both modes — the check's detail line says
+"729 of 40,299 orders deviate, 729 absent from the SKU frame entirely", i.e. orders with no
+lines in *any* export, which cannot tie by construction — and it stays visible because a
+platform re-pull is what closes it.
+
+*What the flip does NOT change:* a service run of a **pinned** window keeps the mode it
+was pinned to, which is the point of pinning — re-running July through the worker needs a
+deliberate repin. And `2026-07_s4` needs `--partial-roster` on the CLI to reach the stage
+at all, because two rostered stores (`xa_kho_gia_tot`, `Reckitt Sức Khỏe Sắc Đẹp`) have
+order files in `s3` and none in `s4`; that is an unrelated window-level roster gap, and
+those two stores are unrecoverable by any mode since their lines were never exported.
+
+**Against the team's own July master, the gap closed from 4,527,401,608 VND to
+1,579,645,766** (`tools/compare_master.py --month 2026-07`). `abbott pediasure` and
+`similac` now tie **exactly**; `masan` went from −2,106,036,476 to −98,998,179 (95.3%
+closed). Nothing moved that the measurement had not predicted: `w3`/`w4`/`w5`/`s1`/`s3`
+were measured to hold no cross-window recoverable settlement and their cells are unchanged.
+**91% of what remains is `purite`'s 1,444,052,986** — the byte-identical mis-pull, which is
+a platform re-pull rather than anything code can reach.
+
+Measured recovery, now applied: **942,869,056 VND** in `w2` from `w1`,
+**1,390,095,674** in `s4` from `s3`, 173,429 in `s2` from `s1`. The two mis-pull cells
+recover **nothing** — their lines were
 never exported, and no mode can invent them.
 
 Measured cross-window recoverable settlement, which pre-states what a fix can and cannot
