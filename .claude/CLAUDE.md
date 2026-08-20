@@ -98,6 +98,13 @@ export RECON_DATABASE_URL="postgresql://recon:<pw>@127.0.0.1:55432/recon_dev"
 # Read-only; reports COUNTS ONLY, because identity columns include store names.
 "$PY" -m service.nfc_audit [--database-url "$RECON_DATABASE_URL"]
 
+# Which uploaded file holds which (store, order_id) — defect 2.12's detection half
+# (migration 015, D58). Every upload since 2026-08-19 is indexed at the door; this
+# clears the backlog. It CHECKS each object against the digest recorded at the door
+# before reading it and REFUSES a mismatch (exit 1) — the opposite of D26's trap, so
+# do not "simplify" it into recomputing the digest. NULL digest = skipped and named.
+"$PY" -m service.order_index --backfill [--dry-run]
+
 # The web app (M5). Node 26; node_modules must NOT sync to OneDrive.
 cd web && npm install && npm run build && npm run dev      # localhost:3000
 
@@ -139,7 +146,7 @@ cd deploy && cp .env.example .env && docker compose up --build
 "$PY" tools/smoke_test.py
 ```
 
-Expected today: **`840 passed, 3 skipped, 4 deselected`** in ~7:00 with `RECON_TEST_DATABASE_URL` set and `RECON_REQUIRE_CLIENT_DATA=1` (measured 2026-08-19 after M8 Phase 3, `-m "not slow"`); the ~570 service tests skip loudly with no database. This line said `630` from 2026-08-17, `731` until 1.6 replaced the config-editor tests, `741` until Phases 2/4/5, and `816` until Phase 3 added `date_formats` (which fans out the config-parametrized tests), `tests/test_master_summary.py` (8) and `tests/service/test_month_master.py` (8) — treat a mismatch as a stale doc first and a regression second, but check.
+Expected today: **`899 passed, 3 skipped, 4 deselected`** in ~6:21 with `RECON_TEST_DATABASE_URL` set and `RECON_REQUIRE_CLIENT_DATA=1` (measured 2026-08-19 after the order index and the upload date door, `-m "not slow"`, IO cache OFF); the ~600 service tests skip loudly with no database. This line said `630` from 2026-08-17, `731` until 1.6 replaced the config-editor tests, `741` until Phases 2/4/5, `816` until Phase 3 added `date_formats` (which fans out the config-parametrized tests), `tests/test_master_summary.py` (8) and `tests/service/test_month_master.py` (8), `840` until the register fix pass added 27 tests (`tests/test_atomic_writes.py` 6, `tests/test_lazada_promo_pairing.py` 5, `tests/test_order_coverage.py` 7, three 2.9 regressions, three pin-event and three artifact-digest service tests) plus 7 file-parametrized lint cases over 5 new files, and `874` until C11/C12 added 22 (`tests/service/test_uploads.py` +10 for the date door, `tests/service/test_order_index.py` 12) plus 3 lint cases over 2 new files — treat a mismatch as a stale doc first and a regression second, but check.
 
 **`tests/goldens/` in the fast suite is a STRUCTURAL gate: it compares committed digests against the *static* golden cellsets in `%LOCALAPPDATA%\recon-goldens` and nothing there calls `pipeline.run`.** So a green fast suite is **not** evidence that output is unchanged — do not cite it as one.
 
@@ -227,8 +234,17 @@ Data lives in gitignored `input/<period>/<platform>/...` — TikTok/Shopee use `
 
 **Translated on the finance path only.** Board, run, period, upload, the team's figures, sign-in and the shell. The **rules editor and accounts screen stay English on purpose**: the rules editor's load-bearing content is the per-row evidence text, which is English in `settings.yaml` because that is where it was written and verified, and translating the chrome around untranslated evidence would look finished and be worse.
 
+**The defect-register fix pass is complete through detection of 2.12 (2026-08-19).** Nine register items fixed in code — 2.9 (composite `(store, order_id)` in tieout: **three faults, not one**), the Lazada promo `dropna`, atomic artifact writes (D10), both settings back-channels (1.9), `_blank_repeats`, the unpin audit trail, artifact **download** digest checking, per-store order coverage, and 2.3's residual. All eight goldens re-run at zero tolerance with **no cell moved**. Details in `docs/12-CHANGE-HISTORY.md` under *The defect-register fix pass*; the register itself was corrected in place with the wrong text quoted.
+
+**Do not re-derive these three, they are measured and recorded:**
+- **Per-store order coverage is INFO, not a threshold, and that is deliberate.** On `2026-05_w1` — a golden window reproducing the team's figures — the entire documented ~21% unmatched belongs to **one** storefront (Unilever Homecare 21.2%, Mars 0.0%). Any threshold catching July's cells breaches on known-good data. The month-over-month *change* is the signal; the alarming check is the cross-window one instead.
+- **The order index may never compute money** ([D58](../docs/06-DECISIONS.md#d58)) — every column is an identifier, a test asserts it structurally, and moving the reconciliation into SQL was considered and **rejected** on D31/D12 grounds. `service/order_index.py` **checks** the digest recorded at the door and never derives it; do not "simplify" that into recomputing it (D26).
+- **The upload door's three cases are each deliberately weaker than they could be** ([D57](../docs/06-DECISIONS.md#d57)): month **intersect** not contain (Lazada weeklies lap the boundary), the mis-pull shape **warns** not refuses (the first upload has no siblings, and D9 owns the hard control), and order exports are **never** date-checked (an order created in June settles in July).
+
+**2.12 is detected, not fixed.** No number has changed. The borrowing half is `cross_window_order_backfill: off|report|apply` and is not built. **Do not "fix" it by pooling the month's order files** — measured, that takes w2 to 183B against a reference of 40B.
+
 **Invariants worth not eroding.**
-- Every endpoint names a role, and `tests/service/test_auth.py::test_the_required_role_of_every_route_is_declared` walks the router against an **explicit route→role table** asserted in both directions. The old single-sided "every mutating route needs at least operator" check would have passed an ADMIN route silently dropping to USER.
+- Every endpoint names a role, and `tests/service/test_auth.py::test_the_required_role_of_every_route_is_declared` walks the router against an **explicit route→role table** asserted in both directions. A new route must be added to that table in `tests/service/test_auth.py` or the test fails — that is the check working. The old single-sided "every mutating route needs at least operator" check would have passed an ADMIN route silently dropping to USER.
 - `requested_by`, `uploaded_by`, `declared_by`, `proposed_by` come from the **session**, never the body.
 - `requires(role)` must keep `role` as a closed-over `Role` object — the router walk reads it out of `dependency.__closure__`. Rewriting it as `Annotated[...]` or decorator-level `dependencies=[...]` makes those tests pass **vacuously**.
 - `service/config_store.py` uses **`ruamel.yaml`, never `PyYAML`** — the round trip is byte-identical on the real `settings.yaml` and PyYAML would silently discard every comment ([D2](../docs/06-DECISIONS.md#d2)).

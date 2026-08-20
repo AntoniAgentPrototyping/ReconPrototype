@@ -25,6 +25,7 @@ It now runs per platform.
 from __future__ import annotations
 
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -541,3 +542,200 @@ def test_the_plan_uses_the_config_the_window_will_actually_run_under(
     live = upload_client.get("/uploads/plan", params={
         "platform": "tiktok", "period": "2026-05_unpinned"}).json()
     assert live["expected_store_count"] > 1
+
+
+# --- the settlement-date door (defect 2.3's residual, defect 2.12) -----------
+#
+# `check_span` is pure, so most of this needs no database and no HTTP. The two
+# integration tests at the end are the ones that prove the api actually calls it.
+
+
+def test_a_window_defining_file_from_another_month_is_refused():
+    """The July mis-pull's shape, stated as a rule.
+
+    A file settling wholly outside its window's month is either mis-labelled or a
+    mis-pull. Before this the api validated `period` for character safety alone, so
+    the answer arrived at the month-end tie instead of at the door.
+    """
+    refusal, warning = upload_lib.check_span(
+        "2026-05_l1", "weekly",
+        settles_from=date(2026, 7, 1), settles_to=date(2026, 7, 7))
+
+    assert refusal and "2026-05" in refusal and "2026-07-01" in refusal
+    assert warning is None, "a refusal and a warning are different answers"
+
+
+def test_a_weekly_that_laps_into_the_next_month_is_accepted():
+    """INTERSECT, not contain — and this is why.
+
+    Lazada's 25th-to-month-end Daily week is a permanent monthly fixture and its
+    weeklies lap the boundary. A containment test would refuse the healthy case
+    every single month, which is how a control gets switched off.
+    """
+    refusal, _ = upload_lib.check_span(
+        "2026-07_l5", "daily",
+        settles_from=date(2026, 7, 29), settles_to=date(2026, 8, 4))
+    assert refusal is None
+
+
+def test_an_order_export_that_predates_its_window_is_not_date_checked():
+    """An order created in June legitimately settles in July.
+
+    TikTok also re-ships each store's prior-month order pull in *every* weekly
+    folder, because the cross-period stitch needs it. Date-checking order exports
+    would flag every healthy window in the tree.
+    """
+    refusal, warning = upload_lib.check_span(
+        "2026-07_w2", "orders",
+        settles_from=date(2026, 5, 1), settles_to=date(2026, 6, 30),
+        sibling_starts=[date(2026, 7, 8)])
+    assert (refusal, warning) == (None, None)
+
+
+def test_a_file_with_no_readable_date_is_not_checked_rather_than_guessed():
+    """A Lazada ledger has no `statement_date`; some exports carry no parseable
+    date at all. Silence is a legitimate answer and must not become a refusal."""
+    assert upload_lib.check_span("2026-05_l1", "weekly",
+                                 settles_from=None, settles_to=None) == (None, None)
+
+
+def test_the_mispull_shape_warns_and_never_refuses():
+    """`find_outliers`' signal, at the door.
+
+    Warn rather than refuse: D9's `window_settlement_bounds` owns the hard control
+    at run time, and a door that refuses on suspicion teaches operators to fight it.
+    """
+    refusal, warning = upload_lib.check_span(
+        "2026-07_w2", "income",
+        settles_from=date(2026, 7, 1), settles_to=date(2026, 7, 14),
+        sibling_starts=[date(2026, 7, 8), date(2026, 7, 8)])
+
+    assert refusal is None, "suspicion is not grounds for refusal here"
+    assert warning and "window_settlement_bounds" in warning
+    assert "2026-07-08" in warning
+
+
+def test_the_first_file_of_a_window_has_no_siblings_and_so_no_warning():
+    """The reason this cannot be a refusal: with one file there is nothing to
+    compare against, and every window starts with one file."""
+    assert upload_lib.check_span(
+        "2026-07_w2", "income", settles_from=date(2026, 7, 1),
+        settles_to=date(2026, 7, 7), sibling_starts=[]) == (None, None)
+
+
+def test_an_ambiguous_sibling_split_stays_silent():
+    """Earlier than EVERY sibling, not merely earlier than the modal start.
+
+    `find_outliers` compares against the mode, which needs an arbitrary tie-break
+    on an even split. At the door nobody is reviewing a plan, so an ambiguous case
+    says nothing rather than guessing which half is the anomaly.
+    """
+    _, warning = upload_lib.check_span(
+        "2026-07_w2", "income",
+        settles_from=date(2026, 7, 5), settles_to=date(2026, 7, 14),
+        sibling_starts=[date(2026, 7, 1), date(2026, 7, 8)])
+    assert warning is None
+
+
+def dated_export(tmp_path: Path, name: str, *, day: str) -> Path:
+    """A Lazada weekly export carrying real dates and order ids.
+
+    `day` is spelled in the format the contract declares for lazada/weekly
+    (`%d-%b-%Y`), read through `date_formats` rather than hardcoded here — the
+    door parses with that same accessor, so a test that spelled it its own way
+    would be asserting against a second idea of the format (D54).
+    """
+    import pandas as pd
+    from _contract import domain, lazada_headers, lazada_sheet
+
+    fmt = ((domain().get("date_formats") or {}).get("lazada") or {}).get("weekly")
+    assert fmt == "%d-%b-%Y", f"contract changed the weekly date format to {fmt!r}"
+
+    headers = lazada_headers("weekly")
+    frame = pd.DataFrame({
+        **{c: [f"{c}-{name}", f"{c}-{name}-2"] for c in headers},
+        "Transaction Date": [day, day],
+        "Order No.": [f"ORD-{name}-1", f"ORD-{name}-2"],
+        "Recipient": ["a person", "another person"],
+    })
+    path = tmp_path / name
+    with pd.ExcelWriter(path, engine="openpyxl") as w:
+        frame.to_excel(w, sheet_name=lazada_sheet("weekly"), index=False)
+    return path
+
+
+def test_an_export_settling_in_another_month_is_refused_at_the_door(
+        upload_client, tmp_path, repo):
+    """The integration half: the api must actually consult `check_span`.
+
+    And the refusal must happen before anything durable exists — a file this
+    window should not contain must leave no row and no object behind.
+    """
+    path = dated_export(tmp_path, "9_TestStore.xlsx", day="03-Jul-2026")
+    with path.open("rb") as fh:
+        r = upload_client.post("/uploads", files={"file": (path.name, fh)},
+                               data={"platform": "lazada", "period": WINDOW,
+                                     "kind": "weekly"})
+
+    assert r.status_code == 422, r.text
+    assert "2026-05" in r.json()["detail"]
+    assert not [u for u in repo.list_uploads(period=WINDOW)
+                if u["filename"] == "9_TestStore.xlsx"], (
+        "a refused upload left a row behind")
+
+
+def test_order_ids_and_the_settlement_span_are_indexed_at_the_door(
+        upload_client, tmp_path, repo):
+    """The index that lets defect 2.12's question be asked at all.
+
+    Identifiers only — no amount reaches this table. The span is recorded on the
+    upload row so a later file can be compared against its siblings.
+    """
+    path = dated_export(tmp_path, "8_TestStore.xlsx", day="03-May-2026")
+    with path.open("rb") as fh:
+        body = upload_client.post("/uploads", files={"file": (path.name, fh)},
+                                  data={"platform": "lazada", "period": WINDOW,
+                                        "kind": "weekly"}).json()
+
+    assert body["order_ids_indexed"] == 2, body
+    assert body["index_note"] == "", body["index_note"]
+    assert body["settles_from"] == "2026-05-03"
+    assert body["settles_to"] == "2026-05-03"
+    assert body["settles_checked"] is True
+
+    # The span reached the upload row, which is what the sibling comparison reads.
+    spans = repo.upload_spans("lazada", WINDOW, "weekly")
+    assert any(s["filename"] == "8_TestStore.xlsx" for s in spans), spans
+
+    # And the upload is no longer outstanding work for the backfill CLI.
+    assert not [u for u in repo.uploads_unindexed()
+                if u["filename"] == "8_TestStore.xlsx"]
+
+
+def test_the_mispull_warning_reaches_the_response_through_the_real_sibling_query(
+        upload_client, tmp_path, repo):
+    """The wiring, not the rule: the api must read siblings from the DATABASE.
+
+    The pure test above proves `check_span` decides correctly given sibling starts.
+    This one proves the api supplies them — the span has to have been persisted by
+    the earlier upload and read back by `upload_spans`, which is the half a unit
+    test cannot see.
+    """
+    first = dated_export(tmp_path, "6_TestStore.xlsx", day="10-May-2026")
+    with first.open("rb") as fh:
+        ok = upload_client.post("/uploads", files={"file": (first.name, fh)},
+                                data={"platform": "lazada", "period": WINDOW,
+                                      "kind": "weekly"}).json()
+    assert ok["span_warning"] == "", "the first file of a window has no siblings"
+
+    # Same month, so not a refusal — but earlier than the only sibling.
+    earlier = dated_export(tmp_path, "7_TestStore.xlsx", day="01-May-2026")
+    with earlier.open("rb") as fh:
+        r = upload_client.post("/uploads", files={"file": (earlier.name, fh)},
+                               data={"platform": "lazada", "period": WINDOW,
+                                     "kind": "weekly"})
+
+    assert r.status_code == 201, "the mis-pull shape must never refuse"
+    body = r.json()
+    assert "2026-05-10" in body["span_warning"], body["span_warning"]
+    assert "window_settlement_bounds" in body["span_warning"]

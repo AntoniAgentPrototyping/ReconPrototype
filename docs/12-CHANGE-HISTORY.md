@@ -268,6 +268,11 @@ format that actually parsed it. And `src/export.py`'s docstring still said it wa
 yet wired into production", citing `tools/full_run.py` — wired since M2, and that file
 became `tools/devrun.py` in M6.
 
+**What the audit then fixed in code is recorded separately**, under *The defect-register
+fix pass* at the end of this section — nine items, one commit, no golden moved. The split
+is deliberate: this paragraph is about the register being wrong, that one is about the
+system being wrong.
+
 **Phase 1 — configuration into the database.** Config was fragmented across seven
 files, two of which nothing read; five settings keys were dead; seven tolerances
 were read by `src/tieout.py` and never configured, so code literals were the source
@@ -504,6 +509,176 @@ is per-row evidence text written and verified in English in `settings.yaml`.
 *The limit that still has not moved:* `tests/test_ui_vocabulary.py` lints the source.
 It cannot tell anyone whether the Vietnamese reads naturally, because there is still
 no browser automation and nobody has used these screens.
+
+**The defect-register fix pass (2026-08-19).** The audit noted at the top of this
+section corrected the register's *text*; this is what it changed in *code*. Nine items,
+none of which had a milestone owner — M8's only remaining phase is deployment
+hardening, so 2.9, D10, 1.9, the Lazada `dropna` divergence and the unpin audit gap
+belonged to nobody. **The gate held: all eight golden windows re-run at zero tolerance,
+no cell moved**, and the fast suite went `840 → 874 passed, 3 skipped, 4 deselected`
+with every delta accounted for (+27 tests, +7 file-parametrized lint cases over five
+new files). With the order index and the upload date door that follow, the suite stands
+at **899 passed, 3 skipped, 4 deselected** (~6:21, read cache off), the money gate
+passes over all eight windows at zero tolerance, `tests/goldens/manifest.json` is
+untouched, and `tools/smoke_test.py` is 13/13.
+
+*Recorded as a deviation:* all of it landed in **one** commit (`675f844`), because the
+working tree was already dirty in 123 files before the work started, so the per-commit
+separation this project requires was not achievable. The pin-fix-unpin ritual was still
+followed *within* the work — each 2.9 gap was pinned `xfail(strict)`, seen to XPASS, and
+unpinned — but the commit boundaries that normally record that are absent. Read the
+tests, not the history, for that evidence.
+
+**Defect 2.9 was three faults, not one, and two of them were not on the register.**
+`tieout.py` differenced bare order-id sets. Under a collision the coverage check went
+**blind** (another store's id made an unrepresented order look covered); `partition`
+filed that settlement as *matched*, which **shrank the ~21% reconciling item** a
+reviewer is told to watch for changes in; and per-order conservation summed two stores'
+rebuilt revenue against one store's settlement, **manufacturing a variance from correct
+data**. The second is the quietest and the worst — money left the invoice through a door
+reporting less traffic than it carried. Fixed by one identity function, `tieout.pairs`,
+used by *both* sides of every comparison, which also closed a stringification asymmetry
+(`str(k)` on one side, `.astype(str)` on the other) that would have produced phantom
+breaches. `tools/measure_order_id_collisions.py` is **committed rather than ad-hoc** —
+the M2.5 measurement was a scratch script nobody kept, which is precisely why this claim
+had to be re-derived three milestones later. It reports **0 collisions across 8,399,255
+distinct order ids**, so the change is output-identical on today's data and bites only
+the case it exists for.
+
+*A technique worth reusing: the **discriminator**.* Each of the three regression tests
+asserts, permanently, that the *pre-fix* comparison would still have passed. An `xfail`
+marker proves that only until it is removed; a discriminator keeps the proof of the
+original blindness in the suite forever, and fails loudly if a future fixture stops
+exercising the collision it was built for. One of these was caught by its own
+discriminator during development: the first attempt let a store vanish entirely, so
+*store* coverage caught it as an accidental backstop and the test XPASSed for the wrong
+reason.
+
+**Per-store order coverage ships as INFO, and the measurement is why.** The plan called
+for a *failable* check with a leave-one-out tolerance. Measuring first killed that: on
+`2026-05_w1` — a golden window that reproduces the team's own figures — the entire
+documented ~21% unmatched belongs to **one** storefront (Unilever Homecare 21.2%, Mars
+0.0%). Any threshold calibrated to catch July's understatement would breach on
+known-good data. So the *level* separates nothing, and what an operator gets instead is
+an identity and a month-over-month comparison: `tieout.coverage_by_store`, an INFO row
+naming the worst stores, and an `order_coverage` exception sheet keyed on `("store",)`
+so "this store's coverage changed" is a `run_exceptions` recurrence query. The alarming
+check moves to the one signal with **zero** legitimate traffic — "these lines exist in an
+*earlier* window's export" — because the legitimate class has lines in **no** window.
+Shopee also gained an `unmatched_orders` sheet; it had none, on the platform carrying
+July's worst single cell.
+
+**Two writes that could corrupt a deliverable, both closed.** All four artifact writers
+now go through `pipeline._write_atomically` (sibling `.tmp`, then `os.replace`) — D10,
+scoped to M2 and never landed. It buys: no truncated `finance_file.xlsx` can sit at the
+final path, which matters because a truncated one still *opens* in Excel and looks
+current. It does **not** buy writing over a file Excel holds open; `os.replace` raises
+`PermissionError` there too, and both halves are pinned in `tests/test_atomic_writes.py`
+so the limit is asserted rather than merely described. Separately, artifact **downloads**
+were never digest-checked — the same shape as 2.10, opposite direction, with the digest
+already stored since M6. That gap was found *by* the audit rather than corrected in it.
+`sha256_of_chunks` verifies a streamed artifact in constant memory, a mismatch is a 502
+naming both digests, and a `NULL` recorded digest is **refused, not backfilled**:
+recomputing it from the store certifies the store against itself ([D26](06-DECISIONS.md#d26)).
+
+**Both settings back-channels are gone (1.9), and the second was unregistered.** The
+register named `settings["_vat_sku"]`; `_masters_source` and `_masters_searched` were
+travelling the same way and nobody had written them down. Three fields on the frozen
+`RunContext` plus an explicit `vat_sku` parameter on both `compute_sku_columns_*`.
+**Lazada already had the right shape** — the M2.5 situation again, where the correct
+pattern was already in the codebase for one platform of three. The one-job-per-process
+constraint stays; only its *justification* was reworded, because it no longer rests on a
+back-channel.
+
+**`_blank_repeats` now copies, and the hazard is sharper than the register said.** It was
+recorded as ordinary in-place mutation. The real risk is aliasing: `"Source.Name"` and
+`"Source.Name non repeat"` are both built from `df["store"]`, so under a no-copy
+constructor (pandas 3.0's Copy-on-Write default) blanking the repeat column would
+**silently empty the store column on invoice tabs**. The `pandas<3` pin stays until a
+measured pandas-3 golden run; the copy removes the sharpest edge behind it.
+
+**Unpinning a window's config now leaves a record.** It bare-deleted the `period_config`
+row: no trace that the window was ever pinned, to what, or why — in the system whose
+entire M5/M6 rationale is the audit trail. Migration `014_pin_events.sql` is append-only;
+pin, auto-pin and unpin each write an event **in the same transaction** as the change,
+unpin requires a reason (422 without one), and the actor comes from the session, never
+the body. `GET /config/pins` and `service.admin config pins` print the history. One bug
+was written and caught in the same pass, worth naming because it is silent: reading the
+wrong key off `reclaim_expired` makes a sweep that changed rows report "nothing to
+reclaim".
+
+**Lazada's promo pairing was measured before it was changed, and the measurement decided
+the commit's class.** `revenue_lines` grouped promo without `dropna=False` while the
+revenue side beside it had it — a dropped promo row means `price_ka` too high and an
+**overstated** invoice. Probing all nine Lazada windows found **0 null `sku_id` and 0
+null `product_name`**, so no cell could move and the fix is output-identical on today's
+data. The orphan class it exposes is real but separate: genuinely unpaired promo of
+−30,845 VND (July `l2`) and −22,486 (`l3`), now reported in a warning that no longer
+reads the same for a null-key drop and a legitimate unpaired charge. This is also the
+first unit coverage `revenue_lines` has ever had.
+
+**The upload door now reads settlement dates, and the order index exists (2026-08-19).**
+This is 2.3's residual closed and 2.12's detection half built. `POST /uploads` validated
+`period` for character safety and nothing else, so a file could be addressed to any
+window and nothing looked at what it settled — while `tools/stage_exports.py` had derived
+the window from settlement dates since M2.5. Three cases, three different answers
+([D57](06-DECISIONS.md#d57)): a window-defining file whose span does not **intersect** its
+window's month is refused before anything durable is written; a file starting earlier than
+every sibling is **warned** and accepted; order exports are **not checked at all**. Each
+"weaker" choice is load-bearing — containment instead of intersection would refuse
+Lazada's month-lapping weekly every month, refusing the outlier shape would block the
+first upload into every window, and date-checking order exports would flag every healthy
+TikTok folder, which is the same over-broad check staging already had to narrow.
+
+Migration `015_order_index.sql` adds `upload_order_index(upload_id, store, order_id)` and
+`service/order_index.py --backfill` clears the pre-door backlog. The rule it is built
+under, and the answer to the "why not move the reconciliation into SQL" question that
+prompted it: **the database may know where every number came from; it may never compute
+one** ([D58](06-DECISIONS.md#d58)). Every column is an identifier or a count — a test
+asserts that structurally, so a future migration adding an amount fails a test rather than
+a review. The expensive-sounding half of the proposal turned out to be already paid for:
+"have these exact bytes arrived before" was already answered by `uploads.sha256`,
+`object_sha256` and `staging.json`.
+
+*The backfill is deliberately not the [D26](06-DECISIONS.md#d26) trap.* It reads bytes out
+of the object store, so it first **checks** the digest recorded independently at the door —
+never derives it. A NULL digest is skipped and named ("re-upload to index"); a mismatch is
+refused and exits non-zero, so a scheduled sweep cannot report success while a store
+serves altered bytes. The index it writes is never an integrity reference for anything.
+
+*What the cross-window query buys, in one sentence:* `w2` settles an order whose SKU lines
+exist only in `w1`'s export, and that is now findable — the signal with **zero** legitimate
+traffic, because the legitimate ~21% unmatched class has lines in no window at all. A
+seeded two-window fixture asserts it, including that the query is predecessor-only so
+re-running an early window cannot change once a later one arrives.
+
+**And it is now visible in three places before a run, not after a month-end tie.** The
+worker logs it (`_report_order_coverage`, immediately after materialisation),
+`GET /windows/{platform}/{period}/order-coverage` serves it to a viewer, and the window
+page shows it beside the roster preview. Three properties of that surface are deliberate:
+
+* **The worker adds no compute** ([D31](06-DECISIONS.md#d31)) — these are log lines, and
+  the authoritative per-store coverage still comes out of the run itself. The cross-window
+  half is the only part that *cannot* come from the run, because a run opens one window's
+  folder and the answer lives outside it.
+* **The two halves differ in tone on purpose.** Orders missing from every window are the
+  documented reconciling class and are logged as counts; orders whose lines sit in an
+  earlier window's export get a warning naming the window, the file and the upload id,
+  because that is a sentence somebody can act on.
+* **"Not indexed" is never rendered as "all covered".** An empty result from a window whose
+  uploads predate the index looks identical to perfect coverage, so `indexed: false` is
+  carried through to the screen and says so. The UI also names the actual remedy — ask the
+  platform to re-export — and warns against the pooling anti-fix, because that is the
+  intuitive wrong answer and it over-counts 4.5×.
+
+The borrowing fix itself is still to come, behind `cross_window_order_backfill`.
+
+*The July measurement that will pre-state the fix's effect:* cross-window recoverable
+settlement is **942,869,056 VND** in `w2` from `w1` (exactly abbott 941,081,056 +
+similac 1,788,000), **1,390,095,674** in `s4` from `s3`, and 173,429 in `s2` from `s1`.
+`purite` and `mondelez kinh do` recover **nothing** — their `w2` order files are the
+byte-identical mis-pulls, so those lines were never exported and no code can recover
+them. That residual's remedy is a platform re-pull.
 
 ## M6 — browser-only: passwords, bucket input, a revamped config editor (2026-08-17)
 

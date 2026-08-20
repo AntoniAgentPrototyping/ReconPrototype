@@ -433,6 +433,8 @@ EXPECTED: dict[tuple[str, str], Role] = {
     ("DELETE", "/demo/seed"): Role.ADMIN,
 
     ("GET", "/windows/{platform}/{period}"): Role.VIEWER,
+    # Counts only, no money — the same read-only class as the window itself.
+    ("GET", "/windows/{platform}/{period}/order-coverage"): Role.VIEWER,
     # Declaring a partial roster relaxes a hard stop, so it is USER, not VIEWER —
     # and the reason it is not ADMIN is that the person assembling the window is
     # the one who knows why a store is absent. The control is the recorded reason,

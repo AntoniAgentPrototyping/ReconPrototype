@@ -197,6 +197,17 @@ export RECON_TEST_DATABASE_URL="postgresql://recon:<pw>@127.0.0.1:5432/postgres"
 "$PY" -m service.nfc_audit
 "$PY" -m service.nfc_audit --database-url "$RECON_DATABASE_URL"
 
+# Index which uploaded file holds which (store, order_id) — defect 2.12's
+# detection half. Every upload since 2026-08-19 is indexed at the door; this
+# clears the backlog of everything older. Identifiers and counts only.
+# It VERIFIES each object against the digest recorded at the door before reading
+# it, and refuses rather than indexes on a mismatch — so a non-zero exit means an
+# object store is serving bytes that did not pass the door, not that a sweep was
+# incomplete. An upload with no recorded digest (pre-M8/2.5) is skipped and named;
+# re-upload it to index it.
+"$PY" -m service.order_index --backfill
+"$PY" -m service.order_index --backfill --dry-run     # report, write nothing
+
 # The whole stack, including MinIO and the web app.
 cd deploy && cp .env.example .env && $EDITOR .env && docker compose up --build
 ```
@@ -266,7 +277,7 @@ A run without `--refs` now exits **2**, not 1. Variances and unchecked stores ar
 
 | Symptom | Cause and action |
 |---|---|
-| `PermissionError` on `finance_file.xlsx` | The file is open in Excel. Close it. Since M1 the failure is *reported* and the log is still written, but the write is not atomic — defect [1.7](08-KNOWN-DEFECTS.md#17-no-error-handling-in-the-production-driver--partly-fixed-m1-scheduled). |
+| `PermissionError` on `finance_file.xlsx` | The file is open in Excel. Close it and re-run. Since M1 the failure is *reported* and the log is still written; since 2026-08-19 the write also goes through a sibling `.tmp` + `os.replace`, so **the previous artifact survives intact** rather than being left truncated — but an Excel-held destination still fails, because `os.replace` raises `PermissionError` there too. Defect [1.7](08-KNOWN-DEFECTS.md#17-no-error-handling-in-the-production-driver--fixed). |
 | `Store-count check FAILED … Missing stores: [...]` | Either mis-staging, or genuinely new stores. Confirm with the business, then add to `expected_stores` / `stores_optional` / `store_aliases`. Never guess an alias — require order-ID-overlap evidence ([D7](06-DECISIONS.md#d7)). |
 | `missing required columns after header mapping` | The export renamed a header. Add the new spelling as a **parallel** entry in `column_maps` — keep the old one, several coexist by design. |
 | `Could not derive the store name from file name` | Extend the `store_from_filename` regex. Store names must never be truncated by a suffix alternative. |
@@ -278,6 +289,8 @@ A run without `--refs` now exits **2**, not 1. Variances and unchecked stores ar
 | A failed run says only *"the service itself hit an error"* | That is the deliberate answer for an infrastructure failure (M8/4.1). The type, message and traceback are in the **run log** on the same page. `service/failures.py` holds the mapping; an unrecognised exception gets a fixed sentence rather than its own text, because that text routinely contains a path or a connection string. |
 | A run reports **UNVERIFIED** | It ran clean and had nothing to check against. Supply the team's totals on the window page (*The team's figures*); the next run compares against them. Not a failure — exit code 2 means exactly this. |
 | `predates the M8/2.5 integrity check` on a run | The upload was recorded before `object_sha256` existed, so nothing can establish that the materialised file is the file that was uploaded. Re-upload the export. The digest is deliberately not recomputed from the store — that would certify the store against itself ([D52](06-DECISIONS.md#d52)). |
+| An upload is refused with `does not overlap <month>` | The file's settlement dates fall entirely outside the month of the window it was addressed to (M8, defect 2.3's residual). Either the window label is wrong, or it is a mis-pull carrying another period's block — July had two, and they cost 4,527,401,608 VND of understatement. Check the export, then re-upload to the right window. The check is INTERSECT, not contain, so a Lazada weekly lapping into the next month is accepted. Order exports are never date-checked: an order created in June legitimately settles in July. |
+| An upload is accepted with `settles from … while all its sibling(s) start at …` | The mis-pull *shape*, warned rather than refused: this file starts earlier than every other window-defining file already uploaded here. Verify the export. If it genuinely carries an earlier settlement block, declare the window's real range under `window_settlement_bounds` ([D9](06-DECISIONS.md#d9)) so the run drops the rows belonging to the earlier window — do **not** delete the file if it is the only source of its own window's rows (July's `w5` Curel income is exactly that case). |
 | `date cell(s) could not be read` | A date format changed. The dates are kept as blank, which means those rows drop out of the month grouping in the workbook — quiet, so this is a warning worth acting on. Check the export against `dayfirst`; `date_coercion: hard_stop` makes it stop instead ([D53](06-DECISIONS.md#d53)). |
 | `Parsing dates in %Y/%m/%d format when dayfirst=True` | The file's own format contradicts the contract. **Do not flip `dayfirst` on this alone** — it fires on real TikTok income today and those dates are correct. It means the setting is not what is deciding the parse. |
 | Golden digests changed unexpectedly | An edit to `src/` or `config/` moved a cell. That is the gate working. Find the cell with the differ before deciding whether the change was intended; if it was, re-baseline deliberately ([D26](06-DECISIONS.md#d26)). Never widen a tolerance to make it pass ([D17](06-DECISIONS.md#d17)). |

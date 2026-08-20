@@ -176,7 +176,7 @@ Delta was stated in advance and confirmed exactly: **workbook digests unchanged*
 
 *This paragraph said "still open" until 2026-08-19, after the fix had shipped.* Corrected here rather than deleted, because a register that quietly rewrites itself is not an audit trail.
 
-### 1.7 No error handling in the production driver — **PARTLY FIXED (M1)** `SCHEDULED`
+### 1.7 No error handling in the production driver — **FIXED**
 
 *Was:* `tools/full_run.py` had no `try/except`. A mid-stage failure propagated as a raw traceback and `log.write(...)` never ran — so a failed run produced **no audit log at all**, while a previous run's `finance_file.xlsx` sat there looking current.
 
@@ -261,9 +261,18 @@ Rewriting an export before the verified pipeline reads it is a real risk, and it
 
 *This entry described a staging endpoint that no longer exists.* `POST /uploads/{id}/stage` was **deleted in M6** — the bucket is the window, so there is no staging step, and `service/materialize.py` assembles the scratch tree at run time instead (`service/api.py:1094-1095`). An operator reading the old text would look for a route that is gone. The M6 shape is better than what this entry claimed; the claim was simply not updated.
 
-*Still open:* the mis-pull class itself. Uploading is possible; **deciding which window an export belongs to is still `tools/stage_exports.py`'s job**, and `POST /uploads` takes `period` as a form field validated for *character safety only* (`_safe_period`) — no settlement date is ever read. `stage_exports.py` has five settlement-date controls the api has none of, and one of them, `find_outliers`, detects exactly the mis-pull shape (a file whose settlement range starts earlier than its siblings'). The api has only the content-hash uniqueness constraint, which catches a byte-identical re-upload *into the same window* — and the defining property of a mis-pull is that it goes into a different one.
+*The residual — **FIXED (2026-08-19)**, [D57](06-DECISIONS.md#d57).* It read: *"deciding which window an export belongs to is still `tools/stage_exports.py`'s job", and `POST /uploads` takes `period` as a form field validated for character safety only (`_safe_period`) — no settlement date is ever read.* That was true, and expensive: **[2.12](#212-a-windows-order-export-does-not-cover-the-orders-it-settles--open-found-2026-08-19-july-month-end-tie) is the price tag** at 4,527,401,608 VND of July understatement, two instances of which are confirmed byte-identical mis-pulled order files.
 
-**This is materially more expensive than one sentence implies, and [2.12](#212-a-windows-order-export-does-not-cover-the-orders-it-settles--open-found-2026-08-19-july-month-end-tie) is the price tag:** 4,527,401,608 VND of July understatement, two instances of which are confirmed byte-identical mis-pulled order files. The fix is a port of `_read_dates` + `find_outliers` behind the upload endpoint, reusing code that already exists and is already measured against eight windows.
+The door now reads the settlement span out of the pass the sanitizer already makes — no second read, and dates parsed through `ingest.date_format` rather than a second spelling ([D54](06-DECISIONS.md#d54)). It does **three different things** with the answer, and the differences are the point:
+
+| Case | Answer | Why not something stricter |
+|---|---|---|
+| Window-defining file (income / weekly / daily) whose span does not **intersect** its window's month | **Refused** (422), before the object is stored and before the row is inserted | Intersect rather than contain: a Lazada weekly legitimately laps into the next month, and the 25th-to-month-end Daily week is a permanent fixture. Containment would refuse the healthy case every month |
+| A file starting earlier than **every** sibling already in the window | **Warned**, accepted | The first upload has no siblings; [D9](06-DECISIONS.md#d9) owns the hard control at run time; a door that refuses on suspicion at month end teaches operators to fight it |
+| Order exports | **Not checked** | An order created in June legitimately settles in July, and TikTok re-ships each store's prior-month pull in every weekly folder. Checking them would flag every healthy window — the same over-broad check staging had to narrow |
+| No parseable date column | **Reported as not checked** | A Lazada ledger carries no `statement_date`. Silence is a legitimate answer, and saying so beats guessing |
+
+What is **not** claimed: this catches a mis-pull *labelled for the right month*, which July's two were — `11. Order Purite 14.7.xlsx` is byte-identical to w1's file and both sit inside July. Those are caught by the cross-window order index instead ([D58](06-DECISIONS.md#d58)), and the lines they should have contained were never exported at all, so no control recovers them; a platform re-pull does.
 
 ### 2.4 Artifacts are local-filesystem only — **FIXED (M6, 2026-08-17)**
 
@@ -444,6 +453,42 @@ sha256 in `staging.json`, and `uploads.sha256` / `object_sha256` in Postgres.
 It drops 24,555 income rows, and **24,546 of 24,546 distinct order ids among them
 are already present in w1** — 100%, zero unique. The bound is correct and removing
 it would double-count.
+
+**Detection has landed; the fix has not (2026-08-19).** The status stays `OPEN` because
+no number has changed. What exists now:
+
+* `tieout.coverage_by_store` reports the unmatched share **per storefront** rather than
+  per window, as an `INFO` row naming the worst stores plus an `order_coverage`
+  exception sheet keyed on `("store",)`. It is deliberately **not** a failable check:
+  measured on `2026-05_w1` — a golden window that reproduces the team's figures — the
+  whole ~21% belongs to one storefront (Unilever Homecare 21.2%, Mars 0.0%), so any
+  threshold that would catch July's cells breaches on known-good data. The *level*
+  separates nothing; the month-over-month **change** is the signal, which is what the
+  store-keyed fingerprint makes queryable.
+* Shopee gained an `unmatched_orders` exception sheet. It had none — on the platform
+  holding the single worst July cell.
+* **The cross-window question can now be asked and is reported before a run.** Migration
+  `015_order_index.sql` records which uploaded file holds which `(store, order_id)`;
+  the door indexes every arrival and `service.order_index --backfill` clears the
+  backlog ([D58](06-DECISIONS.md#d58)). The worker logs it after materialisation,
+  `GET /windows/{platform}/{period}/order-coverage` serves it, and the window page
+  shows it. This is the check with **zero legitimate traffic** — the legitimate ~21%
+  class has lines in **no** window, so lines sitting in a *sibling* window's export is
+  not that class.
+* **"Not indexed" is reported as its own state.** An empty coverage result from a window
+  whose uploads predate the index is indistinguishable from perfect coverage, so it is
+  never rendered as "covered".
+
+**What is still open:** nothing borrows those lines yet, so no number has changed. That
+is C13/B1–B3 — one mechanism behind `cross_window_order_backfill: off|report|apply`,
+reporting in production before it ever moves money.
+
+Measured cross-window recoverable settlement, which pre-states what a fix can and cannot
+return: **942,869,056 VND** in `w2` from `w1` (exactly abbott 941,081,056 + similac
+1,788,000), **1,390,095,674** in `s4` from `s3`, 173,429 in `s2` from `s1`, and nothing in
+`w3`/`w4`/`w5`/`s3`. `purite` and `mondelez kinh do` recover **nothing** — their `w2`
+order files are the byte-identical mis-pulls named above, so the lines were never
+exported. No code closes that residual; a platform re-pull does.
 
 ## Part 2 — Defects found in the team's own files
 

@@ -28,9 +28,11 @@ wrong and the answer is to fix it — never to widen the comparison.
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import re
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -47,10 +49,105 @@ KNOWN_PII = frozenset({
 
 SAFE_FILENAME = re.compile(r"^[A-Za-z0-9 ()._+\-À-ỹ]{1,180}$")
 
+# The kinds whose settlement dates DEFINE which window a file belongs to.
+# `orders` is deliberately absent: an order created in June can settle in July, so
+# every healthy TikTok folder carries order files that predate its window — and
+# TikTok re-ships each store's prior-month pull in *every* weekly folder because the
+# cross-period stitch needs it. Date-checking an order export would flag the healthy
+# case. `tools/stage_exports.py` draws the same line with its own spelling of these
+# names (`("income", "Weekly", "Daily")`); the service's kind vocabulary is
+# lowercase (`service/naming.py:KINDS_BY_PLATFORM`), and neither module may import
+# the other, so the two lists are stated twice on purpose and this comment is the
+# link between them.
+WINDOW_DEFINING = ("income", "weekly", "daily")
+
 
 class UploadRejected(ValueError):
     """The file cannot be accepted. Always names the reason — a rejected upload
     at month end is an operator's problem to solve, not a mystery."""
+
+
+def month_of(period: str) -> str:
+    """The `YYYY-MM` a window label belongs to. `2026-07_w2` -> `2026-07`.
+
+    The same split `M5Repository.month_windows` keys the month-end master on, so a
+    window that the master counts in July cannot be a window this door reads as
+    belonging to a different month.
+    """
+    return period.split("_", 1)[0]
+
+
+def _month_bounds(month: str) -> "tuple[date, date] | None":
+    try:
+        year, mon = (int(part) for part in month.split("-", 1))
+        first = date(year, mon, 1)
+    except (ValueError, TypeError):
+        return None
+    last_day = calendar.monthrange(year, mon)[1]
+    return first, date(year, mon, last_day)
+
+
+def check_span(period: str, kind: str, *, settles_from: "date | None",
+               settles_to: "date | None",
+               sibling_starts: "Sequence[date]" = ()) -> tuple[str | None, str | None]:
+    """`(refusal, warning)` for one file's settlement span. At most one is set.
+
+    The api validated `period` for **character safety only** — a file could be
+    uploaded to any window and nothing looked at what it settled.
+    `tools/stage_exports.py` has derived the window from settlement dates since
+    M2.5, and the api had none of that ([defect 2.3](docs/08-KNOWN-DEFECTS.md)'s
+    residual). July's two mis-pulls are what that costs: an order export labelled
+    for the later window, byte-identical to the earlier one, worth
+    4,527,401,608 VND of understatement across the month once its knock-on reached
+    the tie.
+
+    Three rules, and the differences between them are the design:
+
+    * **A window-defining file that does not INTERSECT its window's month is
+      refused.** Intersect, not contain: a Lazada weekly legitimately laps into the
+      next month (the 25th-to-month-end Daily week is a permanent fixture), so
+      `29 Jul – 4 Aug` in `2026-07_l5` is healthy and must not be refused.
+    * **The mis-pull shape WARNS and never refuses.** A file starting earlier than
+      its siblings is `find_outliers`' signal, but the first upload into a window
+      has no siblings, [D9](docs/06-DECISIONS.md#d9)'s
+      `window_settlement_bounds` owns the hard control at run time, and a false
+      refusal at month end teaches operators to fight the door rather than read it.
+    * **An unknown span is not checked**, and the caller says so rather than
+      guessing — the same posture `ingest.date_format` takes when no format is
+      configured. A file kind with no date column (a Lazada ledger has no
+      `statement_date`) is a legitimate silence, not a failure.
+    """
+    if kind not in WINDOW_DEFINING or settles_from is None or settles_to is None:
+        return None, None
+
+    bounds = _month_bounds(month_of(period))
+    if bounds is None:
+        return None, None
+    month_start, month_end = bounds
+
+    if settles_from > month_end or settles_to < month_start:
+        return (f"this file settles {settles_from}..{settles_to}, which does not "
+                f"overlap {month_of(period)} at all — the month {period!r} belongs "
+                f"to. Either it is labelled for the wrong window, or it is a "
+                f"mis-pull carrying another period's settlement block. Check the "
+                f"export before staging it; if the span is genuinely right, the "
+                f"window label is what needs correcting."), None
+
+    known = [s for s in sibling_starts if s is not None]
+    # Earlier than EVERY sibling, not merely earlier than the modal start.
+    # `find_outliers` compares against the mode, which needs an arbitrary tie-break
+    # when starts are evenly split; at the door there is no reviewer watching a plan,
+    # so the stricter unanimous test is used and an ambiguous case stays silent
+    # rather than crying wolf on the first two files of a window.
+    if known and all(settles_from < s for s in known):
+        return None, (
+            f"settles from {settles_from} while all {len(known)} of its "
+            f"{kind} sibling(s) in {period} start at {min(known)} or later — the shape of "
+            f"a mis-pull carrying an earlier settlement block. This is a warning, not "
+            f"a refusal: verify the export, and if it is confirmed, declare the "
+            f"window's real range under window_settlement_bounds (D9) so the run "
+            f"drops the rows that belong to the earlier window.")
+    return None, None
 
 
 @dataclass
@@ -311,6 +408,25 @@ def _identify(frame, colmap: dict, *, settings: dict, platform: str,
         if len(good):
             first, last = good.min().date(), good.max().date()
     return order_ids, first, last
+
+
+def identify_file(source: Path, colmap: dict, *, settings: dict, platform: str,
+                  kind: str) -> tuple[list[str], "date | None", "date | None"]:
+    """Order ids and settlement span from a file already in the object store.
+
+    The backfill path (`service/order_index.py`), for uploads that arrived before the
+    door started indexing. It reads through `read_source` — the same function the door
+    reads an *arriving* export with — so a backfilled file and a freshly uploaded one
+    are identified by one code path rather than two that can drift apart. That works
+    because the stored copy is the sanitized rewrite, which deliberately preserves the
+    source's shape (band rows, junk rows, sheet naming) so `read_parts` still applies
+    to it; anything that can read the original can read the copy.
+    """
+    frame, _sheets, _header_row = read_source(
+        source, settings=settings, platform=platform, kind=kind)
+    frame.columns = [unicodedata.normalize("NFC", str(c)).strip()
+                     for c in frame.columns]
+    return _identify(frame, colmap, settings=settings, platform=platform, kind=kind)
 
 
 # The pre-M6 name. Kept so a reader grepping either spelling lands in one place;

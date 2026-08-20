@@ -497,3 +497,27 @@ The master is rebuilt every time a window finishes, so for most of the month it 
 A partial master is reported as `UNVERIFIED`, not `VARIANCE`. Nothing disagrees — it is a master that does not yet cover the month, and `UNVERIFIED` already means "completed, but nothing corroborated this". Calling it a variance would put a number-disagreement verdict on a coverage fact.
 
 The missing list is only possible because the window list comes from the database ([task 3.3](../docs/14-PRODUCTION-READINESS.md)): `month_windows` unions runs, roster declarations and uploads, so a window whose files arrived but which nobody ran is *known* and therefore reportable. The hardcoded `WINDOWS` dict it replaced could not have reported a missing window, because a window it had never heard of — `s2x`, `s3k` — was indistinguishable from one that does not exist.
+
+### D57 — The upload door reads settlement dates, and treats the three cases differently {#d57}
+`POST /uploads` validated `period` for character safety and nothing else, so a file could be uploaded to any window and nothing looked at what it settled. `tools/stage_exports.py` has derived the window from settlement dates since M2.5; the api had none of it ([defect 2.3](08-KNOWN-DEFECTS.md)'s residual). July's two mis-pulls are the bill — an order export labelled for the later window, byte-identical to the earlier one, inside a month that came up 4,527,401,608 VND short.
+
+The door now reads `settles_from..settles_to` out of the pass the sanitizer already makes, and does **three different things** with the answer:
+
+*A window-defining file that does not INTERSECT its window's month is refused* (422), before the object store is written and before the row is inserted — a file this window should not contain must leave no trace that it might. **Intersect, not contain**: Lazada's 25th-to-month-end Daily week is a permanent monthly fixture and its weeklies lap the boundary, so a containment test would refuse the healthy case every month, which is how a control gets switched off.
+
+*The mis-pull shape WARNS and never refuses.* A file starting earlier than every sibling is `find_outliers`' signal, but the first upload into a window has no siblings, [D9](#d9)'s `window_settlement_bounds` owns the hard control at run time, and a door that refuses on suspicion at month end teaches operators to fight it. It is also stricter than `find_outliers`: earlier than *every* sibling rather than earlier than the modal start, because the mode needs an arbitrary tie-break on an even split and nobody is reviewing a plan at the door.
+
+*Order exports are not date-checked at all.* An order created in June legitimately settles in July, and TikTok re-ships each store's prior-month pull in every weekly folder because the cross-period stitch needs it. Checking them would flag every healthy window in the tree — the same over-broad check that had to be narrowed in staging.
+
+A file whose date column is absent or unparseable is reported as *not checked* rather than guessed at, the posture `ingest.date_format` already takes. Dates are parsed through that accessor and never a second spelling ([D54](#d54)).
+
+### D58 — The database may know where every number came from; it may never compute one {#d58}
+Defect 2.12 needed a question answered that nothing could ask: *does some OTHER window's order export hold this order's SKU lines?* `uploads_for_window` is hard-keyed to one `(platform, period)` and the stored objects are opaque blobs. Migration `015_order_index.sql` adds `upload_order_index(upload_id, store, order_id)`, and that is the **only** new question the database learns to answer.
+
+It was proposed as the seed of moving the reconciliation into SQL, and that half is deliberately **rejected**. The money math in `src/` was ported formula-by-formula from the team's own workbooks and verified row-by-row against their output; that provenance is the project's entire value ([D12](#d12)). A SQL reimplementation would be a second, unverified implementation of the path that produces the invoice — [D31](#d31)'s failure, the same reason the worker adds no compute and does not own a writer. So the rule is stated as a boundary rather than left to judgement: **every column in this table is an identifier or a count. No amount, no rate, no total.** `tests/service/test_order_index.py` asserts the table's columns structurally, so a future migration adding an amount fails a test rather than a review.
+
+*Why file-level dedupe did not need building.* The question "have these exact bytes arrived before" was already answered: `uploads.sha256` (the original), `object_sha256` (the sanitized copy, [D52](#d52)) and per-file digests in `staging.json` on the CLI path. The expensive-sounding half of the proposal was already paid for.
+
+*Why the backfill is not the [D26](#d26) trap.* Indexing reads bytes out of the store, so it must first establish they are the bytes the door accepted. The expected digest was recorded independently, at the door; the backfill **checks** it and never derives it, before reading a single order id. A NULL digest is skipped and named, a mismatch is refused and exits non-zero. Nothing the index holds is ever an integrity reference for anything else — it is derived, rebuildable, reporting-only data.
+
+*Exposure.* `store` and `order_id` are already persisted per row in `run_exceptions` fingerprints and named in `run_log_lines`, so this is the exposure accepted in [defect 2.6](08-KNOWN-DEFECTS.md), not a new one. No customer field, no cell value.

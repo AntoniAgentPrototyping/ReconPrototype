@@ -99,6 +99,10 @@ def repo(pool):
         # missing table here is an immediate hard error in every DB test.
         cur.execute("truncate jobs, users, user_sessions, config_versions, "
                     "config_proposals, uploads restart identity cascade")
+        # `upload_order_index` (migration 015) needs no entry: it references
+        # uploads(id) `on delete cascade`, so the truncate above takes its rows with
+        # it. Recorded rather than left to be rediscovered — this list is where
+        # someone looks when state leaks between tests.
         # Per-window state. `window_references` was added in M8/2.1 and its absence
         # here was caught immediately and unmistakably: a test in another file
         # supplied reference totals for the smoke window, and three worker tests

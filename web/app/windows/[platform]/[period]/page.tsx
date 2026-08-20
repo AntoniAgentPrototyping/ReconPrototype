@@ -5,6 +5,7 @@ import {
   ApiError,
   whoami,
   KINDS_BY_PLATFORM,
+  type OrderCoverage,
   type WindowDetail,
   type WindowPlan,
 } from "@/lib/api";
@@ -74,6 +75,18 @@ export default async function WindowPage({
     throw error;
   }
 
+  // Fetched separately and tolerantly: a deployment with no order index answers
+  // 501, and a coverage panel failing must not take the whole window page with it.
+  // The page's job is to let someone add files; this is advice on top of that.
+  let coverage: OrderCoverage | null = null;
+  try {
+    coverage = await api<OrderCoverage>(
+      `/windows/${encodeURIComponent(platform)}/${encodeURIComponent(period)}/order-coverage`,
+    );
+  } catch {
+    coverage = null;
+  }
+
   const kinds = KINDS_BY_PLATFORM[platform] ?? [];
   const total = kinds.reduce((n, k) => n + (plan.files[k]?.length ?? 0), 0);
   const canEdit = me.role !== "recon.viewer";
@@ -126,6 +139,44 @@ export default async function WindowPage({
           {vi
             ? "Chạy sẽ dừng ở đây — hãy thêm cửa hàng vào quy tắc thay vì tìm cách đi vòng."
             : "A run will stop on this — add them in the rules rather than working around it."}
+        </div>
+      )}
+
+      {coverage && coverage.cross_window.length > 0 && (
+        <div className="notice bad">
+          <strong>
+            {vi
+              ? "Có đơn được đối soát ở kỳ này nhưng dòng hàng lại nằm ở file của kỳ trước."
+              : "Some orders settled here have their line items in an earlier period's file."}
+          </strong>{" "}
+          {vi
+            ? "Nếu chạy như hiện tại, doanh thu của những đơn này sẽ không vào hoá đơn."
+            : "Run as it stands, the revenue for those orders will not reach the invoice."}
+          <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+            {coverage.cross_window.map((row) => (
+              <li key={`${row.store}-${row.upload_id}`}>
+                <span className="mono">{row.store}</span>
+                {vi
+                  ? ` — ${row.orders.toLocaleString("vi-VN")} đơn nằm trong `
+                  : ` — ${row.orders.toLocaleString("en-US")} order${row.orders === 1 ? "" : "s"} in `}
+                <span className="mono">{row.holder_period}</span> (
+                <span className="mono">{row.filename}</span>)
+              </li>
+            ))}
+          </ul>
+          <div className="muted small" style={{ marginTop: 6 }}>
+            {vi
+              ? "Cách xử lý là xin sàn xuất lại file đơn hàng cho kỳ này, chứ không phải gộp file của nhiều kỳ — gộp sẽ tính trùng."
+              : "The fix is asking the platform to re-export this period's order file, not combining several periods' files — combining double-counts."}
+          </div>
+        </div>
+      )}
+
+      {coverage && !coverage.indexed && coverage.unindexed_files.length > 0 && (
+        <div className="notice">
+          {vi
+            ? `${coverage.unindexed_files.length} file ở kỳ này chưa được lập chỉ mục, nên chưa thể kiểm tra xem đơn được đối soát có đủ dòng hàng hay không. Đây không phải là “đã kiểm tra và không có vấn đề”.`
+            : `${coverage.unindexed_files.length} file(s) here are not indexed yet, so whether the settled orders have their line items has not been checked. This is not the same as “checked and fine”.`}
         </div>
       )}
 

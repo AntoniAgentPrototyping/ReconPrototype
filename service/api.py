@@ -1018,6 +1018,24 @@ def create_app(repo: Repository, store: ArtifactStore, *,
         try:
             result = upload_lib.sanitize(incoming, sanitized_path, settings=domain,
                                          platform=platform, kind=kind)
+
+            # Does this file belong to the window it was addressed to? Until now
+            # `period` was validated for character safety and nothing else, so a
+            # mis-labelled export was discovered at the month-end tie rather than
+            # at the door (defect 2.3's residual). Refusal happens BEFORE the
+            # object store is written and before the row is inserted: a file this
+            # window should not contain must leave no trace that it might.
+            # The sibling query only runs for the kinds that can use it. A TikTok
+            # window is mostly order files, and they are never date-checked.
+            siblings = (repo.upload_spans(platform, period, kind)
+                        if kind in upload_lib.WINDOW_DEFINING else [])
+            refusal, span_warning = upload_lib.check_span(
+                period, kind,
+                settles_from=result.settles_from, settles_to=result.settles_to,
+                sibling_starts=[r["settles_from"] for r in siblings])
+            if refusal:
+                raise HTTPException(422, f"{filename}: {refusal}")
+
             sanitized_bytes = sanitized_path.read_bytes()
             ref = uploads_objects.put(key, sanitized_bytes)
             record = repo.record_upload(
@@ -1040,6 +1058,25 @@ def create_app(repo: Repository, store: ArtifactStore, *,
             incoming.unlink(missing_ok=True)
             sanitized_path.unlink(missing_ok=True)
 
+        # Which (store, order_id) pairs this file holds — the index that lets
+        # "does some OTHER window's order file cover this order?" be asked at all
+        # (defect 2.12; migration 015). Deliberately AFTER the upload is durable
+        # and outside its failure path: the index is derived, rebuildable data
+        # feeding a report, so losing a write here must degrade that report and
+        # never fail an upload whose bytes are already safely stored. It is
+        # reported rather than swallowed, because `service/order_index.py
+        # --backfill` is how it gets fixed and nobody runs it for a silent gap.
+        indexed: int | None = None
+        index_note = ""
+        try:
+            indexed = repo.record_order_index(
+                record["id"], canonical, result.order_ids,
+                settles_from=result.settles_from, settles_to=result.settles_to)
+        except Exception as exc:                      # noqa: BLE001 — see above
+            index_note = (f"stored, but its order index was not written ({exc}). "
+                          f"Cross-window order coverage will under-report this "
+                          f"file until `service.order_index --backfill` runs.")
+
         return {**payload(record), "sheet": result.sheet, "rows": result.rows,
                 "kept_columns": result.kept_columns,
                 "dropped_known_pii": result.dropped_known_pii,
@@ -1054,7 +1091,19 @@ def create_app(repo: Repository, store: ArtifactStore, *,
                     f"will not check it either. Until a roster exists, a typo here "
                     f"invoices under a storefront nobody expects."),
                 # Greyed in the UI: the real ordinal is decided at run time.
-                "uniform_name_preview": naming.preview_name(platform, kind, canonical)}
+                "uniform_name_preview": naming.preview_name(platform, kind, canonical),
+                # The settlement span this file declares, and what was done with it.
+                # `settles_checked: false` means the file carries no date column for
+                # this platform/kind — reported, never guessed at.
+                "settles_from": (result.settles_from.isoformat()
+                                 if result.settles_from else None),
+                "settles_to": (result.settles_to.isoformat()
+                               if result.settles_to else None),
+                "settles_checked": kind in upload_lib.WINDOW_DEFINING
+                                   and result.settles_from is not None,
+                "span_warning": span_warning or "",
+                "order_ids_indexed": indexed,
+                "index_note": index_note}
 
     @app.get("/uploads")
     def list_uploads(platform: str | None = None, period: str | None = None,
@@ -1182,6 +1231,45 @@ def create_app(repo: Repository, store: ArtifactStore, *,
         return sampledata.unseed(repo, settings)
 
     # -- windows: the roster declaration ------------------------------------
+
+    @app.get("/windows/{platform}/{period}/order-coverage")
+    def get_order_coverage(platform: str, period: str,
+                           principal: Principal = viewer) -> dict:
+        """Which settled orders this window's own order exports do not cover.
+
+        Read-only and **counts only** — no amount is computed or returned here. The
+        authoritative per-store coverage comes out of the run itself
+        (`tieout.coverage_by_store`, from the frames it reads); this asks the same
+        question of the *uploads*, so the answer exists before anything is queued.
+
+        `cross_window` is the half that has no legitimate traffic and is therefore the
+        one worth acting on: an order whose lines sit in an EARLIER window's export is
+        defect 2.12, where the ~21% reconciling class has lines in no window at all.
+        `indexed` says whether the question could be answered at all — a window whose
+        uploads predate the index answers empty, which must not read as "all covered"
+        (`service.order_index --backfill` is the fix).
+        """
+        if platform not in PLATFORMS:
+            raise HTTPException(422, f"unknown platform {platform!r}")
+        _safe_period(period)
+        if not hasattr(repo, "order_coverage"):
+            raise HTTPException(501, "this deployment has no order index")
+
+        rows = repo.order_coverage(platform, period)
+        cross = repo.cross_window_order_holders(platform, period)
+        uploads = repo.uploads_for_window(platform, period)
+        indexable = [u for u in uploads if u.get("state") in ("stored", "consumed")]
+        unindexed = [u["filename"] for u in indexable if not u.get("indexed_at")]
+        return {
+            "platform": platform, "period": period,
+            "stores": [{"store": r["store"], "income_orders": r["income_orders"],
+                        "unmatched_orders": r["unmatched_orders"]} for r in rows],
+            "cross_window": [{"store": r["store"], "holder_period": r["holder_period"],
+                              "filename": r["filename"], "upload_id": r["upload_id"],
+                              "orders": r["orders"]} for r in cross],
+            "indexed": not unindexed and bool(indexable),
+            "unindexed_files": unindexed,
+        }
 
     @app.get("/windows/{platform}/{period}")
     def get_window(platform: str, period: str, principal: Principal = viewer) -> dict:

@@ -335,6 +335,32 @@ export type WindowDetail = {
   references_summary_vi: string;
 };
 
+/**
+ * Which settled orders a window's own order exports do not cover.
+ *
+ * Counts only — no money crosses this boundary. `cross_window` is the half worth
+ * acting on: an order whose lines sit in an EARLIER window's export is the shape
+ * that understated July by 4,527,401,608 VND, while orders missing from every
+ * window are the documented reconciling class and expected to have traffic.
+ *
+ * `indexed: false` means the question could not be answered for this window, which
+ * must never be shown as "everything is covered".
+ */
+export type OrderCoverage = {
+  platform: string;
+  period: string;
+  stores: { store: string; income_orders: number; unmatched_orders: number }[];
+  cross_window: {
+    store: string;
+    holder_period: string;
+    filename: string;
+    upload_id: number;
+    orders: number;
+  }[];
+  indexed: boolean;
+  unindexed_files: string[];
+};
+
 /** The file kinds each platform has. Mirrors service/naming.KINDS_BY_PLATFORM;
  *  the API returns the pair-checked error if this ever drifts. */
 export const KINDS_BY_PLATFORM: Record<string, string[]> = {

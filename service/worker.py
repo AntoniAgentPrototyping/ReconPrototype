@@ -158,6 +158,7 @@ class Worker:
             # have its filenames parsed by May's store_from_filename, or a re-run
             # reads the same files as different stores (service/materialize.py).
             mat = self._materialize(job, scratch, resolved, log)
+            self._report_order_coverage(job, log)
             partial = self._roster_declared_partial(job, log)
             refs = self._references(job, log)
 
@@ -364,6 +365,55 @@ class Worker:
         return materialize_lib.materialize_window(
             self.repo, self.settings, job.platform, job.period,
             scratch=scratch, log=log, domain_settings=domain)
+
+    def _report_order_coverage(self, job: Job, log) -> None:
+        """Say, before the run, which settled orders this window's own exports miss.
+
+        **Log lines only.** The worker adds no compute to the money path
+        ([D31](../docs/06-DECISIONS.md#d31)); the authoritative per-store coverage is
+        computed inside the run by `tieout.coverage_by_store` from the frames it
+        actually reads. This is the same question asked of the *uploads*, which is the
+        only place the CROSS-window half can be answered — an order's lines living in a
+        sibling window's export is invisible to a run that only ever opens its own
+        window's folder (defect 2.12).
+
+        The two halves are deliberately different in tone. Orders missing from this
+        window's own export are **expected to have traffic** — the documented ~21%
+        reconciling class, which the team's own VLOOKUP drops too — so they are
+        reported as counts. Orders whose lines sit in an *earlier* window's export are
+        the shape with **zero** legitimate traffic, so each one names the window, the
+        file and the upload id: that is a sentence somebody can act on.
+
+        Guarded on the repository, like `_roster_declared_partial`: an M4 repository has
+        neither method and a window with no indexed uploads answers empty, so this is
+        silent rather than broken in both cases. Never fatal — a report that cannot be
+        produced must not stop a settlement run.
+        """
+        if not (hasattr(self.repo, "order_coverage")
+                and hasattr(self.repo, "cross_window_order_holders")):
+            return
+        try:
+            coverage = self.repo.order_coverage(job.platform, job.period)
+            holders = self.repo.cross_window_order_holders(job.platform, job.period)
+        except Exception as exc:                            # noqa: BLE001
+            log.warn(f"order coverage not reported: {exc}")
+            return
+
+        for row in coverage:
+            if row.get("unmatched_orders"):
+                # `add`, not `warn`: this class is expected to have traffic, and a
+                # warning per store would make the counter meaningless.
+                log.add(
+                    f"order coverage {row['store']}: {row['unmatched_orders']:,} of "
+                    f"{row['income_orders']:,} settled orders have no lines in this "
+                    f"window's own order export")
+        for row in holders:
+            log.warn(
+                f"CROSS-WINDOW ORDERS {row['store']}: {row['orders']:,} settled "
+                f"order(s) have their lines in {row['holder_period']} "
+                f"({row['filename']}, upload {row['upload_id']}) and not in this "
+                f"window. This window's export does not cover what it settles "
+                f"(defect 2.12); the revenue leaves the invoice as unmatched.")
 
     def _roster_declared_partial(self, job: Job, log) -> bool:
         """Whether this WINDOW was declared partial — not whether this run asked.
