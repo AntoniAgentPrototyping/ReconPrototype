@@ -179,6 +179,23 @@ export const WORDS: Record<string, Entry> = {
   remove: { en: "Remove", vi: "Xoá" },
   confirm: { en: "Confirm", vi: "Xác nhận" },
   cancel: { en: "Cancel", vi: "Huỷ" },
+  // -- correcting the store before upload (D7) -----------------------------
+  // The control `POST /uploads` has accepted since M6 and no screen ever offered.
+  // "Read from the file name" rather than "derived": the operator's mental model is
+  // the file name, because that is the only thing they can change.
+  storeFromName: { en: "Store read from the file name", vi: "Cửa hàng đọc từ tên file" },
+  storeCorrect: { en: "Correct it", vi: "Sửa lại" },
+  storeKeepDerived: { en: "Keep what the file name says", vi: "Giữ theo tên file" },
+  storeChecking: { en: "Reading the file names…", vi: "Đang đọc tên file…" },
+  storeOnRoster: { en: "on the store list", vi: "có trong danh sách" },
+  storeNotOnRoster: { en: "not on the store list", vi: "không có trong danh sách" },
+  storeNotChecked: { en: "store list not set for this platform", vi: "sàn này chưa có danh sách cửa hàng" },
+  storeUnreadable: { en: "the file name cannot be read", vi: "không đọc được tên file" },
+  storeCorrectionHint: {
+    en: "The store comes from the file name, and it decides whose revenue this file becomes. Check each one before uploading; correcting it here is faster than renaming the file.",
+    vi: "Cửa hàng được lấy từ tên file, và nó quyết định doanh thu này thuộc về ai. Kiểm tra từng file trước khi tải lên; sửa ở đây nhanh hơn đổi tên file.",
+  },
+
   teamFigures: { en: "The team's figures", vi: "Số của team" },
   saveFigures: { en: "Save figures", vi: "Lưu số" },
   withdraw: { en: "Withdraw", vi: "Rút lại" },

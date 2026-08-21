@@ -850,3 +850,87 @@ def test_the_plan_flags_a_declared_absent_store_that_now_has_files(
                              params={"platform": "lazada", "period": WINDOW}).json()
     assert plan["declared_absent_present"] == ["KAO"], \
         "the declaration no longer describes the window, and the page must say so"
+
+
+# ---------------------------------------------------------------------------
+# The store preview (D7) — the half of "correct the store" that was missing
+# ---------------------------------------------------------------------------
+
+def test_the_preview_derives_a_store_from_a_name_with_no_bytes_sent(upload_client):
+    """`POST /uploads` has accepted a corrected `store` since M6 and the browser
+    has posted it per file for just as long, but nothing ever rendered an input
+    (register D7). This is the question the form now asks first — and it asks it
+    with filenames only, because a 184 MB export uploaded to the wrong storefront
+    is exactly the cost the preview exists to avoid."""
+    r = upload_client.post("/uploads/store-preview",
+                           json={"platform": "lazada", "period": WINDOW,
+                                 "kind": "weekly",
+                                 "filenames": ["2_KAO.xlsx", "1_TestStore.xlsx"]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [f["filename"] for f in body["files"]] == ["2_KAO.xlsx", "1_TestStore.xlsx"]
+    assert [f["store"] for f in body["files"]] == ["KAO", "TestStore"]
+    # Lazada has no roster (register A6), so nothing checked the storefront and the
+    # answer says so rather than reporting it as wrong.
+    assert body["roster_checked"] is False
+    assert all(f["on_roster"] is None for f in body["files"])
+    assert all(f["problem"] is None for f in body["files"])
+    assert body["files"][0]["uniform_name"], "the operator should see the new name"
+
+
+def test_the_preview_names_a_filename_the_pipeline_cannot_read(upload_client):
+    """The refusal an operator used to discover after the transfer finished. The
+    sentence is the same one `POST /uploads` answers with, which is the point: the
+    preview must not have its own opinion about what is acceptable."""
+    r = upload_client.post("/uploads/store-preview",
+                           json={"platform": "lazada", "period": WINDOW,
+                                 "kind": "weekly", "filenames": ["....xlsx"]})
+    assert r.status_code == 200, r.text
+    row = r.json()["files"][0]
+    assert row["store"] is None
+    assert row["problem"], "an unreadable name must say why"
+
+
+def test_the_preview_reports_a_store_the_roster_does_not_name(upload_client):
+    """`on_roster: false` rather than a refusal, because the fix is a correction in
+    the form or a config proposal — and a preview that 422s cannot show the other
+    files' answers, which is the whole batch it was asked about.
+
+    The TikTok filename needs its leading index (`1. order …`): that is the
+    platform's own pattern, and a name without it is the *unreadable* case, which
+    the previous test covers. Worth stating because writing this test without the
+    index is how the two cases get confused.
+    """
+    r = upload_client.post(
+        "/uploads/store-preview",
+        json={"platform": "tiktok", "period": "2026-05_w1", "kind": "orders",
+              "filenames": ["1. order Definitely Not A Store.xlsx",
+                            "2. order Mars.xlsx"]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["roster_checked"] is True
+    assert body["expected_stores"], "the picklist needs options"
+
+    unknown, known = body["files"]
+    assert unknown["store"] == "Definitely Not A Store"
+    assert unknown["on_roster"] is False
+    assert unknown["problem"] is None, "off-roster is a state, not a naming failure"
+    assert known["on_roster"] is True and known["store"] == "Mars"
+
+
+def test_a_viewer_cannot_ask_for_a_store_preview(make_client):
+    """It changes nothing, so VIEWER would be defensible — and it is a step in
+    uploading, which a viewer cannot do. Matching `POST /uploads` keeps "who may
+    upload" one answer instead of two."""
+    viewer = make_client("recon.viewer")
+    r = viewer.post("/uploads/store-preview",
+                    json={"platform": "lazada", "period": WINDOW,
+                          "kind": "weekly", "filenames": ["2_KAO.xlsx"]})
+    assert r.status_code == 403, r.text
+
+
+def test_the_preview_refuses_an_incoherent_platform_and_kind(upload_client):
+    r = upload_client.post("/uploads/store-preview",
+                           json={"platform": "lazada", "period": WINDOW,
+                                 "kind": "orders", "filenames": ["2_KAO.xlsx"]})
+    assert r.status_code == 422, r.text

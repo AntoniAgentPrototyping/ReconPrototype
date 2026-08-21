@@ -280,6 +280,33 @@ export type PlannedFile = {
   state?: string;
 };
 
+/** One filename's answer from `POST /uploads/store-preview` (D7). */
+export type StorePreviewFile = {
+  filename: string;
+  /** The store the pipeline's own rule reads out of the name, or null when it
+   *  cannot read one — in which case `problem` says so. */
+  store: string | null;
+  /** After store aliases. This is what the file will be renamed to. */
+  canonical: string | null;
+  /** true / false against the window's roster, or **null when nothing checked
+   *  it** — Lazada has no roster (register A6), and "unchecked" must not render
+   *  as "wrong". */
+  on_roster: boolean | null;
+  uniform_name: string | null;
+  problem: string | null;
+};
+
+export type StorePreview = {
+  platform: string;
+  period: string;
+  kind: string;
+  /** The correction picklist's options: the roster of the config THIS window
+   *  runs under, which for a pinned window is not today's. */
+  expected_stores: string[];
+  roster_checked: boolean;
+  files: StorePreviewFile[];
+};
+
 export type RosterDeclaration = {
   platform: string;
   period: string;

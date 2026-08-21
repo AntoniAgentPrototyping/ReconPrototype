@@ -437,6 +437,10 @@ EXPECTED: dict[tuple[str, str], Role] = {
     ("GET", "/uploads"): Role.VIEWER,
     # A pure read: a viewer may watch a window fill up and cannot alter it.
     ("GET", "/uploads/plan"): Role.VIEWER,
+    # D7: derives the store from a filename before the bytes are sent. It changes
+    # nothing, but it is a step in uploading and a viewer cannot upload — so USER,
+    # matching `POST /uploads` rather than the plan's VIEWER.
+    ("POST", "/uploads/store-preview"): Role.USER,
     ("POST", "/uploads/{upload_id}/reject"): Role.USER,
     # `POST /uploads/{id}/stage` is deleted (M6, workstream B) — the bucket is the
     # window, so there is nothing to move. test_there_is_no_stage_route pins that.

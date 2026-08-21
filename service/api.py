@@ -195,6 +195,30 @@ class RosterDeclarationRequest(BaseModel):
         return _safe_period(v)
 
 
+class StorePreviewRequest(BaseModel):
+    """Which store each of these filenames belongs to, before any bytes are sent.
+
+    **Names only, deliberately.** The whole point is to ask the question while the
+    files are still sitting in a folder-picker: a 184 MB export uploaded to the
+    wrong storefront costs a reject, a re-upload and an explanation, and the
+    operator's only recourse before this existed was to rename the file on disk
+    (register D7). Sending the bytes to find out would make the preview cost the
+    thing it exists to save.
+    """
+
+    platform: Literal["tiktok", "shopee", "lazada"]
+    period: str = Field(min_length=1, max_length=64)
+    kind: Literal["orders", "income", "weekly", "daily"]
+    # `MAX_FILES` per window is the pipeline's own bound; a real window is 3-39
+    # files and the batch upload form posts them together.
+    filenames: list[str] = Field(min_length=1, max_length=200)
+
+    @field_validator("period")
+    @classmethod
+    def _check_period(cls, v: str) -> str:
+        return _safe_period(v)
+
+
 class ReferencesRequest(BaseModel):
     """The team's own totals for a window, as named fields (A3).
 
@@ -1253,6 +1277,85 @@ def create_app(repo: Repository, store: ArtifactStore, *,
                      state: str | None = None, principal: Principal = viewer) -> dict:
         return {"uploads": [payload(u) for u in
                             repo.list_uploads(platform=platform, period=period, state=state)]}
+
+    @app.post("/uploads/store-preview")
+    def upload_store_preview(body: StorePreviewRequest,
+                             principal: Principal = user) -> dict:
+        """Which store each filename resolves to, before the bytes are sent (D7).
+
+        `POST /uploads` has accepted a `store` field since M6 — to confirm or
+        correct what the filename regex found — and `web/app/actions.ts` has posted
+        it per file for just as long. **Nothing ever rendered an input**, so the
+        documented affordance was unreachable and an operator whose filename parsed
+        to the wrong storefront had one recourse: rename the file on disk. This is
+        the missing half.
+
+        Three properties worth stating, because each is a thing this route
+        deliberately does not do:
+
+        1. **It resolves through `naming.store_of`, the pipeline's own rule** — not
+           a copy, and emphatically not a regex in the browser. Store identity comes
+           from the filename (`06-DECISIONS.md#d6`), and a second implementation of
+           it near the upload form is the most invasive drift this system could
+           acquire.
+        2. **It reads the config THIS WINDOW will run under** (`_domain_for_window`),
+           so a pinned window previews against its own roster. A preview that
+           disagrees with the control is worse than no preview.
+        3. **It is a POST that changes nothing**, because the input is a list of
+           filenames and a filename is not a query parameter you want to length-cap
+           by URL. Role `user` rather than `viewer` all the same: it is a step in
+           uploading, and a viewer cannot upload.
+
+        A GET would also have put every storefront's filenames in the api access
+        log. They are business identifiers rather than customer PII, but there is
+        no reason to spend them.
+        """
+        if settings is None:
+            raise HTTPException(501, "this deployment has no config directory")
+        _check_window(body.platform, body.period, body.kind)
+
+        domain = _domain_for_window(body.platform, body.period)
+        expected = set((domain.get("expected_stores") or {}).get(body.platform) or [])
+        out = []
+        for raw in body.filenames:
+            row: dict = {"filename": raw, "store": None, "canonical": None,
+                         "on_roster": None, "uniform_name": None, "problem": None}
+            try:
+                name = upload_lib.check_filename(raw)
+                derived = naming.store_of(name, body.platform, domain)
+            except (ValueError, naming.NamingError) as exc:
+                # The same sentence the upload itself would answer with, arrived at
+                # before the operator waits for a 184 MB transfer to be refused.
+                row["problem"] = str(exc)
+                out.append(row)
+                continue
+
+            canonical = materialize.canonical_store(domain, body.platform, derived)
+            row["store"], row["canonical"] = derived, canonical
+            try:
+                row["uniform_name"] = naming.preview_name(
+                    body.platform, body.kind, canonical)
+                naming.validate_roundtrip(
+                    naming.uniform_name(body.platform, body.kind, 1, canonical),
+                    body.platform, canonical, domain)
+            except naming.NamingError as exc:
+                row["problem"] = str(exc)
+                out.append(row)
+                continue
+
+            # `on_roster` is None, not False, when nothing checked it: Lazada has no
+            # roster at all (register A6) and the upload door reports rather than
+            # refuses there. "Unchecked" and "wrong" must not render the same.
+            row["on_roster"] = (canonical in expected) if expected else None
+            out.append(row)
+
+        return {"platform": body.platform, "period": body.period, "kind": body.kind,
+                # The picklist's options. The window page already has this from
+                # `/uploads/plan` (D3's roster form uses it), but a caller of this
+                # route alone should not have to make a second request to know what
+                # a valid correction would be.
+                "expected_stores": sorted(expected),
+                "roster_checked": bool(expected), "files": out}
 
     @app.get("/uploads/plan")
     def upload_plan(platform: str = Query(...), period: str = Query(...),

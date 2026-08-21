@@ -20,6 +20,7 @@ import {
   api,
   apiUpload,
   type SessionCreated,
+  type StorePreview,
   type UploadCreated,
 } from "@/lib/api";
 
@@ -294,6 +295,40 @@ export async function clearExceptionDisposition(
 // ---------------------------------------------------------------------------
 // Uploads and the window roster declaration (M6)
 // ---------------------------------------------------------------------------
+
+/**
+ * Which store each chosen file belongs to, before a byte is uploaded (D7).
+ *
+ * Not an `ActionResult`: the caller needs the data, not a banner. It takes
+ * filenames only — `File` objects cannot cross a server-action boundary without
+ * being uploaded, which is the cost this preview exists to avoid.
+ *
+ * A server action rather than a client-side fetch because the session token is
+ * httpOnly and the API is not reachable from the browser. And the derivation is
+ * the API's, never a regex here: store identity comes from the filename
+ * (docs/06-DECISIONS.md#d6), and a second implementation of that rule next to the
+ * upload form is the most damaging drift this app could acquire.
+ */
+export async function previewStores(
+  platform: string,
+  period: string,
+  kind: string,
+  filenames: string[],
+): Promise<{ ok: true; preview: StorePreview } | { ok: false; message: string }> {
+  if (filenames.length === 0) return { ok: false, message: "" };
+  try {
+    const preview = await api<StorePreview>("/uploads/store-preview", {
+      method: "POST",
+      body: { platform, period, kind, filenames },
+    });
+    return { ok: true, preview };
+  } catch (error) {
+    // A failed preview must not block the upload: the door performs the same
+    // checks and refuses there. So this reports and the form stays usable.
+    return { ok: false, message: describe(error) };
+  }
+}
+
 
 export async function uploadExport(
   _prev: ActionResult | null,

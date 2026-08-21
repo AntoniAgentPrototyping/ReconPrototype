@@ -1231,3 +1231,54 @@ so the old exact lookup was **correct for the master on all 60 rows**. The
 exact-match failure was only ever a *pipeline* problem, where stores arrive in roster
 spelling. The register's "two mappings that disagree" was right about both halves and
 named neither the key nor the reader that made them disagree.
+
+## 2026-08-21 — D7: the store correction becomes reachable
+
+Register D7, decided as [D66](06-DECISIONS.md#d66). **No `src/` change, no contract
+change, so no golden could move and the money gate was not run** — stated rather than
+run, which is the honest form of "not applicable".
+
+**The defect was a three-sided contract missing one side.** `POST /uploads` accepted
+an optional `store` — confirm or correct what the filename pattern found, recording
+both — since M6. `web/app/actions.ts` posted `store:<filename>` per file since M6.
+Nothing rendered an input, for the whole of M6, M8 and five register phases, so the
+only way to fix a misparsed filename was to rename the file on disk and upload again.
+Both existing sides were correct, which is why nothing noticed.
+
+**What was built.** `POST /uploads/store-preview` takes *filenames only* — the cost
+being avoided is a 184 MB export landing on the wrong storefront, and sending the
+bytes to find out would cost exactly that. It answers per file with the derived
+store, its canonical form after aliases, the uniform name the file will carry,
+whether that storefront is on **this window's** roster (`_domain_for_window`, so a
+pinned window previews against its own), and the refusal sentence when a name cannot
+be read. The upload form renders one row per chosen file with a correction picklist,
+posting into the field name that was already being read.
+
+**Three things decided rather than defaulted:**
+
+- **The derivation stays server-side.** Store identity comes from the filename
+  ([D6](06-DECISIONS.md#d6)); a regex in the browser would be a second definition of
+  the rule that decides whose revenue a file becomes.
+  `tests/test_upload_store_control.py` asserts no `.tsx` file reads
+  `store_from_filename` outside a comment.
+- **Picklist where a roster exists, free text where none does.** An off-roster store
+  is refused at the door and the fix is a config proposal, so free text would produce
+  the same refusal more slowly. Lazada has no roster (A6), where a picklist would be
+  empty. *Measured, so the picklist cannot offer an option the door will refuse:* all
+  45 roster storefronts survive `validate_roundtrip` on every kind their platform
+  has.
+- **A failed preview does not block the upload.** The door performs the same checks
+  with the same sentences; the preview finds out early and is not a new control. A
+  preview outage must not stop month-end.
+
+**Reporting, not refusing, per file.** An unreadable name or an off-roster store is a
+state on that row while every other row still answers — a 422 for the batch would
+hide the answers for the files that were fine.
+
+**The test that would have caught this in 2026-08-17.**
+`tests/test_upload_store_control.py` joins the three sides: the action reads
+`store:<filename>`, *some* screen renders an input with that name, and the API takes
+the field. Text-level, the same technique `test_ui_vocabulary.py` uses and for the
+same reason — **there is still no browser automation** (register E2), so nothing here
+proves the screen works. It proves the field name is one string in three places,
+which is the side that went missing.
