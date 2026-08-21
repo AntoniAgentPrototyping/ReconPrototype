@@ -22,12 +22,17 @@ export default function RosterForm({
   platform,
   period,
   declaration,
-  missingCount,
+  missingStores,
+  expectedStores,
 }: {
   platform: string;
   period: string;
   declaration: RosterDeclaration | null;
-  missingCount: number;
+  /** Expected stores with no file right now — the pre-checked candidates. */
+  missingStores: string[];
+  /** The window's whole roster, so a store can be declared before its absence
+   *  is visible (an early-month declaration). */
+  expectedStores: string[];
 }) {
   const [state, action, pending] = useActionState<ActionResult | null, FormData>(
     declareRoster,
@@ -36,6 +41,17 @@ export default function RosterForm({
   const [clearing, startClear] = useTransition();
   const [cleared, setCleared] = useState<ActionResult | null>(null);
   const [partial, setPartial] = useState(declaration?.roster_declared_partial ?? false);
+
+  // D3: which stores the declaration covers. Pre-checked from what it already
+  // says, falling back to what is currently missing — the likeliest claim.
+  const declared = declaration?.declared_absent_stores;
+  const preChecked = new Set(declared ?? missingStores);
+  // The roster may not contain a previously declared name (a repin, a rename);
+  // keep it visible rather than silently dropping the claim from the form.
+  const options = [...new Set([...expectedStores, ...(declared ?? [])])];
+  const missing = new Set(missingStores);
+  const primary = options.filter((s) => missing.has(s) || preChecked.has(s));
+  const rest = options.filter((s) => !missing.has(s) && !preChecked.has(s));
 
   return (
     <div className="panel" style={{ maxWidth: 720 }}>
@@ -56,6 +72,20 @@ export default function RosterForm({
           <span className="mono">{declaration.declared_by}</span> on{" "}
           {new Date(declaration.declared_at).toLocaleString()}
           {declaration.reason ? ` — “${declaration.reason}”` : ""}.
+          {declaration.roster_declared_partial &&
+            (declaration.declared_absent_stores ? (
+              <>
+                {" "}
+                Covers: <span className="mono">{declaration.declared_absent_stores.join(", ")}</span>.
+              </>
+            ) : (
+              <>
+                {" "}
+                <strong>Every</strong> expected store is optional under this declaration —
+                including one nobody meant to excuse. Name the absent stores below to
+                narrow it.
+              </>
+            ))}
         </p>
       ) : (
         <p className="muted small">
@@ -79,11 +109,47 @@ export default function RosterForm({
           />
           <span>
             This window legitimately covers only part of the roster
-            {missingCount > 0 && (
-              <span className="muted"> ({missingCount} store(s) currently absent)</span>
+            {missingStores.length > 0 && (
+              <span className="muted"> ({missingStores.length} store(s) currently absent)</span>
             )}
           </span>
         </label>
+
+        {partial && options.length > 0 && (
+          <fieldset style={{ border: "none", padding: 0, margin: "0 0 10px" }}>
+            <legend className="small" style={{ padding: 0, marginBottom: 4 }}>
+              Which stores are legitimately absent? Any expected store you do NOT name
+              still stops the run if it has no file — that is what catches a forgotten
+              store. Naming none makes every store optional.
+            </legend>
+            {primary.map((store) => (
+              <label key={store} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  name="stores"
+                  value={store}
+                  defaultChecked={preChecked.has(store)}
+                  style={{ width: 16 }}
+                />
+                <span className="mono small">{store}</span>
+                {missing.has(store) && <span className="muted small">— no file yet</span>}
+              </label>
+            ))}
+            {rest.length > 0 && (
+              <details style={{ marginTop: 6 }}>
+                <summary className="muted small">
+                  Other rostered stores ({rest.length}) — declare one absent ahead of time
+                </summary>
+                {rest.map((store) => (
+                  <label key={store} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <input type="checkbox" name="stores" value={store} style={{ width: 16 }} />
+                    <span className="mono small">{store}</span>
+                  </label>
+                ))}
+              </details>
+            )}
+          </fieldset>
+        )}
 
         {partial && (
           <>

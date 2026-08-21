@@ -141,8 +141,10 @@ A new account's password is **generated**, shown once, and must be changed at fi
 Brought up and exercised end to end on Docker **29.7.2**, 2026-08-17 ([07-VERIFICATION](07-VERIFICATION.md)).
 
 ```bash
-cd deploy && cp .env.example .env && $EDITOR .env
-docker compose up --build          # db + minio + api + worker + web
+# The real .env lives OUTSIDE the tree (C13): this folder is OneDrive-synced,
+# and a sync client ships credentials to a cloud tenant regardless of gitignore.
+cp deploy/.env.example "$LOCALAPPDATA/recon-deploy/.env" && $EDITOR "$LOCALAPPDATA/recon-deploy/.env"
+cd deploy && docker compose --env-file "$LOCALAPPDATA/recon-deploy/.env" up --build
 
 # The first identity. Note this is the CLI, not the api: creating an account
 # needs an admin credential, so the first one cannot come from the api.
@@ -208,14 +210,66 @@ export RECON_TEST_DATABASE_URL="postgresql://recon:<pw>@127.0.0.1:5432/postgres"
 "$PY" -m service.order_index --backfill
 "$PY" -m service.order_index --backfill --dry-run     # report, write nothing
 
-# The whole stack, including MinIO and the web app.
-cd deploy && cp .env.example .env && $EDITOR .env && docker compose up --build
+# The whole stack, including MinIO and the web app. The real .env lives at
+# %LOCALAPPDATA%\recon-deploy\.env since Phase 6.9 — see "The whole stack in
+# containers" above.
+cd deploy && docker compose --env-file "$LOCALAPPDATA/recon-deploy/.env" up --build
 ```
 
 **There is no input mount any more.** `RECON_INPUT_DIR` is gone from `deploy/.env.example`: exports arrive through the browser, are stripped at the upload boundary, and land in `recon-uploads`. That also removed the vector for the `.dockerignore` trap, since a copy under `deploy/` sat inside the build context compose sends to the daemon.
 
 
 `RECON_DATABASE_URL` is deliberately not a fallback for that variable — a suite that quietly runs against the production queue is worse than one that skips.
+
+### Phase 6 additions (2026-08-20)
+
+```bash
+# Who downloaded which workbook (C12). Written by the api on every successful
+# download; a refused (tampered) download records nothing.
+"$PY" -m service.admin audit downloads
+"$PY" -m service.admin audit downloads --run 41
+
+# One retention pass, by hand (C10). The worker sweeps hourly on its own;
+# --dry-run says what would go and removes nothing. Ages: scratch 14d, run-log
+# DB mirror 90d (run_log.txt in the artifact store is the durable copy), dead
+# sessions 30d. Overridable via RECON_RETENTION_*; RECON_RETENTION_INTERVAL_S=0
+# turns the automatic sweep off.
+"$PY" -m service.admin retention sweep --dry-run
+"$PY" -m service.admin retention sweep
+
+# Service telemetry (C5): queue depth by state, 24h run outcomes, worker
+# liveness, oldest-queued age. Counts and ages only. Any viewer token works.
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/metrics
+
+# The front door (C4/C9): TLS + per-IP rate limits, under a profile so the
+# default local stack stays loopback-only. Certs live OUTSIDE the tree, same
+# rule as .env; self-signed until a hostname exists.
+sh deploy/ingress/make-self-signed.sh localhost
+RECON_INGRESS_CERTS="$LOCALAPPDATA/recon-deploy/certs" \
+  docker compose --env-file "$LOCALAPPDATA/recon-deploy/.env" --profile ingress up --build
+
+# Nightly database backup (C3) — the database is the audit trail. 14 dumps kept
+# in the db-backups volume; getting a copy OFF the machine is the hosting side's
+# half and is not claimed here.
+docker compose --env-file "$LOCALAPPDATA/recon-deploy/.env" --profile backup up -d
+```
+
+**Worker liveness is on `/healthz`** (C6): `workers_alive` counts heartbeats
+within 60 seconds — beaten every idle loop turn *and* every lease extension, so a
+worker mid-run stays visible. `queued: 3, workers_alive: 0` means nothing will
+pick those jobs up: start a worker, then look at `service.admin job list` for
+expired leases.
+
+**The restore drill** (C3) — run it quarterly and after any Postgres upgrade,
+and log it here:
+
+```bash
+sh tools/db_restore_drill.sh "postgresql://recon:<pw>@127.0.0.1:55432/recon_dev"
+```
+
+| Date | Database | Result |
+|---|---|---|
+| 2026-08-20 | `recon_dev` (local cluster, PG 17.10) | **PASSED** — `pg_dump -Fc` 102,254 bytes; restored into a scratch database; 30 tables, 1,037 rows, every per-table row count identical; scratch database dropped |
 
 ### Interpreting a service run
 
@@ -289,13 +343,20 @@ A run without `--refs` now exits **2**, not 1. Variances and unchecked stores ar
 | A failed run says only *"the service itself hit an error"* | That is the deliberate answer for an infrastructure failure (M8/4.1). The type, message and traceback are in the **run log** on the same page. `service/failures.py` holds the mapping; an unrecognised exception gets a fixed sentence rather than its own text, because that text routinely contains a path or a connection string. |
 | A run reports **UNVERIFIED** | It ran clean and had nothing to check against. Supply the team's totals on the window page (*The team's figures*); the next run compares against them. Not a failure — exit code 2 means exactly this. |
 | `predates the M8/2.5 integrity check` on a run | The upload was recorded before `object_sha256` existed, so nothing can establish that the materialised file is the file that was uploaded. Re-upload the export. The digest is deliberately not recomputed from the store — that would certify the store against itself ([D52](06-DECISIONS.md#d52)). |
-| `RECONCILING Settlement whose order lines exist in an earlier window (NOT applied)` | Report mode found orders this window settles whose SKU lines were exported with an *earlier* window (defect 2.12). The figure is settlement currently **outside** the invoice. Two actions, in order: ask the platform to re-export this window's order file (the real fix — the lines belong here), and if that is not possible, consider `cross_window_order_backfill: apply`, which uses the earlier window's lines and **moves cells** ([D59](06-DECISIONS.md#d59)). Do **not** respond by copying the earlier window's order files into this window's folder: that pools them, and pooling was measured at a 4.5× over-count. |
+| `RECONCILING Settlement whose order lines exist in an earlier window (APPLIED)` | **Normal since 2026-08-20**, and not an error. Orders this window settles had their SKU lines exported with an *earlier* window, and the run used them (defect 2.12, [D59](06-DECISIONS.md#d59)). The figure is settlement now **inside** the invoice that would previously have left it silently. Those lines pass the same conservation checks as the window's own, so a drifted re-export breaches a check rather than mis-invoicing. Nothing to do — the number is there so a *change* in it is visible. |
+| `RECONCILING Settlement whose order lines exist in an earlier window (NOT applied)` | The same finding under `cross_window_order_backfill: report` (or on a window **pinned** to a config from before 2026-08-20 — pinning is why a re-run can still say this). The figure is settlement **outside** the invoice. Ask the platform to re-export this window's order file, which is the real fix because the lines belong here; or repin the window to a config with `apply`. Do **not** respond by copying the earlier window's order files into this window's folder — that pools them, measured at a 4.5× over-count. |
+| A store still shows a large `Order-file coverage` share after backfill | The lines are in **no** window, so there is nothing to borrow, and the cause is upstream. Two shapes seen in July, with different asks: an order export that is the *wrong file* (`purite` w2 was byte-identical to w1's — ask for a re-export of that window), and one that looks *truncated* (`masan` s4 held exactly 210,000 orders and stopped mid-afternoon on the final day — ask for a re-pull in narrower date ranges). Neither is recoverable in code; see [08-KNOWN-DEFECTS 2.12](08-KNOWN-DEFECTS.md) and [16-DATA-REQUEST](16-DATA-REQUEST-MONTH-MASTER.md). |
 | `cross_window_order_backfill is '...' which is not one of ['off', 'report', 'apply']` | A typo in that setting. It hard-stops rather than defaulting, because defaulting quietly to `off` would disable the control that makes a 4.5B VND gap visible. An *unset* or empty value is different and does mean `off`. |
 | An upload is refused with `does not overlap <month>` | The file's settlement dates fall entirely outside the month of the window it was addressed to (M8, defect 2.3's residual). Either the window label is wrong, or it is a mis-pull carrying another period's block — July had two, and they cost 4,527,401,608 VND of understatement. Check the export, then re-upload to the right window. The check is INTERSECT, not contain, so a Lazada weekly lapping into the next month is accepted. Order exports are never date-checked: an order created in June legitimately settles in July. |
 | An upload is accepted with `settles from … while all its sibling(s) start at …` | The mis-pull *shape*, warned rather than refused: this file starts earlier than every other window-defining file already uploaded here. Verify the export. If it genuinely carries an earlier settlement block, declare the window's real range under `window_settlement_bounds` ([D9](06-DECISIONS.md#d9)) so the run drops the rows belonging to the earlier window — do **not** delete the file if it is the only source of its own window's rows (July's `w5` Curel income is exactly that case). |
 | `date cell(s) could not be read` | A date format changed. The dates are kept as blank, which means those rows drop out of the month grouping in the workbook — quiet, so this is a warning worth acting on. Check the export against `dayfirst`; `date_coercion: hard_stop` makes it stop instead ([D53](06-DECISIONS.md#d53)). |
 | `Parsing dates in %Y/%m/%d format when dayfirst=True` | The file's own format contradicts the contract. **Do not flip `dayfirst` on this alone** — it fires on real TikTok income today and those dates are correct. It means the setting is not what is deciding the parse. |
 | Golden digests changed unexpectedly | An edit to `src/` or `config/` moved a cell. That is the gate working. Find the cell with the differ before deciding whether the change was intended; if it was, re-baseline deliberately ([D26](06-DECISIONS.md#d26)). Never widen a tolerance to make it pass ([D17](06-DECISIONS.md#d17)). |
+| The month summary needs rebuilding but no window needs re-running | A late reference total, a repin, a corrected declaration. Queue a master directly: the board's *Build the month summary* form, `POST /months/{month}/master`, or `python -m service.admin job enqueue-master --month 2026-07` when the api is down (A4). A 409 / "not queued" means one is already waiting — it will read every window finished by the time it runs. **Never re-run a settlement window just to trigger the chain** — that is a second run of the same money. |
+| A run's page says `could not queue the month-end master…` | The settlement run itself succeeded and its finance file is unaffected — the failure was in queueing the month's summary afterwards (`runs.chained`, A4). Queue one by hand as above once the cause (usually the database) is resolved; the service log carries a `month_master_chain_failed` WARNING for alerting. |
+| An exception row keeps coming back every run | That is the queue working — it re-presents until somebody decides. Mark it *reviewed* or *expected* on the run page with a reason ([D61](06-DECISIONS.md#d61)); the decision follows the fingerprint across runs as a badge. It never hides the row: an "expected" variance that grows must still be seen. Re-opening requires its own reason and the history survives. |
+| A run hard-stops with `names store(s) the … roster does not know` | The window's roster declaration names a store that is not on the roster of the config this run uses — a repin, a rename, or a typo predating the picklist ([D62](06-DECISIONS.md#d62)). Fix the declaration on the window page (or the alias in the rules). Deliberately not skipped: skipping would resurface later as a misleading "missing store" stop. |
+| `ROSTER DECLARATION STALE` in a run log, or an amber notice on the window page | A store declared absent now has files (or a blanket declaration sits on a complete window). The figures ARE included — only the record no longer matches the window. Withdraw or re-declare on the window page so the workbook's roster stamp stays honest. |
 
 ## Safety rules
 

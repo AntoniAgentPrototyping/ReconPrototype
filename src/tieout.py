@@ -44,7 +44,7 @@ from typing import Mapping
 import pandas as pd
 
 from .backfill import CrossWindowResult
-from .lazada import REVENUE_BUCKET
+from .lazada import revenue_bucket
 from .runlog import RunLog
 
 PASS, BREACH, INFO = "PASS", "BREACH", "INFO"
@@ -604,7 +604,7 @@ def run_checks_lazada(revenue: pd.DataFrame, classified: pd.DataFrame, settings:
     money_tol = float(tol.get("conservation_vnd", 1.0))
     results: list[dict] = []
 
-    revenue_rows = classified[classified["fee_bucket"] == REVENUE_BUCKET]
+    revenue_rows = classified[classified["fee_bucket"] == revenue_bucket(settings)]
     credits = float(revenue_rows["amount_incl_vat"].fillna(0).sum())
     matched_promo = float(revenue["promo"].fillna(0).sum()) if "promo" in revenue.columns else 0.0
     lines_total = float(revenue["check_with_vat"].fillna(0).sum()) \

@@ -70,6 +70,12 @@ class Repository:
         row = cur.fetchone()
         return dict(row) if row else None
 
+    # A worker is "alive" if it beat inside this window. Generous against both
+    # beat cadences — the idle loop every poll_interval_s (2s) and the lease
+    # extension every log flush (~1s mid-run) — so the only way to go stale is
+    # to actually stop (C6).
+    WORKER_ALIVE_SECONDS = 60
+
     def healthcheck(self) -> dict:
         with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute("select count(*) as migrations from schema_migrations")
@@ -81,7 +87,20 @@ class Repository:
                 from jobs
             """)
             counts = self._one(cur)
-        return {"database": "ok", "migrations": migrations, **counts}
+            # C6's second half: "queued with no worker" must not read like
+            # "queued a second ago". `workers_alive: 0` alongside `queued: 3`
+            # is the sentence an operator needed.
+            cur.execute("""
+                select
+                    count(*) filter (where last_seen > now() - make_interval(secs => %s))
+                        as workers_alive,
+                    count(*) as workers_known,
+                    extract(epoch from now() - max(last_seen))::bigint
+                        as worker_last_seen_seconds
+                from worker_heartbeats
+            """, (self.WORKER_ALIVE_SECONDS,))
+            workers = self._one(cur)
+        return {"database": "ok", "migrations": migrations, **counts, **workers}
 
     # -- enqueue and inspect ------------------------------------------------
 
@@ -247,6 +266,10 @@ class Repository:
         Called from QueueRunLog on every flush, so the run log is the liveness
         signal — a run that has stopped logging for longer than the lease is
         genuinely stuck, which is exactly what the reclaim sweep should act on.
+
+        Also beats `worker_heartbeats` (C6): a worker deep inside a 269-second
+        run never touches its idle-loop heartbeat, and without this /healthz
+        would count a hard-working worker as missing.
         """
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute("""
@@ -254,7 +277,20 @@ class Repository:
                 set lease_expires_at = now() + make_interval(secs => %s), updated_at = now()
                 where id = %s and leased_by = %s and state = 'leased'
             """, (lease_seconds, job_id, worker_id))
-            return cur.rowcount == 1
+            held = cur.rowcount == 1
+            cur.execute("""
+                insert into worker_heartbeats (worker_id) values (%s)
+                on conflict (worker_id) do update set last_seen = now()
+            """, (worker_id,))
+            return held
+
+    def record_worker_heartbeat(self, worker_id: str) -> None:
+        """One idle-loop beat (C6). The other beat site is `heartbeat` above."""
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute("""
+                insert into worker_heartbeats (worker_id) values (%s)
+                on conflict (worker_id) do update set last_seen = now()
+            """, (worker_id,))
 
     def reclaim_expired(self) -> dict[str, list[int]]:
         """Deal with leases whose worker stopped talking.
@@ -337,7 +373,8 @@ class Repository:
 
     def finish_run(self, run_id: int, *, status: RunStatus, findings: Sequence[tuple[str, str]],
                    checks: Sequence[Any] = (), metrics: dict | None = None,
-                   error: str | None = None, roster_missing: int | None = None) -> None:
+                   error: str | None = None, roster_missing: int | None = None,
+                   chained: str | None = None) -> None:
         m = metrics or {}
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute("""
@@ -346,7 +383,8 @@ class Repository:
                     findings = %(findings)s, checks = %(checks)s,
                     wall_s = %(wall_s)s, io_s = %(io_s)s, compute_s = %(compute_s)s,
                     serialize_s = %(serialize_s)s, peak_rss_mb = %(peak_rss_mb)s,
-                    error = %(error)s, roster_missing = %(roster_missing)s
+                    error = %(error)s, roster_missing = %(roster_missing)s,
+                    chained = %(chained)s
                 where id = %(run_id)s
             """, {
                 "run_id": run_id,
@@ -363,6 +401,9 @@ class Repository:
                 # from uploads: no roster preview was computed, and 0 would read as
                 # "nothing missing" (service/materialize.py::roster_missing).
                 "roster_missing": roster_missing,
+                # The month-master chain's outcome (A4, migration 019). NULL means
+                # nothing was chained and nothing failed to chain.
+                "chained": chained,
             })
 
     def get_run(self, run_id: int) -> Run:
@@ -454,6 +495,83 @@ class Repository:
         if row is None:
             raise NotFound(f"artifact {name!r} of run {run_id}")
         return Artifact.from_row(row)
+
+    def record_artifact_download(self, run_id: int, name: str, subject: str) -> None:
+        """The read audit (C12): one row per successful download, appended before
+        a byte is streamed. In the request path deliberately — an audit row that
+        may silently fail is the gap with a coat of paint, and the database is
+        already a hard dependency of the same request."""
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute("""
+                insert into artifact_downloads (run_id, artifact_name, downloaded_by)
+                values (%s, %s, %s)
+            """, (run_id, name, subject))
+
+    def list_artifact_downloads(self, *, run_id: int | None = None,
+                                limit: int = 200) -> list[dict]:
+        with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            if run_id is not None:
+                cur.execute("""
+                    select run_id, artifact_name, downloaded_by, at
+                    from artifact_downloads where run_id = %s
+                    order by at desc limit %s""", (run_id, limit))
+            else:
+                cur.execute("""
+                    select run_id, artifact_name, downloaded_by, at
+                    from artifact_downloads order by at desc limit %s""", (limit,))
+            return list(cur.fetchall())
+
+    def metrics(self) -> dict:
+        """Counters for /metrics (C5). Counts and ages only — the service's own
+        telemetry must never carry a store name or a figure."""
+        with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                select state, count(*) as n from jobs group by state
+            """)
+            jobs = {r["state"]: r["n"] for r in cur.fetchall()}
+            cur.execute("""
+                select status, count(*) as n from runs
+                where started_at > now() - interval '24 hours'
+                group by status
+            """)
+            runs_24h = {(r["status"] or "in_flight"): r["n"] for r in cur.fetchall()}
+            cur.execute("""
+                select
+                    count(*) filter (where last_seen > now() - make_interval(secs => %s))
+                        as alive,
+                    count(*) as known
+                from worker_heartbeats
+            """, (self.WORKER_ALIVE_SECONDS,))
+            workers = self._one(cur)
+            cur.execute("""
+                select extract(epoch from now() - min(created_at))::bigint as oldest_seconds
+                from jobs where state = 'queued'
+            """)
+            oldest = self._one(cur)["oldest_seconds"]
+        return {"jobs": jobs, "runs_24h": runs_24h,
+                "workers": dict(workers), "oldest_queued_seconds": oldest}
+
+    def prune_run_log_lines(self, older_than_days: int, *, dry_run: bool = False) -> int:
+        """Retention (C10): drop the DB mirror of run logs for runs FINISHED more
+        than `older_than_days` ago. The durable copy is the run_log.txt artifact;
+        the runs row itself — status, findings, metrics — is never touched."""
+        with self._conn() as conn, conn.cursor() as cur:
+            if dry_run:
+                cur.execute("""
+                    select count(*) from run_log_lines l
+                    join runs r on l.run_id = r.id
+                    where r.finished_at is not null
+                      and r.finished_at < now() - make_interval(days => %s)
+                """, (older_than_days,))
+                return int(cur.fetchone()[0])
+            cur.execute("""
+                delete from run_log_lines l
+                using runs r
+                where l.run_id = r.id
+                  and r.finished_at is not null
+                  and r.finished_at < now() - make_interval(days => %s)
+            """, (older_than_days,))
+            return cur.rowcount
 
 
 def _jsonable(value: Any) -> Any:

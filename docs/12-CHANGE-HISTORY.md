@@ -84,11 +84,11 @@ A wrapper around the pipeline: FastAPI, a worker, and Postgres holding the queue
 **Two things fell out of the work rather than being planned:**
 
 - `tools/full_run.py --partial-roster`. The service needed roster relaxation as a job property, and once `build_context` owned it, the CLI got it for free — closing the M2.5 sharp edge where a genuine single-store production run needed a config edit.
-- Defect [1.9](08-KNOWN-DEFECTS.md#19-shared-mutable-state-via-the-config-dict--open-contained-m4) went from theoretical to *contained*. A worker is the first thing that runs two windows in one process, so "two runs sharing a settings dict" stopped being hypothetical and is now pinned by a test asserting the two `id(settings)` values differ.
+- Defect [1.9](08-KNOWN-DEFECTS.md#19-shared-mutable-state-via-the-config-dict--fixed-2026-08-19) went from theoretical to *contained*. A worker is the first thing that runs two windows in one process, so "two runs sharing a settings dict" stopped being hypothetical and is now pinned by a test asserting the two `id(settings)` values differ.
 
 **A design choice worth recording because the obvious alternative is wrong.** "The worker streams artifacts to object storage while the CLI writes to disk" reads like the worker needs its own writer. It must not: that writer would be a second implementation of the code path producing the deliverable the team invoices from, and since goldens are generated through the CLI, the service's copy would be the *unverified* one. Write-then-upload makes the bytes identical by construction ([D31](06-DECISIONS.md#d31)).
 
-**Shipped unverified, deliberately and labelled.** `deploy/Dockerfile` and `deploy/docker-compose.yml` have never been built — there is no Docker on the development machine — so they are a reviewable deployment contract and are recorded as [defect 2.2](08-KNOWN-DEFECTS.md#22-deploydockerfile-and-deploydocker-composeyml-have-never-been-built--open) rather than described as done. The Postgres layer underneath them *is* verified, against a real 17.10 server: `FOR UPDATE SKIP LOCKED` is a statement about what two transactions do to each other and cannot be proven against a substitute.
+**Shipped unverified, deliberately and labelled.** `deploy/Dockerfile` and `deploy/docker-compose.yml` have never been built — there is no Docker on the development machine — so they are a reviewable deployment contract and are recorded as [defect 2.2](08-KNOWN-DEFECTS.md#22-deploydockerfile-and-deploydocker-composeyml-have-never-been-built--fixed-m5-2026-08-14) rather than described as done. The Postgres layer underneath them *is* verified, against a real 17.10 server: `FOR UPDATE SKIP LOCKED` is a statement about what two transactions do to each other and cannot be proven against a substitute.
 
 **Environment note.** PostgreSQL 17.10 was installed from the EDB *binaries zip* into `%LOCALAPPDATA%\recon-pg`, running as the current user on port **55432** — not the MSI installer, which needs elevation, and not a Windows service. Reversible by stopping `pg_ctl` and deleting the folder. Three new packages in a new `service` **extra**: fastapi, uvicorn, psycopg. The core dependency list is untouched, and a test asserts it stays that way.
 
@@ -520,9 +520,9 @@ with every delta accounted for (+27 tests, +7 file-parametrized lint cases over 
 new files). With the order index and the upload date door that follow, the suite stood
 at **899 passed, 3 skipped, 4 deselected** (~6:21, read cache off), the money gate
 passes over all eight windows at zero tolerance, `tests/goldens/manifest.json` is
-untouched, and `tools/smoke_test.py` is 13/13. (It is **940** as of 2026-08-20 — C13's
-backfill took it to 930, the borrow-path fix below added 7, and B1's falsification tests
-added 3.)
+untouched, and `tools/smoke_test.py` is 13/13. (It is **982** as of 2026-08-20 — C13's
+backfill took it to 930, the borrow-path fix below added 7, B1's falsification tests
+added 3, A14 added 16, and M8 Phase 6 added 25.)
 
 *Recorded as a deviation:* all of it landed in **one** commit (`675f844`), because the
 working tree was already dirty in 123 files before the work started, so the per-commit
@@ -778,6 +778,22 @@ matching order lines" fell from ~2,394,101,094 to 1,451,232,038, of which Purite
 was pinned to, so re-running July through the worker is a deliberate repin, not a
 side effect of this line changing.
 
+*The doc sweep that followed (2026-08-20).* Switching a default on makes every sentence
+that describes the old default wrong, and there were more of them than expected: 2.12's own
+header still said `OPEN` and its body still said the fix "is running in `report` mode" and
+that `apply` "has not been switched on"; `docs/03`'s stage 3b named `report` as current;
+`docs/09`'s runbook row explained the `NOT applied` message and advised *considering*
+`apply`; `docs/10`'s milestone table and `docs/14`'s 3.7 row both described the defect as
+open; `docs/07` carried a "never been run against real data" paragraph. All corrected in
+place, with the superseded text kept where it earns its place — `docs/07`'s paragraph is
+quoted verbatim before being superseded, because the check it insisted on ("agreement
+between the two is a check worth making at the flip") is what found the alias defect a day
+later. **Renaming 2.12's header also broke its own inbound anchors**, which is a cost of
+putting status in a heading; those were repaired, and a sweep found and fixed **11 more
+pre-existing** broken cross-doc anchors from earlier milestones' `OPEN`→`FIXED` renames.
+`docs/16` gained **Ask 3** — the two order exports that need re-pulling, stated as two
+different asks because `purite`'s file is the *wrong* file and `masan`'s looks *truncated*.
+
 *The one that was nearly misread, recorded because the next reader will hit it too.*
 `2026-07_s4` under `apply` BREACHES Shopee's revenue crossing — per-order worst 893,000
 VND, total −95,928,999 — which reads exactly like the fix breaking a control. It is the
@@ -803,6 +819,97 @@ similac 1,788,000), **1,390,095,674** in `s4` from `s3`, and 173,429 in `s2` fro
 `purite` and `mondelez kinh do` recover **nothing** — their `w2` order files are the
 byte-identical mis-pulls, so those lines were never exported and no code can recover
 them. That residual's remedy is a platform re-pull.
+
+**A14 — the last bucket lists joined the contract (2026-08-20).** The tail of M8/1.7's
+move, done as its own change exactly as docs/14's deferral bullet asked. What moved, values
+verbatim: `finance_template.VAT_RATES` → `vat_factors.rates` (a `config_scalars` row);
+the three invoice-bucket lists → `invoice_buckets.<platform>` (`match` + `default`,
+walk order preserved as `sort_order`); `lazada.REVENUE_BUCKET`/`PROMO_BUCKETS` →
+`fee_buckets.lazada` (one `revenue` row, five `promo` rows). Migration `016` adds the two
+row tables; both keep `invalidates_goldens` **true** — a bucket row decides which tab a
+store's money lands on. Everything is read through hard-stop accessors with no code
+fallback (`finance_template.vat_rates`/`invoice_buckets`, `lazada.revenue_bucket`/
+`promo_buckets`), and `revenue_lines` now takes `settings`. The bare `1.08` that filled a
+zero-pre-VAT group's VAT factor in `_sku_pivot` now reads `vat_factors.default` —
+value-identical today, and deliberately *semantically live*: a future default change now
+moves it too, instead of leaving a literal behind.
+
+Three edges stated rather than left latent. **The workbook TAB layout stays code** —
+which bucket gets a tab, in what order, the control-block cell positions are template
+geometry pinned to the team's own files (the TikTok file itself is internally
+inconsistent about order: tabs go Merries-then-KAO while its PV-sum side block goes
+KAO-then-Merries, so no single configured order could drive both). A configured bucket
+the template has no tab for hard-stops, never leaks into a pivot-drift breach. **Shopee's
+and Lazada's control-row geometry hard-wires the 1.05/1.08/1.10 trio** (PV-sum side
+block, Summary rows, per-rate tab pairs), so those builders hard-stop on any other
+`vat_factors.rates`; TikTok's layout is fully enumerated from the list. **Editing
+`vat_factors.rates` in the browser cannot silently stringify it** — `_coerce_scalar_value`
+now preserves numeric-list element types, because `"1.05"` compares equal to no
+`vat_factor.round(2)` and would have zeroed every per-rate row (the `dedupe_rows`-
+becoming-`"false"` failure shape, one level down).
+
+One consequence for old pins, same as M8/1.7's: a window **pinned to a pre-A14 config**
+hard-stops on re-run with the message naming the missing key; the remedy is the audited
+unpin/repin, not a fallback. **The gate: all eight golden windows re-ran under the
+rendered contract at zero tolerance — no cell moved, no golden re-baselined.**
+
+**M8 Phase 6 — deployment hardening (2026-08-20).** The last phase: the eleven
+"breaks when deployed for real" items (register C3–C13), each done to the boundary of
+what the repository can do, with the hosting-side halves *named* in docs/14's Phase 6
+table rather than absorbed into a claim. Nothing touches `src/` — no golden question
+existed, and the structural gate was run anyway.
+
+In one paragraph each, with the number that matters:
+
+- **Migrations serialize on `pg_advisory_lock`** (C8) — first boot was api-vs-worker
+  coin flip; the loser crashed on `schema_migrations`' primary key and
+  `restart: unless-stopped` hid it. Race-tested with two threads; the unlock lives in
+  `finally` after a rollback so a failed migration cannot wedge the lock.
+- **Uploads are capped** (C7) — `RECON_MAX_UPLOAD_MB`, default 512 against a measured
+  184 MB largest-ever real export, enforced by a bounded `read(limit+1)`, refused 413
+  before the sanitizer or object store see a byte.
+- **`/healthz` answers "does a worker exist"** (C6's second half) — `worker_heartbeats`
+  (migration `017`) beaten each idle turn and each lease extension, so a worker deep in
+  a 269-second run stays visible; `queued: 3, workers_alive: 0` is now a readable state.
+- **Workbook downloads are audited** (C12) — `artifact_downloads` (migration `018`),
+  written after the digest check, before a byte streams, in the request path
+  deliberately; a refused tampered download records nothing.
+  `service.admin audit downloads` reads it.
+- **Retention exists** (C10) — `service/retention.py`: scratch 14d (kept-on-failure job
+  dirs age out after their diagnosis window), the run-log DB mirror 90d (run_log.txt in
+  the artifact store is the durable copy; the runs row is never touched), dead sessions
+  30d (live ones are never candidates), plus a disk-free warning. Hourly in the worker,
+  on demand with `--dry-run` in the CLI.
+- **The service can be seen** (C5) — `service/obs.py` emits one JSON object per line
+  (api + worker, uvicorn included) under a content rule stricter than the run log's:
+  identifiers, counts, durations — never a store name or a figure. `GET /metrics`
+  (viewer role) serves the counters. Alerting is the host's half; an ERROR line is the
+  hook.
+- **The config audit is decided, not implicit** (C11 → [D60](06-DECISIONS.md#d60)) —
+  the `config_versions` row is the audit record; git is a developer-checkout
+  convenience; the api response and the config page say so instead of an unexplained
+  `committed: false`. Pushing to a remote was rejected as a new credential surface.
+- **Backups exist and the restore drill was PERFORMED** (C3) — nightly `pg_dump -Fc`
+  under `--profile backup`; `tools/db_restore_drill.sh` restored `recon_dev` into a
+  scratch database on 2026-08-20: 30 tables, 1,037 rows, every per-table count
+  identical. docs/09 keeps the drill log. Offsite is the hosting half, stated.
+- **Secrets left the synced tree** (C13) — the real `deploy/.env` moved to
+  `%LOCALAPPDATA%\recon-deploy\`; compose runs with `--env-file`; the ingress cert
+  pair follows the same rule.
+- **A front door exists before the hostname does** (C4 + C9) — an nginx profile:
+  TLS (self-signed via `deploy/ingress/make-self-signed.sh` until a real one exists),
+  the PINNED X-Forwarded-For proxy, per-IP rate limits (general / Next-Action
+  mutations / `/login`), `client_max_body_size` mirroring C7's cap, and
+  `RECON_ALLOWED_ORIGINS` wired into `serverActions.allowedOrigins` as a web build
+  arg. The nginx config was rendered and `nginx -t`-verified inside the real
+  `nginx:1.27-alpine` image with the real cert pair; **it has not yet been browsed
+  through** — the same standing no-browser-automation limit as every UI surface (2.8).
+
+Two sharp edges found while doing it, recorded so they are not re-found: Git Bash
+rewrites `-subj "/CN=..."` into a Windows path unless `MSYS_NO_PATHCONV=1` (the cert
+script carries it now), and the nginx image's envsubst substitutes every `$VAR`
+defined in the container's environment — `$host` survives only because no `HOST`
+variable is set, which the template's header now warns about.
 
 ## M6 — browser-only: passwords, bucket input, a revamped config editor (2026-08-17)
 
@@ -898,3 +1005,77 @@ were reported as double-pulls in one dump. Cross-window duplicates are now only
 reported for the kinds that DEFINE a window (income / Weekly / Daily); the
 same-window check is unchanged for every kind, because the same bytes twice in one
 window really does double-count.
+
+## 2026-08-21 — the workflow holes: A4's remainder, D1, D2, D3
+
+Four register items in one pass, each to its own boundary. Nothing here touches money
+math; the only golden movement was D3's stamp, pre-stated and matched exactly.
+
+**A4 — and the register row was stale.** "No API route, no screen; not downloadable"
+had been false since Phase 3: the month master is a first-class run whose
+`month_master.xlsx` goes through the same `write_artifacts`/`ArtifactStore` and the
+same digest-checked, download-audited artifact route as every settlement workbook.
+What was genuinely missing: nobody could *request* a master (the only creation path
+was the automatic post-run chain; `POST /jobs` rejects `platform='all'` and has no
+`kind`), the chain's outcome lived only on worker stdout, and the run page
+breadcrumbed a master to `/windows/all/{month}`, which 404s. Built:
+`POST /months/{month}/master` (user role, 409 on an active master),
+`service.admin job enqueue-master --month` as the break-glass twin, a board form,
+`runs.chained` (migration `019` — the run log is already stored when the chain runs,
+and `test_the_stored_log_and_the_database_log_are_the_same_log` is why the log was
+not an option), a WARNING service-log event on a failed chain, and a breadcrumb that
+points a master at the board's month view.
+
+**D1 — exception dispositions ([D61](06-DECISIONS.md#d61)), M6's original scope,
+finally.** Migration `020`, the pin/pin-events two-table shape. Decided and worth
+repeating: **a disposition annotates, never hides** — the fingerprint hashes identity
+columns, not amounts, so suppressing recurrences would hide exactly the grown
+variance a reviewer must see; `open_only` is an explicit filter, the default answer
+is always whole. `recon.user` dispositions with a mandatory 8-character reason;
+clears require their own reason and record what they released. One test-infrastructure
+lesson: the new tables key on the fingerprint (deliberately no FK), so no cascade
+truncates them — they had to join the conftest truncate list, found as cross-test
+state leakage on the first full run.
+
+**D2 — the board unions evidence, not jobs.** `board()` was `FROM jobs`, so a window
+whose exports were uploaded but never queued was invisible. It now starts from the
+same known-window union as `month_windows` (jobs ∪ roster declarations ∪ live
+uploads), with the uploads-evidence condition (`platform is not null and state <>
+'rejected'`) extracted to ONE spelling shared by both queries. Upload-only windows
+render "not yet run" with a file count and link to the window page; `GET /months`
+feeds a real month picker; the queue form suggests known windows per platform and
+keeps free text for a brand-new period.
+
+**D3 — the roster declaration names its stores ([D62](06-DECISIONS.md#d62)), is
+re-evaluated, and the workbook says it is partial ([D63](06-DECISIONS.md#d63)).**
+Migration `021` adds `declared_absent_stores`; `apply_partial_roster` grew an
+`optional_stores` parameter whose `None` is the old blanket **verbatim** — that is
+what the CLI's `--partial-roster` bool produces and the mode all four partial-roster
+goldens regenerate in, pinned by `tests/test_partial_roster.py` before anything else
+was built. A named list relaxes only those stores, so `check_stores`' unchanged
+arithmetic hard-stops a forgotten store again; an unknown declared name hard-stops
+naming itself (membership checks at run time against the run's own — possibly
+pinned — roster, which is why the API door deliberately does not check it). A stale
+declaration (declared-absent store now has files; or blanket on a complete window)
+is a run-log warning plus an amber window-page notice, never a hard stop and never a
+finding: the figures are included either way, only the record is wrong.
+
+**The stamp, and its golden procedure.** The four non-partial lazada windows
+regenerated first with zero refusals (the identity proof for the non-partial path);
+`2026-05_w1 --partial-roster` without `--rebaseline` then refused with `fields that
+changed: workbook` — fingerprint and variances digests untouched — and the cellset
+delta was exactly two cells (`PV sum` 25 → 27, both in row 1). The four
+`partial_roster: true` windows were rebaselined with `--rebaseline --reason` naming
+D63. The stamp is Vietnamese (the workbook's own language), names the absent stores
+rather than counting them, and is deliberately not a `checks` entry (that would move
+`fingerprint_digest`).
+
+**Found on the way, recorded rather than fixed: defect 2.13.** The stamp was first
+placed below the PV sum side block and never appeared: `_Tab.emit` silently drops
+buffered control cells at any row ≥ `data_start_row` on tabs that emit data. The
+committed goldens confirm the loss is pre-existing — TikTok's `PV sum` has never
+carried its side-block totals and G8/H8 verdicts, Shopee's loses rows 5–11 including
+the J11 "working verdict". The verdicts survive in `checks`/run log, so this is a
+rendering gap, not a lost control — and fixing `emit` moves cells on all eight
+goldens, so it needs its own pre-stated pass ([08-KNOWN-DEFECTS 2.13](08-KNOWN-DEFECTS.md)).
+The stamp lives at A1/B1, which is both the safe region and where a caveat belongs.

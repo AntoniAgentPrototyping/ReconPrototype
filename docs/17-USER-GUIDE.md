@@ -32,7 +32,9 @@ Query and worksheets, then checked row by row against the team's own results.*
 ### Bước 1 — Mở kỳ cần làm
 
 Trang đầu (**Các kỳ đối soát**) liệt kê từng kỳ. Bấm vào mã kỳ (ví dụ
-`2026-05_w1`) để mở.
+`2026-05_w1`) để mở. Có thể lọc theo **Tháng** ở đầu trang. Một kỳ đã có file tải
+lên nhưng chưa chạy vẫn hiện trong danh sách, với nhãn **chưa chạy** — không cần
+nhớ mã kỳ để tìm lại nó.
 
 ### Bước 2 — Tải file lên
 
@@ -69,10 +71,24 @@ Về trang đầu, chọn sàn và kỳ, bấm chạy. Trang lần chạy tự c
 | **chưa đối chiếu** | Chạy xong không lỗi, nhưng chưa có số của team | Nhập số của team rồi chạy lại |
 | **đã dừng** | Hệ thống dừng và không tạo file nào | Đọc lý do trên trang lần chạy — thường là thiếu file của một cửa hàng |
 
-*Step 1 open the period · Step 2 upload (the store comes from the filename, and
+Hai việc nữa trên trang lần chạy:
+
+- **Dòng cần quyết định**: các dòng hệ thống không tự xử lý được (ví dụ phí chưa có
+  trong danh mục). Có thể đánh dấu **đã xem xét** hoặc **lệch đã biết**, kèm lý do —
+  quyết định sẽ đi theo dòng đó qua các lần chạy sau, hiện thành nhãn. Dòng không
+  bao giờ bị ẩn: số đã đánh dấu mà tăng lên vẫn phải được nhìn thấy.
+- Nếu kỳ được khai báo **chỉ một phần cửa hàng**, file Excel tải về sẽ tự ghi rõ
+  điều đó ở đầu trang `PV sum` / `Summary`, kèm tên các cửa hàng thiếu — người đọc
+  file không cần mở hệ thống để biết.
+
+*Step 1 open the period (the board lists uploaded-but-not-yet-run periods too, with
+a month filter) · Step 2 upload (the store comes from the filename, and
 customer data is stripped on arrival) · Step 3 enter the team's figures (**blank is
 not zero**) · Step 4 run · Step 5 read the result. The four results above are
-"matches", "does not match", "not checked" and "stopped".*
+"matches", "does not match", "not checked" and "stopped". Rows needing a decision
+can be marked reviewed/expected with a reason — the decision follows the row across
+runs and never hides it — and a partial-roster period stamps its own caveat into the
+Excel file.*
 
 ---
 

@@ -56,19 +56,6 @@ LAZADA_FORMULA_STATUS = {
     "check_totals": "verified",                # E*F and E*F*VAT vs 'PV used'
 }
 
-REVENUE_BUCKET = "1.Doanh Thu"
-# Promotional buckets whose per-(order, SKU) charges net INTO the invoiced
-# unit price (evidence: gift lines credit full price, their Flexi-Combo
-# chargeback zeroes them in "PV used"; voucher/coin lines reduce the paired
-# product's Price KA by exactly their allocated amount / VAT).
-PROMO_BUCKETS = [
-    "2.Promotional Charges Flexi-Combo",
-    "3.Promotional Charges Vouchers",
-    "3.1 Seller Funded Marketing Voucher",
-    "4.1 LazCoints Discount",
-    "5. Lazcoin discount",
-]
-
 # Canonical ledger columns (superset both export variants map into):
 LEDGER_REQUIRED = ["store", "transaction_date", "fee_name", "amount_incl_vat",
                    "vat_amount", "order_id", "order_line_id", "sku_id"]
@@ -123,6 +110,47 @@ def store_pattern(settings: dict) -> str:
             "store_from_filename.lazada is not configured, so no storefront can be "
             "derived from a Lazada export's file name.")
     return str(configured)
+
+
+def revenue_bucket(settings: dict) -> str:
+    """The one fee bucket whose ledger lines ARE revenue, from the contract.
+
+    Was the module constant `REVENUE_BUCKET` ("1.Doanh Thu") until 2026-08-20, when
+    the bucket names followed the column maps into the contract (A14 — the last of
+    M8/1.7's move). The value did not change.
+
+    Absent is a hard stop, not a fallback to a copy kept here: everything
+    `revenue_lines` invoices and everything `tieout.run_checks_lazada` conserves
+    hangs off this one string, so a contract that does not name it should say so
+    rather than quietly use something else.
+    """
+    configured = ((settings.get("fee_buckets") or {}).get("lazada") or {}).get("revenue")
+    if not configured:
+        raise ReconHardStop(
+            "fee_buckets.lazada.revenue is not configured. The Lazada bucket names "
+            "moved out of src/lazada.py into the contract on 2026-08-20; a config "
+            "without them cannot say which ledger lines are revenue.")
+    return str(configured)
+
+
+def promo_buckets(settings: dict) -> list[str]:
+    """The fee buckets whose per-(order, SKU) charges net INTO the invoiced unit
+    price, from the contract (evidence: gift lines credit full price, their
+    Flexi-Combo chargeback zeroes them in "PV used"; voucher/coin lines reduce the
+    paired product's Price KA by exactly their allocated amount / VAT — the block
+    now lives on the `fee_buckets.lazada.promo` rows).
+
+    Was the module constant `PROMO_BUCKETS` until 2026-08-20 (A14). Same hard-stop
+    posture as `revenue_bucket`: a missing list would silently stop netting promo,
+    which OVER-states every affected invoice line (docs/08-KNOWN-DEFECTS.md#110).
+    """
+    configured = ((settings.get("fee_buckets") or {}).get("lazada") or {}).get("promo")
+    if not configured:
+        raise ReconHardStop(
+            "fee_buckets.lazada.promo is not configured. The Lazada bucket names "
+            "moved out of src/lazada.py into the contract on 2026-08-20; a config "
+            "without them would silently stop netting promotional charges.")
+    return [str(b) for b in configured]
 
 
 def _read_ledger_file(f: Path, variant: str, settings: dict, log: RunLog) -> pd.DataFrame:
@@ -254,11 +282,13 @@ def classify_ledger(df: pd.DataFrame, fee_types: dict, vat_sku: dict[str, float]
     return df, unmapped
 
 
-def revenue_lines(df: pd.DataFrame, log: RunLog) -> pd.DataFrame:
+def revenue_lines(df: pd.DataFrame, settings: dict, log: RunLog) -> pd.DataFrame:
     """Invoicing base: revenue-bucket rows grouped per (store, order, SKU,
     product) — Price KA = summed pre-VAT amount, quantity = row count
-    (one Item Price Credit row per unit; FR_Total Quantity = 1 per row)."""
-    rev = df[df["fee_bucket"] == REVENUE_BUCKET]
+    (one Item Price Credit row per unit; FR_Total Quantity = 1 per row).
+
+    `settings` names the buckets (fee_buckets.lazada) since 2026-08-20 (A14)."""
+    rev = df[df["fee_bucket"] == revenue_bucket(settings)]
     grouped = rev.groupby(["store", "order_id", "sku_id", "product_name"], as_index=False, dropna=False).agg(
         quantity=("order_line_id", "count"),
         credits=("amount_incl_vat", "sum"),
@@ -269,7 +299,7 @@ def revenue_lines(df: pd.DataFrame, log: RunLog) -> pd.DataFrame:
     # gift variant, Masan order 524944050276659) — pairing by (order, SKU)
     # alone double-applies the promo pool to both name-groups. Matching by
     # name reproduces the team's KA values exactly (gift groups zero out).
-    promo_rows = df[df["fee_bucket"].isin(PROMO_BUCKETS)]
+    promo_rows = df[df["fee_bucket"].isin(promo_buckets(settings))]
     # `dropna=False` matches the revenue side above. Without it a promo row with a
     # null product name (or SKU) left the pool entirely while its revenue-side
     # counterpart stayed — and because promo is a CREDIT that reduces the invoiced

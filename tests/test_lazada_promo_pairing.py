@@ -32,6 +32,18 @@ from src import lazada  # noqa: E402
 
 VAT = 1.08
 
+# The bucket names moved out of `lazada.REVENUE_BUCKET`/`PROMO_BUCKETS` into the
+# contract on 2026-08-20 (A14); the accessors hard-stop without them, so the
+# fixture states them the way config/settings.yaml does.
+SETTINGS = {
+    "fee_buckets": {
+        "lazada": {
+            "revenue": "1.Doanh Thu",
+            "promo": ["2.Promotional Charges Flexi-Combo"],
+        },
+    },
+}
+
 
 def _ledger(product_name, promo_product_name, *, credits=540_000.0, promo=-108_000.0):
     """One revenue line and one promo charge against the same order and SKU.
@@ -45,7 +57,8 @@ def _ledger(product_name, promo_product_name, *, credits=540_000.0, promo=-108_0
         "order_line_id": ["L1", "L2"],
         "sku_id": ["SKU-1", "SKU-1"],
         "product_name": [product_name, promo_product_name],
-        "fee_bucket": [lazada.REVENUE_BUCKET, lazada.PROMO_BUCKETS[0]],
+        "fee_bucket": [lazada.revenue_bucket(SETTINGS),
+                       lazada.promo_buckets(SETTINGS)[0]],
         "amount_incl_vat": [credits, promo],
         "vat_rate": [VAT, VAT],
     })
@@ -53,7 +66,7 @@ def _ledger(product_name, promo_product_name, *, credits=540_000.0, promo=-108_0
 
 def test_a_named_product_nets_its_promo(log):
     """Control: the ordinary path, so a failure below is about the null key."""
-    out = lazada.revenue_lines(_ledger("CHIN-SU 35g", "CHIN-SU 35g"), log)
+    out = lazada.revenue_lines(_ledger("CHIN-SU 35g", "CHIN-SU 35g"), SETTINGS, log)
 
     assert len(out) == 1
     assert out.iloc[0]["promo"] == -108_000.0
@@ -66,7 +79,7 @@ def test_a_null_product_name_still_nets_its_promo(log):
 
     Dropped, the promo credit vanishes and `price_ka` becomes 500,000 — 25% high.
     """
-    out = lazada.revenue_lines(_ledger(None, None), log)
+    out = lazada.revenue_lines(_ledger(None, None), SETTINGS, log)
 
     assert len(out) == 1, "the revenue line itself must survive a null product name"
     assert out.iloc[0]["promo"] == -108_000.0, (
@@ -78,7 +91,7 @@ def test_a_null_product_name_still_nets_its_promo(log):
     # The discriminator: the pre-fix promo grouping, spelled out. If this stops
     # losing the row, the test above no longer proves anything.
     promo_rows = _ledger(None, None)
-    promo_rows = promo_rows[promo_rows["fee_bucket"].isin(lazada.PROMO_BUCKETS)]
+    promo_rows = promo_rows[promo_rows["fee_bucket"].isin(lazada.promo_buckets(SETTINGS))]
     dropped = promo_rows.groupby(
         ["store", "order_id", "sku_id", "product_name"], as_index=False,
     )["amount_incl_vat"].sum()
@@ -95,7 +108,7 @@ def test_pairing_a_null_product_does_not_fire_the_unpaired_warning(log):
     the warning means only what it says: promo charged against something with no
     revenue line at all.
     """
-    lazada.revenue_lines(_ledger(None, None), log)
+    lazada.revenue_lines(_ledger(None, None), SETTINGS, log)
 
     assert not any("paired to no revenue line" in w for w in log.warnings), log.warnings
 
@@ -105,7 +118,7 @@ def test_a_genuinely_unpaired_promo_is_still_reported(log):
     -22,486 VND on `l3`, both with zero null keys — so it must stay visible."""
     ledger = _ledger("CHIN-SU 35g", "A PRODUCT WITH NO REVENUE LINE")
 
-    out = lazada.revenue_lines(ledger, log)
+    out = lazada.revenue_lines(ledger, SETTINGS, log)
 
     assert out.iloc[0]["promo"] == 0.0
     assert any("paired to no revenue line" in w for w in log.warnings), log.warnings
@@ -124,7 +137,7 @@ def test_the_gift_variant_pairing_still_keys_on_product_name(log):
         _ledger("CHIN-SU gift", "CHIN-SU gift", credits=1_000_000.0, promo=-1_000_000.0),
     ], ignore_index=True)
 
-    out = lazada.revenue_lines(ledger, log).set_index("product_name")
+    out = lazada.revenue_lines(ledger, SETTINGS, log).set_index("product_name")
 
     assert out.loc["CHIN-SU gift", "price_ka"] == 0.0, "the gift group must zero out"
     assert out.loc["CHIN-SU 35g", "price_ka"] > 0.0, (

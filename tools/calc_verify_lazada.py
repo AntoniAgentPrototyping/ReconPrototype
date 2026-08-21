@@ -86,7 +86,7 @@ def main() -> int:
                   f"{'MATCH' if match else 'MISMATCH'}")
         all_ok &= ok_buckets
 
-        mine = lazada.revenue_lines(classified, log)
+        mine = lazada.revenue_lines(classified, settings, log)
         team = load_team(team_dir / f"laz_{window.lower()}_{args.slug}.csv")
         keys = ["order_id", "sku_id", "product_name"]
         merged = team.merge(mine, on=keys, how="outer", indicator=True)

@@ -17,6 +17,13 @@ COPY . .
 # NEXT_PUBLIC_* would be baked in here. Nothing is: the API address is read from
 # process.env at request time on the server, so one image runs in every
 # environment (see next.config.mjs).
+#
+# The ONE deliberate exception (C4): serverActions.allowedOrigins. next.config is
+# serialized into the standalone build, so the allowed Origin cannot be a runtime
+# value — an image built for a hostname is built FOR it. Empty (the default)
+# means no override, which is correct everywhere without a reverse proxy.
+ARG RECON_ALLOWED_ORIGINS=""
+ENV RECON_ALLOWED_ORIGINS=$RECON_ALLOWED_ORIGINS
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 

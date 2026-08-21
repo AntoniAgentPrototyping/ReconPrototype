@@ -45,7 +45,7 @@ from .artifacts import ArtifactStore
 from .auth import (AuthPolicy, Forbidden, PasswordChangeRequired, Principal, Role,
                    Unauthenticated)
 from .config import ServiceSettings
-from .models import Job, JobState, Run, payload
+from .models import ALL_PLATFORMS, Job, JobKind, JobState, Run, payload
 from .repository import ActiveJobExists, NotFound, Repository
 from .repository_identity import DuplicateUser, LastAdminProtected
 from .repository_m5 import ProposalConflict
@@ -89,6 +89,17 @@ def _safe_period(v: str) -> str:
     # scheme (`2026-05_w1`, `_s2x`, `_l1`...).
     if not all(ch.isalnum() or ch in "-_" for ch in v):
         raise ValueError("period may contain only letters, digits, '-' and '_'")
+    return v
+
+
+def _safe_month(v: str) -> str:
+    # Unlike a period, a month HAS a closed grammar — it is the prefix every
+    # period shares (`2026-07_w1` → `2026-07`, service/uploads.month_of) and the
+    # month-master job's own `period`. A malformed month would not error; it
+    # would quietly queue a master that covers nothing, so it is refused here.
+    if not (len(v) == 7 and v[:4].isdigit() and v[4] == "-"
+            and v[5:].isdigit() and 1 <= int(v[5:]) <= 12):
+        raise HTTPException(422, f"{v!r} is not a month; expected the form 2026-07")
     return v
 
 
@@ -170,6 +181,13 @@ class RosterDeclarationRequest(BaseModel):
     period: str = Field(min_length=1, max_length=64)
     partial: bool
     reason: str | None = Field(default=None, max_length=500)
+    # WHICH expected stores are declared absent (D3). None is the blanket —
+    # every expected store optional — kept expressible for declarations made
+    # before anyone knows which stores will be missing. Membership in the
+    # roster is deliberately NOT checked here: the window may be pinned to an
+    # older config, so `apply_partial_roster` validates against the roster the
+    # run actually uses and hard-stops on a name it does not know.
+    stores: list[str] | None = Field(default=None, max_length=200)
 
     @field_validator("period")
     @classmethod
@@ -244,6 +262,24 @@ class UnpinRequest(BaseModel):
     """
 
     reason: str = Field(min_length=1, max_length=500)
+
+
+class DispositionRequest(BaseModel):
+    """A decision on a recurring exception (D1).
+
+    `reason` has the roster declaration's floor, not `UnpinRequest`'s one
+    character: the disposition badge IS the record the next reader gets, and a
+    one-word "ok" defeats the purpose of writing anything down.
+    """
+
+    disposition: Literal["reviewed", "expected"]
+    reason: str = Field(min_length=8, max_length=500)
+
+
+class DispositionClearRequest(BaseModel):
+    # Re-opening a previously "expected" exception is as consequential as the
+    # mark was — same rule as unpinning: say why.
+    reason: str = Field(min_length=8, max_length=500)
 
 
 def _verify_artifact(art, actual: str) -> None:
@@ -434,6 +470,15 @@ def create_app(repo: Repository, store: ArtifactStore, *,
                     **repo.healthcheck()}
         except Exception as exc:                                     # noqa: BLE001
             raise HTTPException(503, f"database unavailable: {type(exc).__name__}") from exc
+
+    @app.get("/metrics")
+    def metrics(principal: Principal = viewer) -> dict:
+        """Service telemetry (C5): queue depth by state, run outcomes over 24h,
+        worker liveness, oldest queued age. Counts and ages only — never a store
+        name, never a figure. Viewer role rather than open: unlike /healthz this
+        reveals operational tempo, and every route here names a role.
+        """
+        return repo.metrics()
 
     @app.get("/meta")
     def meta() -> dict:
@@ -702,6 +747,44 @@ def create_app(repo: Repository, store: ArtifactStore, *,
         masters = [r for r in rows if (r.get("kind") or "window") == "month_master"]
         return {"month": month, "windows": windows, "month_masters": masters}
 
+    @app.get("/months")
+    def list_months(principal: Principal = viewer) -> dict:
+        """Every month the system knows about, newest first (D2).
+
+        Derived from the same evidence the board unions — jobs, roster
+        declarations and live uploads — so the month picker can only offer
+        months that actually exist, instead of a free-text box.
+        """
+        return {"months": repo.months()}
+
+    @app.post("/months/{month}/master", status_code=201)
+    def enqueue_month_master(month: str, principal: Principal = user) -> JSONResponse:
+        """Queue the month-end master by hand (A4).
+
+        The only other creation path is the automatic chain after a window run
+        (`worker._chain_month_master`) — which cannot help when a master needs
+        rebuilding WITHOUT a fresh window run: a late-arriving reference total, a
+        repin, a correction to an already-run window. Re-running a window as a
+        side effect would be a second settlement run of that window, which is
+        exactly the shape D9/D30 exist to prevent.
+
+        Same guards as the chain: `platform='all'`, the month as the period, so
+        "at most one master in flight per month" comes from the active-window
+        index (migration 013). `ActiveJobExists` is a 409 like any double-queue.
+        """
+        _safe_month(month)
+        try:
+            job, created = repo.enqueue(
+                ALL_PLATFORMS, month, kind=JobKind.MONTH_MASTER.value,
+                # From the session, never the body — the audit trail.
+                requested_by=principal.subject,
+                priority=-1)          # behind settlement work: it is a summary
+        except ActiveJobExists as exc:
+            return JSONResponse(
+                {"detail": str(exc), "existing": _job_payload(repo, exc.existing)},
+                status_code=409)
+        return JSONResponse(_job_payload(repo, job), status_code=201 if created else 200)
+
     # -- jobs ---------------------------------------------------------------
 
     @app.post("/jobs", status_code=201)
@@ -823,11 +906,15 @@ def create_app(repo: Repository, store: ArtifactStore, *,
         local = store.open(art.uri)
         if local is not None:
             _verify_artifact(art, artifacts.sha256_of(local))
+            # C12: the read audit, after the digest check and before a byte moves.
+            # In the request path deliberately — see migration 018.
+            repo.record_artifact_download(run_id, name, principal.subject)
             return FileResponse(local, filename=art.name)
 
         probe = store.stream(art.uri)
         if probe is not None:
             _verify_artifact(art, artifacts.sha256_of_chunks(probe))
+            repo.record_artifact_download(run_id, name, principal.subject)
 
         chunks = store.stream(art.uri)
         if chunks is None:
@@ -852,24 +939,65 @@ def create_app(repo: Repository, store: ArtifactStore, *,
     def run_exceptions(run_id: int, sheet: str | None = None,
                        limit: int = Query(default=200, ge=1, le=2000),
                        offset: int = Query(default=0, ge=0),
+                       open_only: bool = Query(default=False),
                        principal: Principal = viewer) -> dict:
         """Exception rows, with the sheet totals alongside.
 
         `sheets` carries `total_rows` and `stored_rows` so a capped queue can
-        never read as a complete one.
+        never read as a complete one. Each row carries its standing disposition
+        (D1); `open_only` is an explicit filter the screen offers — the default
+        answer is always the whole queue.
         """
         repo.get_run(run_id)
         return {"run_id": run_id, "sheets": repo.exception_sheets(run_id),
-                "exceptions": repo.exceptions(run_id, sheet=sheet, limit=limit, offset=offset)}
+                "exceptions": repo.exceptions(run_id, sheet=sheet, limit=limit,
+                                              offset=offset, open_only=open_only)}
 
     @app.get("/exceptions/{fingerprint}/history")
     def exception_history(fingerprint: str, principal: Principal = viewer) -> dict:
-        """Every run this same exception appeared in.
+        """Every run this same exception appeared in, and what was decided about it.
 
         An unmatched order recurring for six weeks is a different thing from one
-        that appeared once, and no per-run view can tell them apart.
+        that appeared once, and no per-run view can tell them apart. The current
+        disposition and its mark/clear history ride along (D1) — one payload,
+        the way `/config/pins` returns both `pins` and `events`.
         """
-        return {"fingerprint": fingerprint, "runs": repo.exception_history(fingerprint)}
+        return {"fingerprint": fingerprint,
+                "runs": repo.exception_history(fingerprint),
+                "disposition": payload(repo.exception_disposition(fingerprint)),
+                "events": [payload(e) for e in
+                           repo.exception_disposition_events(fingerprint)]}
+
+    @app.post("/exceptions/{fingerprint}/disposition")
+    def set_disposition(fingerprint: str, req: DispositionRequest,
+                        principal: Principal = user) -> dict:
+        """Mark a recurring exception `reviewed` or `expected` (D1).
+
+        **Annotates, never hides**: the queue still shows the row on every run,
+        badged with this decision — the fingerprint hashes identity columns, not
+        amounts, so an "expected" variance that has grown must still be seen.
+        USER, not ADMIN, for the roster declaration's reason: the person working
+        the queue is the one who knows why a row is expected, and the control is
+        the recorded reason, not the rank. The actor comes from the session.
+        """
+        # A fingerprint nothing has ever produced would be an orphan decision —
+        # most likely a typo'd URL, so refuse it rather than record it.
+        if not repo.exception_history(fingerprint, limit=1):
+            raise HTTPException(404, "no run has produced an exception with this "
+                                     "fingerprint, so there is nothing to decide on")
+        return payload(repo.set_exception_disposition(
+            fingerprint, disposition=req.disposition, reason=req.reason,
+            actor=principal.subject))
+
+    @app.delete("/exceptions/{fingerprint}/disposition")
+    def clear_disposition(fingerprint: str, req: DispositionClearRequest,
+                          principal: Principal = user) -> dict:
+        """Re-open a dispositioned exception. A reason is required — the clear
+        event records what was released, the unpin pattern (migration 020)."""
+        if not repo.clear_exception_disposition(
+                fingerprint, actor=principal.subject, reason=req.reason):
+            raise HTTPException(404, "no decision is recorded for this exception")
+        return {"fingerprint": fingerprint, "disposition": None}
 
     # -- uploads and staging ------------------------------------------------
 
@@ -954,7 +1082,22 @@ def create_app(repo: Repository, store: ArtifactStore, *,
         _check_window(platform, period, kind)
 
         filename = upload_lib.check_filename(file.filename or "")
-        raw = file.file.read()
+        # C7: bounded, never `read()` the whole part unchecked. Starlette has
+        # already spooled the multipart body to a temp file by now, so the memory
+        # event this prevents is OUR read of it — one oversized request on the
+        # threadpool used to cost its whole body in RAM. `read(limit + 1)` is how
+        # the cap is proven rather than trusted: a body that fills the extra byte
+        # is over, whatever its Content-Length claimed. 512 MB default is ~2.8x
+        # the largest export any platform has actually produced (184 MB, measured
+        # 2026-08-20); a legitimately bigger file raises RECON_MAX_UPLOAD_MB.
+        limit = settings.max_upload_mb * 1024 * 1024
+        raw = file.file.read(limit + 1)
+        if len(raw) > limit:
+            raise HTTPException(
+                413, f"{filename} is larger than {settings.max_upload_mb} MB, the "
+                     f"per-file limit (RECON_MAX_UPLOAD_MB). The largest real "
+                     f"export ever staged is 184 MB — check the file before "
+                     f"raising the limit.")
         if not raw:
             raise HTTPException(422, "empty file")
         digest = upload_lib.digest_bytes(raw)
@@ -1162,19 +1305,36 @@ def create_app(repo: Repository, store: ArtifactStore, *,
         found = {r.get("store_canonical") for r in rows if r.get("store_canonical")}
         missing, unexpected = materialize.roster_gap(domain, platform, found)
         declaration = repo.window_declaration(platform, period)
+
+        # D3: a declaration that names stores covers exactly those; a missing
+        # store it does not name will hard-stop, and `ready` must say so rather
+        # than promising a run the pipeline will refuse. `stores` NULL is the
+        # legacy blanket and covers everything, as before.
+        declared = (declaration or {}).get("declared_absent_stores")
+        declared_partial = bool(declaration and declaration["roster_declared_partial"])
+        covered = declared_partial and (declared is None
+                                        or set(missing) <= set(declared))
         return {
             "platform": platform, "period": period,
             "files": kinds,
             "stores_present": sorted(found),
             "missing_stores": missing,
             "unexpected_stores": unexpected,
+            # Names, not only the count: the declaration form offers the roster
+            # as a picklist instead of a memory test. Store names are business
+            # identifiers that already render on this page — never customer PII.
+            "expected_stores": sorted((domain.get("expected_stores") or {})
+                                      .get(platform) or []),
             "expected_store_count": len((domain.get("expected_stores") or {})
                                         .get(platform) or []),
             "problems": problems,
             "roster_declaration": payload(declaration) if declaration else None,
+            # D3's re-evaluation nudge: declared-absent stores that now HAVE
+            # files. Their figures are included either way — this is the record
+            # not matching the window any more, and the page renders it amber.
+            "declared_absent_present": sorted(set(declared or []) & found),
             # What `POST /jobs` will do with this window as it stands.
-            "ready": not problems and (not missing or bool(
-                declaration and declaration["roster_declared_partial"])),
+            "ready": not problems and (not missing or covered),
         }
 
     @app.post("/uploads/{upload_id}/reject")
@@ -1314,9 +1474,15 @@ def create_app(repo: Repository, store: ArtifactStore, *,
                 422, "a partial-roster declaration needs a reason of at least 8 "
                      "characters. The reason is the entire difference between this "
                      "and a checkbox.")
+        stores = sorted({s.strip() for s in (req.stores or []) if s.strip()}) or None
+        if stores and not req.partial:
+            raise HTTPException(
+                422, "a complete window has no absent stores to name — either "
+                     "declare it partial or leave the store list empty")
         return payload(repo.declare_window_roster(
             req.platform, req.period, partial=req.partial,
-            reason=reason or None, declared_by=principal.subject))
+            reason=reason or None, declared_by=principal.subject,
+            stores=stores))
 
     @app.delete("/windows/{platform}/{period}/roster")
     def clear_roster_declaration(platform: str, period: str,
@@ -1690,6 +1856,16 @@ def create_app(repo: Repository, store: ArtifactStore, *,
         return {**payload(applied), "git_commit": commit,
                 "config_version_id": version["id"],
                 "committed": commit is not None,
+                # D60 (C11): the DATABASE is the config audit record — a
+                # content-addressed, append-only version row naming who applied
+                # what. Git is the reviewable convenience of a developer checkout;
+                # a container has no `.git` by design, and that absence is stated
+                # here rather than left as an unexplained `committed: false`.
+                "audit_record": f"config_versions #{version['id']} "
+                                f"(sha256 {version['sha256'][:12]})",
+                "git_note": ("" if commit is not None else
+                             "no git checkout in this deployment; the database "
+                             "version above is the audit record (D60)"),
                 "verification": {"state": verdict.state, "window": verdict.window,
                                  "cells_moved": verdict.cells_moved,
                                  "strong": verdict.strong,
@@ -1835,6 +2011,11 @@ def main(argv: list[str] | None = None) -> int:
     import argparse
 
     import uvicorn
+
+    # C5: one JSON object per line on stdout, uvicorn's access/error lines
+    # included, so a collector sees the api in the same shape as the worker.
+    from .obs import setup_logging
+    setup_logging("api")
 
     settings = ServiceSettings.from_env()
     ap = argparse.ArgumentParser(description=__doc__,

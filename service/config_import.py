@@ -35,7 +35,8 @@ from . import config_store
 # Every top-level key this module understands. A key in the file and not here is a
 # hard error: see the module docstring.
 KNOWN_KEYS = frozenset({
-    "vat_factors", "masters_file", "reader_engine", "tolerances",
+    "vat_factors", "invoice_buckets", "fee_buckets",
+    "masters_file", "reader_engine", "tolerances",
     "window_settlement_bounds", "number_style", "numeric_coercion",
     "drop_unmapped_columns", "dedupe_rows", "dayfirst", "date_formats",
     "skip_rows_after_header",
@@ -50,6 +51,11 @@ SCALARS: tuple[tuple[str, str, str, str], ...] = (
     ("vat_factors.default", "src/masters.py", "Default VAT factor",
      "1.08 today. Enter 1.10 when the concession ends. Per-SKU exceptions come "
      "from the master file, not from here."),
+    ("vat_factors.rates", "src/finance_template.py", "VAT rates the workbooks split by",
+     "The closed set of rates the finance workbooks lay out per-rate control rows "
+     "and pivot tabs for. The Shopee and Lazada templates hard-wire their row "
+     "geometry to exactly these three, so a different list stops those runs with "
+     "a sentence rather than dropping a rate's rows out of the layout."),
     ("masters_file", "src/masters.py", "Team-owned master file",
      "Read live at runtime; the snapshot rows are the fallback and drift is "
      "reported every run."),
@@ -112,7 +118,7 @@ CONFIG_TABLES = (
     "config_scalars", "config_platforms", "config_reading", "config_column_maps",
     "config_stores", "config_store_aliases", "config_store_brands",
     "config_tolerances", "config_settlement_bounds", "config_fee_types",
-    "config_vat_sku",
+    "config_vat_sku", "config_invoice_buckets", "config_fee_buckets",
 )
 
 
@@ -178,6 +184,10 @@ def import_settings(conn, config_dir: Path, *, changed_by: str,
         counts["config_settlement_bounds"] = _load_bounds(cur, settings, content, changed_by, source)
         counts["config_fee_types"] = _load_fee_types(cur, config_dir, changed_by, source)
         counts["config_vat_sku"] = _load_vat_sku(cur, config_dir, changed_by, source)
+        counts["config_invoice_buckets"] = _load_invoice_buckets(
+            cur, settings, content, changed_by, source)
+        counts["config_fee_buckets"] = _load_fee_buckets(
+            cur, settings, content, changed_by, source)
     return counts
 
 
@@ -507,6 +517,63 @@ def _load_vat_sku(cur, config_dir: Path, who, source) -> int:
         [(sku, rate, who, source, order)
          for order, (sku, rate) in enumerate(collapsed.items())])
     return len(collapsed)
+
+
+def _load_invoice_buckets(cur, settings, content, who, source) -> int:
+    """`invoice_buckets.<platform>.match` rows plus one NULL-needle catch-all row
+    per platform, in file order — walk order is match order, so it is meaning."""
+    n = 0
+    order = 0
+    for platform, spec in sorted((settings.get("invoice_buckets") or {}).items()):
+        rows: list[tuple[str | None, Any]] = \
+            [(str(needle), bucket) for needle, bucket in ((spec or {}).get("match") or {}).items()]
+        default = (spec or {}).get("default")
+        if default is not None:
+            rows.append((None, default))
+        for needle, bucket in rows:
+            # evidence_for inherits the parent's block when a key has none of its
+            # own, so a per-needle comment wins and the platform block is the
+            # fallback — no explicit `or` chain needed.
+            path = (["invoice_buckets", platform, "match", needle]
+                    if needle is not None else ["invoice_buckets", platform, "default"])
+            evidence = _evidence(content, path)
+            cur.execute(
+                """insert into config_invoice_buckets
+                     (platform, needle, bucket, evidence, changed_by, source,
+                      sort_order)
+                   values (%s, %s, %s, %s, %s, %s, %s)""",
+                (platform, needle, str(bucket), evidence, who, source, order))
+            order += 1
+            n += 1
+    return n
+
+
+def _load_fee_buckets(cur, settings, content, who, source) -> int:
+    """`fee_buckets.<platform>` — one revenue row, any number of promo rows.
+
+    The YAML shape (a single `revenue:` scalar) makes a second revenue row
+    unrepresentable on this path; the row editor is the path that could add one,
+    and `config_rows._table_rules` refuses it there with the reason.
+    """
+    n = 0
+    order = 0
+    for platform, spec in sorted((settings.get("fee_buckets") or {}).items()):
+        rows: list[tuple[str, str]] = []
+        revenue = (spec or {}).get("revenue")
+        if revenue is not None:
+            rows.append(("revenue", str(revenue)))
+        rows += [("promo", str(b)) for b in ((spec or {}).get("promo") or [])]
+        for role, bucket in rows:
+            evidence = _evidence(content, ["fee_buckets", platform, role])
+            cur.execute(
+                """insert into config_fee_buckets
+                     (platform, role, bucket, evidence, changed_by, source,
+                      sort_order)
+                   values (%s, %s, %s, %s, %s, %s, %s)""",
+                (platform, role, bucket, evidence, who, source, order))
+            order += 1
+            n += 1
+    return n
 
 
 # ---------------------------------------------------------------------------

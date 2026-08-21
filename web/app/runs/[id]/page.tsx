@@ -23,11 +23,18 @@ const DIAGNOSTIC_ARTIFACTS = new Set(["run_metrics.json"]);
  * that was simply never compared printed one alarming line per store — which is
  * how an operator learns to ignore the list (docs/08-KNOWN-DEFECTS.md#11).
  */
-export default async function RunPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function RunPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ open?: string }>;
+}) {
   const [me, lang] = await Promise.all([whoami(), currentLang()]);
   if (!me) redirect("/login");
   if (me.must_change_password) redirect("/account/password");
 
+  const { open } = await searchParams;
   const { id } = await params;
   const runId = Number(id);
   if (!Number.isInteger(runId) || runId < 1) notFound();
@@ -52,10 +59,21 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
     <>
       <h1>
         {/* B4: the window this run belongs to was unreachable from here, so
-            "the upload was wrong" meant navigating by hand. */}
-        <a className="mono" href={`/windows/${run.platform}/${run.period}`}>
-          {run.platform} {run.period}
-        </a>{" "}
+            "the upload was wrong" meant navigating by hand. A month-master run
+            has NO window — its platform is 'all' and its period is the month —
+            so it links back to the board instead of to a window page that would
+            answer "not found" about something that is not a window (A4). */}
+        {run.platform === "all" ? (
+          <>
+            <a href={`/?month=${encodeURIComponent(run.period)}`}>
+              {t(lang, "monthSummary")} <span className="mono">{run.period}</span>
+            </a>
+          </>
+        ) : (
+          <a className="mono" href={`/windows/${run.platform}/${run.period}`}>
+            {run.platform} {run.period}
+          </a>
+        )}{" "}
         · run #{run.id}
       </h1>
       <p className="lede">
@@ -81,6 +99,17 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
       </p>
 
       {run.error && <div className="notice bad mono small">{run.error}</div>}
+
+      {/* A4: what this run queued next — including a FAILURE to queue the month
+          summary, which used to be visible only on the worker's own terminal. */}
+      {run.chained && (
+        <p
+          className={run.chained.startsWith("could not") ? "notice bad small" : "muted small"}
+          aria-live="polite"
+        >
+          {run.chained}
+        </p>
+      )}
 
       {!run.in_flight && run.status && verdict(lang, run.status).hint[lang] && (
         /* B9: the verdict's meaning, as text rather than only as a tooltip — a
@@ -246,7 +275,13 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
       )}
 
       <h2>{t(lang, "exceptions")}</h2>
-      <ExceptionQueue runId={run.id} sheets={sheets} />
+      <ExceptionQueue
+        runId={run.id}
+        sheets={sheets}
+        lang={lang}
+        canDecide={me.role !== "recon.viewer"}
+        openOnly={open === "1"}
+      />
 
       <h2>{t(lang, "runLog")}</h2>
       <RunLog runId={run.id} complete={!run.in_flight} />

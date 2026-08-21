@@ -33,6 +33,7 @@ from typing import Any
 
 from . import (backfill, calculate, classify, config, finance_template, ingest, lazada,
                masters, tieout)
+from .errors import ReconHardStop
 from .metrics import RunMetrics
 from .runlog import RunLog
 
@@ -126,6 +127,11 @@ class RunContext:
     vat_sku: dict = field(default_factory=dict)
     masters_source: str | None = None
     masters_searched: tuple = ()
+    # Which expected stores this run relaxed (D3): the declared list, or the
+    # whole roster in blanket/CLI mode; empty when the run is not partial. The
+    # workbook stamps its own caveat from this — the file the team invoices from
+    # must say it is a subset (closes D46's deliberate deferral).
+    roster_relaxed: tuple = ()
 
     @property
     def input_dir(self) -> Path:
@@ -136,30 +142,59 @@ class RunContext:
         return self.output_root / self.period / self.platform
 
 
-def apply_partial_roster(settings: dict, platform: str) -> int:
-    """Make every expected store optional for THIS run. Returns how many.
+def apply_partial_roster(settings: dict, platform: str,
+                         optional_stores: list[str] | None = None) -> int:
+    """Make expected stores optional for THIS run. Returns how many.
 
     Roster relaxation is a property of the run, never a config fork
     (docs/06-DECISIONS.md#d23): editing `config/settings.yaml` to generate a
     single-store golden would misreport what produced it, and would relax the
-    check for every later run too. So the expected list is folded into
+    check for every later run too. So the relaxed names are folded into
     `stores_optional` in the in-memory settings dict and the file on disk is
     untouched.
+
+    `optional_stores` names WHICH stores the declaration covers (D3). **None is
+    the original behaviour verbatim — every expected store optional** — and must
+    stay so: it is what the developer CLI's `--partial-roster` bool produces, and
+    the tiktok/shopee goldens are regenerated through exactly that path. A named
+    list relaxes only those stores, so a store the declaration does not name goes
+    back to hard-stopping in `check_stores` — which is the whole point: the
+    blanket waved a genuinely forgotten store through with the legitimately
+    absent ones.
+
+    A name the roster does not know is a hard stop, not a skip. The declaration
+    was written against SOME roster; if it no longer matches the one this run
+    uses (a repin, a rename), silently ignoring the name would resurrect the
+    misleading "missing store" stop one step later — better to say which name is
+    wrong here. Checked against the run's OWN roster deliberately: the API door
+    cannot do this, because the window may be pinned to a different config.
 
     The UNEXPECTED-store check stays armed. That is the asymmetry that makes this
     safe: a window may legitimately hold a subset of the roster, but a store
     nobody has confirmed must still stop the run (docs/06-DECISIONS.md#d3).
     """
     expected = (settings.get("expected_stores") or {}).get(platform) or []
+    if optional_stores is None:
+        relax = set(expected)
+    else:
+        unknown = sorted(set(optional_stores) - set(expected))
+        if unknown:
+            raise ReconHardStop(
+                f"the roster declaration for this window names store(s) the "
+                f"{platform} roster does not know: {unknown}. The roster this run "
+                f"uses has {len(expected)} store(s); fix the declaration (or the "
+                f"alias) rather than running with a claim that matches nothing.")
+        relax = set(optional_stores)
     optional = settings.setdefault("stores_optional", {})
-    optional[platform] = sorted(set(optional.get(platform) or []) | set(expected))
-    return len(expected)
+    optional[platform] = sorted(set(optional.get(platform) or []) | relax)
+    return len(relax)
 
 
 def build_context(platform: str, period: str, *, root: Path | None = None,
                   config_dir: Path | None = None, input_root: Path | None = None,
                   output_root: Path | None = None, refs: dict | None = None,
                   log: "Any" = None, partial_roster: bool = False,
+                  roster_stores: list[str] | None = None,
                   settings_text: str | None = None) -> RunContext:
     """Assemble a RunContext the way production does.
 
@@ -215,11 +250,26 @@ def build_context(platform: str, period: str, *, root: Path | None = None,
     # from more worker processes, which is what FOR UPDATE SKIP LOCKED is for.
     loaded = masters.load_masters(config_dir, settings, log)
 
+    # `roster_stores` names WHICH stores the window's declaration covers (D3);
+    # None — which is all the developer CLI's `--partial-roster` bool can say,
+    # and the mode every partial-roster golden is regenerated in — relaxes the
+    # whole expected list exactly as before.
+    relaxed: tuple = ()
     if partial_roster:
-        count = apply_partial_roster(settings, platform)
-        log.warn(f"PARTIAL ROSTER: {count} expected {platform} store(s) made optional "
-                 f"for this run; the unexpected-store check stays armed. This run "
-                 f"covers a SUBSET of the roster and its totals are not the month's.")
+        count = apply_partial_roster(settings, platform, roster_stores)
+        relaxed = tuple(sorted(roster_stores if roster_stores is not None
+                               else (settings.get("expected_stores") or {})
+                               .get(platform) or []))
+        if roster_stores is None:
+            log.warn(f"PARTIAL ROSTER: {count} expected {platform} store(s) made optional "
+                     f"for this run; the unexpected-store check stays armed. This run "
+                     f"covers a SUBSET of the roster and its totals are not the month's.")
+        else:
+            log.warn(f"PARTIAL ROSTER: {count} declared-absent {platform} store(s) made "
+                     f"optional for this run: {sorted(roster_stores)}. Any other "
+                     f"expected store still hard-stops if absent, and the "
+                     f"unexpected-store check stays armed. This run covers a SUBSET "
+                     f"of the roster and its totals are not the month's.")
 
     return RunContext(
         platform=platform, period=period,
@@ -228,6 +278,7 @@ def build_context(platform: str, period: str, *, root: Path | None = None,
         vat_sku=loaded["vat_sku"],
         masters_source=loaded.get("source"),
         masters_searched=tuple(loaded.get("searched") or ()),
+        roster_relaxed=relaxed,
     )
 
 
@@ -469,8 +520,12 @@ def _run_tiktok(ctx: RunContext, out: RunResult) -> None:
     out.frames.update(classified=cl, good=good, sku=sku, borrowed_orders=xw.borrowed)
 
     with m.stage("build_workbook", "serialize"):
+        meta = window_meta(sku["statement_date"])
+        # D3: the workbook says it is partial. From the relaxed set, never from
+        # `expected - found` — config-level stores_optional must not stamp.
+        meta["roster_relaxed"] = sorted(ctx.roster_relaxed)
         out.workbook, out.checks = finance_template.build_tiktok(
-            sku, settings, window_meta(sku["statement_date"]), log)
+            sku, settings, meta, log)
 
     log.section("TIE-OUT")
     with m.stage("tieout", "compute"):
@@ -570,8 +625,10 @@ def _run_shopee(ctx: RunContext, out: RunResult) -> None:
                       borrowed_orders=xw.borrowed)
 
     with m.stage("build_workbook", "serialize"):
+        meta = window_meta(sku["statement_date"])
+        meta["roster_relaxed"] = sorted(ctx.roster_relaxed)   # D3, as on tiktok
         out.workbook, out.checks = finance_template.build_shopee(
-            sku, settings, window_meta(sku["statement_date"]), log)
+            sku, settings, meta, log)
 
     ok = sku[sku["check_status"] == classify.SHOPEE_OK]
     out.frames["ok"] = ok
@@ -630,13 +687,15 @@ def _run_lazada(ctx: RunContext, out: RunResult) -> None:
     with m.stage("classify_ledger", "compute", rows_out=lambda: len(cl)):
         cl, unmapped = lazada.classify_ledger(ledger, fee_types, vat_sku, settings, log)
     with m.stage("revenue_lines", "compute", rows_out=lambda: len(rev)):
-        rev = lazada.revenue_lines(cl, log)
+        rev = lazada.revenue_lines(cl, settings, log)
     out.frames.update(ledger=ledger, classified=cl, revenue=rev, unmapped=unmapped)
     out.exceptions["unmapped_fees"] = unmapped
 
     with m.stage("build_workbook", "serialize"):
+        meta = window_meta(cl["transaction_date"])
+        meta["roster_relaxed"] = sorted(ctx.roster_relaxed)   # D3, as on tiktok
         out.workbook, out.checks = finance_template.build_lazada(
-            rev, settings, window_meta(cl["transaction_date"]), log, classified=cl)
+            rev, settings, meta, log, classified=cl)
 
     log.section("TIE-OUT")
     with m.stage("tieout", "compute"):

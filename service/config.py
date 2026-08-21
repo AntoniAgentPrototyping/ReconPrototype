@@ -171,6 +171,29 @@ class ServiceSettings:
     # Never silent: run_exception_sheets records total vs stored.
     exception_row_cap: int = 500
 
+    # -- Phase 6 (C7, C10) ----------------------------------------------------
+
+    # Per-FILE upload cap, megabytes. The whole multipart body was read with no
+    # limit before this existed, on a 40-thread pool. The largest real export ever
+    # staged is 184 MB (July Shopee `3_Income. Lashe.xlsx`, measured 2026-08-20),
+    # so 512 gives ~2.8x headroom over anything a platform has actually produced
+    # while refusing a runaway body before it becomes a memory event.
+    max_upload_mb: int = 512
+
+    # Retention (service/retention.py) — how long the disposable classes live.
+    # Scratch covers both job dirs kept on failure (kept FOR diagnosis; this is
+    # the diagnosis window) and orphaned incoming files. Log lines are the DB
+    # MIRROR of run_log.txt — the durable copy is the artifact — and sessions
+    # are dead rows long before this fires (60-minute idle, 12-hour absolute).
+    retention_scratch_days: int = 14
+    retention_log_days: int = 90
+    retention_sessions_days: int = 30
+    # Seconds between sweeps in the worker loop; 0 disables the automatic sweep
+    # (the admin CLI can still run one).
+    retention_interval_s: float = 3600.0
+    # The sweep WARNS when the scratch volume's free space falls below this.
+    disk_free_min_gb: float = 5.0
+
     @property
     def loopback_only(self) -> bool:
         return self.api_host in ("127.0.0.1", "localhost", "::1")
@@ -236,6 +259,12 @@ class ServiceSettings:
             session_absolute_hours=int(_env("SESSION_ABSOLUTE_HOURS", "12") or 12),
             login_attempts=int(_env("LOGIN_ATTEMPTS", "10") or 10),
             exception_row_cap=int(_env("EXCEPTION_ROW_CAP", "500") or 500),
+            max_upload_mb=int(_env("MAX_UPLOAD_MB", "512") or 512),
+            retention_scratch_days=int(_env("RETENTION_SCRATCH_DAYS", "14") or 14),
+            retention_log_days=int(_env("RETENTION_LOG_DAYS", "90") or 90),
+            retention_sessions_days=int(_env("RETENTION_SESSIONS_DAYS", "30") or 30),
+            retention_interval_s=float(_env("RETENTION_INTERVAL_S", "3600") or 3600),
+            disk_free_min_gb=float(_env("DISK_FREE_MIN_GB", "5") or 5),
             s3=S3Settings.from_env(),
         )
         settings.check_safe_to_serve()

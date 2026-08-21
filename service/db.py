@@ -49,6 +49,12 @@ def applied_migrations(conn: psycopg.Connection) -> dict[str, str]:
     # NB: the caller commits — see migrate().
 
 
+# One fixed key, shared by every process that migrates this database. The value
+# is arbitrary but must never change: two processes agreeing on the lock IS the
+# mechanism ('RECON' as a 40-bit integer).
+MIGRATE_LOCK_KEY = 0x5245434F4E
+
+
 def migrate(conn: psycopg.Connection) -> list[str]:
     """Apply every unapplied migration. Returns the filenames applied.
 
@@ -56,7 +62,33 @@ def migrate(conn: psycopg.Connection) -> list[str]:
     re-run: editing a shipped migration means two databases with the same
     recorded history and different schemas, which is the one failure mode a
     migration table exists to prevent.
+
+    **Serialized across processes by a Postgres advisory lock (C8).** The api and
+    the worker both migrate on start with no ordering between them, so first boot
+    was a race: the loser crashed on a duplicate `schema_migrations` key and
+    `restart: unless-stopped` masked it as an unexplained restart. The lock is
+    taken BEFORE `applied_migrations` is read — the loser blocks, then reads the
+    winner's rows and applies nothing. Session-level (it survives the per-file
+    commits below) and released in `finally`, so a failed migration does not leave
+    the database unlockable until the connection dies.
     """
+    with conn.cursor() as cur:
+        cur.execute("select pg_advisory_lock(%s)", (MIGRATE_LOCK_KEY,))
+    conn.commit()
+    try:
+        return _migrate_locked(conn)
+    finally:
+        # Roll back first: a failed migration leaves the transaction aborted, and
+        # an aborted transaction refuses every statement including the unlock.
+        # Advisory locks are session-level, so the rollback does not release it —
+        # the explicit unlock below does.
+        conn.rollback()
+        with conn.cursor() as cur:
+            cur.execute("select pg_advisory_unlock(%s)", (MIGRATE_LOCK_KEY,))
+        conn.commit()
+
+
+def _migrate_locked(conn: psycopg.Connection) -> list[str]:
     applied = applied_migrations(conn)
     conn.commit()
 

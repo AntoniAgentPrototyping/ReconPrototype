@@ -52,6 +52,7 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
 
+from .errors import ReconHardStop
 from .runlog import RunLog
 
 # Accounting masks copied from the team's cells (probe: 'Xuat HD bt' row 7).
@@ -67,8 +68,6 @@ PVSUM_BAD = "check lai sai roi"
 RETURN_FULL = "Return full ko xuat HD"
 RETURN_PARTIAL = "Return 1 phan phai xuat HD"
 
-VAT_RATES = (1.05, 1.08, 1.10)
-
 TOL_PIVOT_DRIFT_SHOPEE = 10000.0   # 'PV sum'!J11 — the working verdict
 TOL_PIVOT_DRIFT_LAZADA = 2000.0    # Summary!F17
 TOL_SKU_PIVOT = 1000.0             # 'PV xuat HD'!I1 intent
@@ -79,6 +78,39 @@ def _verdict(diff: float, tol: float, ok: str = VERDICT_OK, bad: str = VERDICT_B
     return ok if abs(diff) < tol else bad
 
 
+# D3: the file the team invoices from says it is partial (closes D46's deferral).
+# Vietnamese like the verdicts above — the workbook's own language — and a module
+# constant so the run page can extend the UI-parity discipline to it later.
+ROSTER_STAMP_LABEL = "Roster"
+
+
+def _roster_stamp(meta: dict, present) -> str | None:
+    """The partial-roster caveat for a control block, or None when the run was
+    not partial.
+
+    Reads `meta["roster_relaxed"]` — the stores the RUN relaxed — never
+    `expected - found`: a config-level `stores_optional` store absent from a
+    non-partial window must NOT stamp, or the four non-partial lazada goldens
+    would move and the caveat would fire on windows nobody declared.
+
+    Names, not only a count: store names appear throughout the workbook already
+    (they are business identifiers, never customer PII), and a count sends the
+    reviewer back to the system this file exists to stand apart from.
+
+    Deliberately NOT appended to `checks`: the stamp is a caveat about coverage,
+    not a verdict about money, and a checks entry would move `fingerprint_digest`
+    alongside the workbook digest.
+    """
+    relaxed = list(meta.get("roster_relaxed") or ())
+    if not relaxed:
+        return None
+    absent = sorted(set(relaxed) - {str(s) for s in present})
+    if absent:
+        return (f"File này thiếu {len(absent)} cửa hàng so với danh sách dự kiến "
+                f"(đã khai báo chạy thiếu): {', '.join(absent)}")
+    return "Đã khai báo chạy thiếu roster nhưng đủ cửa hàng — kiểm tra lại khai báo"
+
+
 def _bucket(store: str, buckets: list[tuple[str, str]], default: str) -> str:
     s = str(store).lower()
     for needle, name in buckets:
@@ -87,9 +119,67 @@ def _bucket(store: str, buckets: list[tuple[str, str]], default: str) -> str:
     return default
 
 
-TIKTOK_BUCKETS = [("kao", "KAO 8"), ("merries", "Merries 8")]
-SHOPEE_BUCKETS = [("curel", "Curel"), ("kao", "KAO"), ("merries", "Merries"), ("kate", "Kate")]
-LAZADA_BUCKETS = [("curel", "Curel.xlsx"), ("kao", "KAO.xlsx"), ("merries", "Merries.xlsx")]
+def vat_rates(settings: dict) -> tuple[float, ...]:
+    """The VAT rates the workbooks lay out control rows and pivots for, in order,
+    from the contract.
+
+    Was the module constant `VAT_RATES = (1.05, 1.08, 1.10)` until 2026-08-20, when
+    it followed the Lazada maps into the contract (A14). The values did not change.
+    Distinct from `vat_factors.default` (the fall-through a SKU gets when the master
+    says nothing): this list is the closed set of rates the template SPLITS by.
+
+    Absent is a hard stop, not a fallback to a copy kept here — the M8/1.7 rule.
+    """
+    configured = (settings.get("vat_factors") or {}).get("rates")
+    if not configured:
+        raise ReconHardStop(
+            "vat_factors.rates is not configured. The workbook's VAT-rate list "
+            "moved out of src/finance_template.py into the contract on 2026-08-20; "
+            "a config without it cannot lay out the per-rate control rows.")
+    return tuple(float(r) for r in configured)
+
+
+def invoice_buckets(settings: dict, platform: str) -> tuple[list[tuple[str, str]], str]:
+    """One platform's invoice-bucket rules from the contract: the ordered
+    (needle -> bucket) match list `_bucket` walks, plus the catch-all bucket a
+    store falls into when no needle matches its name.
+
+    Were the module constants `TIKTOK_BUCKETS` / `SHOPEE_BUCKETS` /
+    `LAZADA_BUCKETS` until 2026-08-20 (A14); the values did not change. Needles are
+    lowercased here because `_bucket` lowercases the store name — a mixed-case
+    needle typed into the editor must not silently match nothing.
+
+    What stays code, deliberately: the workbook TAB layout (which bucket gets a tab,
+    in what order, and the control-block cell positions). That is template geometry
+    pinned to the team's own files; each builder hard-stops if the contract names a
+    bucket its template has no tab for, so the two cannot silently disagree.
+    """
+    configured = (settings.get("invoice_buckets") or {}).get(platform) or {}
+    match, default = configured.get("match"), configured.get("default")
+    if match is None or not default:
+        raise ReconHardStop(
+            f"invoice_buckets.{platform} is not configured (needs `match` and "
+            f"`default`). The invoice-bucket lists moved out of "
+            f"src/finance_template.py into the contract on 2026-08-20; a config "
+            f"without them cannot group stores into invoice buckets.")
+    return [(str(n).lower(), str(b)) for n, b in match.items()], str(default)
+
+
+def _assert_buckets_have_tabs(platform: str, match: list[tuple[str, str]],
+                              default: str, layout: set[str]) -> None:
+    """A configured bucket the template cannot lay out must stop the run.
+
+    Without this, rows classified into an unknown bucket appear on no brand tab and
+    only surface as a pivots-vs-books breach downstream — money leaking into a
+    variance instead of a sentence naming the actual mistake.
+    """
+    unknown = sorted(({name for _, name in match} | {default}) - layout)
+    if unknown:
+        raise ReconHardStop(
+            f"invoice_buckets.{platform} names bucket(s) {unknown} that the "
+            f"{platform} workbook template has no tab for (it lays out "
+            f"{sorted(layout)}). Adding a bucket is a template change in "
+            f"src/finance_template.py, not a config edit.")
 
 
 class _Tab:
@@ -177,16 +267,22 @@ def _blank_repeats(df: pd.DataFrame, key: str, cols: list[str]) -> pd.DataFrame:
     return df
 
 
-def _sku_pivot(df: pd.DataFrame, keys: list[str], recombine: bool) -> pd.DataFrame:
+def _sku_pivot(df: pd.DataFrame, keys: list[str], recombine: bool,
+               default_factor: float) -> pd.DataFrame:
     """SKU pivot. recombine=True gives invoice semantics: rounded average
     unit price x quantity (every line internally consistent, totals drift
     from the exact books by the rounding — that drift is what the PV-sum
-    checks measure). recombine=False keeps the engine's exact sums."""
+    checks measure). recombine=False keeps the engine's exact sums.
+
+    `default_factor` fills the VAT factor of a group whose pre-VAT sum is zero
+    (nothing to derive a ratio from). It is `vat_factors.default` — this was a bare
+    `1.08` until 2026-08-20 (docs/14 A14), value-identical today but now moving with
+    the configured default rather than silently staying behind if it ever changes."""
     g = df.groupby(keys, as_index=False, dropna=False).agg(
         qty=("quantity", "sum"), pre_exact=("amount_pre_vat", "sum"),
         wv_exact=("amount_with_vat", "sum"))
     g["aveg"] = (g["pre_exact"] / g["qty"].replace(0, pd.NA)).fillna(0).round(0)
-    factor = (g["wv_exact"] / g["pre_exact"].replace(0, pd.NA)).fillna(1.08)
+    factor = (g["wv_exact"] / g["pre_exact"].replace(0, pd.NA)).fillna(default_factor)
     if recombine:
         g["pre"] = g["aveg"] * g["qty"]
         g["wv"] = (g["pre"] * factor).round(2)
@@ -207,18 +303,25 @@ def build_tiktok(sku: pd.DataFrame, settings: dict, meta: dict, log: RunLog) -> 
                                    float(tol.get("pv_xuat_hd_vnd", TOL_SKU_PIVOT)))
     wb = Workbook(write_only=True)
     checks: list[dict] = []
+    rates = vat_rates(settings)
+    default_factor = float((settings.get("vat_factors") or {}).get("default", 1.08))
+    match, catch_all = invoice_buckets(settings, "tiktok")
     df = sku.sort_values(["store", "order_id"]).copy()
-    df["bucket"] = df["store"].map(lambda s: _bucket(s, TIKTOK_BUCKETS, "Others 8"))
+    df["bucket"] = df["store"].map(lambda s: _bucket(s, match, catch_all))
 
     pre_total = float(df["amount_pre_vat"].sum())
     wv_total = float(df["amount_with_vat"].sum())
     by_rate_pre = {r: float(df.loc[df["vat_factor"].round(2) == r, "amount_pre_vat"].sum())
-                   for r in VAT_RATES}
+                   for r in rates}
     recomb_wv = sum(v * r for r, v in by_rate_pre.items())
 
-    # Brand pivots first (PV sum reads their recombined totals).
+    # Brand pivots first (PV sum reads their recombined totals). Tab order is
+    # template geometry (the team's file puts Merries before KAO); the contract
+    # decides which STORES land in each bucket, never the layout.
     brand_order = [("Merries 8", "Merries 8"), ("KAO 8", "KAO 8"), ("Others 8", "Others 8")]
-    brand_piv = {b: _sku_pivot(df[df["bucket"] == b], ["sku_id", "sku_name"], recombine=True)
+    _assert_buckets_have_tabs("tiktok", match, catch_all, {b for _, b in brand_order})
+    brand_piv = {b: _sku_pivot(df[df["bucket"] == b], ["sku_id", "sku_name"],
+                               recombine=True, default_factor=default_factor)
                  for _, b in brand_order}
     brand_pre = {b: float(p["pre"].sum()) for b, p in brand_piv.items()}
     brand_wv = {b: float(p["wv"].sum()) for b, p in brand_piv.items()}
@@ -244,6 +347,13 @@ def build_tiktok(sku: pd.DataFrame, settings: dict, meta: dict, log: RunLog) -> 
     t.put("H7", wv_total - piv_wv_sum, ACC0)
     t.put("G8", _verdict(pre_total - piv_pre_sum, tol_pv, PVSUM_OK, PVSUM_BAD))
     t.put("H8", _verdict(wv_total - piv_wv_sum, tol_pv, PVSUM_OK, PVSUM_BAD))
+    # D3: row 1, where a caveat is read first — and the only safe region: a
+    # `put` at a row >= data_start_row is dropped by `_Tab.emit` when the tab
+    # emits data (see docs/08-KNOWN-DEFECTS.md on the missing side-block rows).
+    stamp = _roster_stamp(meta, df["store"].unique())
+    if stamp:
+        t.put("A1", ROSTER_STAMP_LABEL)
+        t.put("B1", stamp)
     t.label_row(4, 1, ["Source.Name", "VAT KA sử dụng", "Sum of Amount before VAT", "Sum of Check total"])
     t.emit(pv[["store", "vat_factor", "pre", "wv"]], data_start_row=5,
            fmts=[None, ACC2, ACC0, ACC0], widths={"A": 34, "C": 20, "D": 20, "F": 12, "G": 18, "H": 18})
@@ -270,7 +380,7 @@ def build_tiktok(sku: pd.DataFrame, settings: dict, meta: dict, log: RunLog) -> 
     })
     out = _blank_repeats(out, "Mã đơn hàng", ["Source.Name non repeat", "Mã đơn hàng non repeat"])
     t.put("L1", "check"); t.put("M1", "no VAT"); t.put("N1", "with VAT"); t.put("O1", "check")
-    for i, r in enumerate(VAT_RATES):
+    for i, r in enumerate(rates):
         t.put(f"K{2 + i}", r, ACC2)
         t.put(f"M{2 + i}", by_rate_pre[r], ACC0)
         t.put(f"N{2 + i}", by_rate_pre[r] * r, ACC0)
@@ -305,7 +415,8 @@ def build_tiktok(sku: pd.DataFrame, settings: dict, meta: dict, log: RunLog) -> 
 
     # --- PV xuat HD (exact SKU pivot; drop-detection check at 1,000) ---
     t = _Tab(wb, "PV xuat HD")
-    piv = _sku_pivot(df, ["store", "sku_id", "sku_name"], recombine=False)
+    piv = _sku_pivot(df, ["store", "sku_id", "sku_name"], recombine=False,
+                     default_factor=default_factor)
     pivot_pre = float(piv["pre"].sum())
     t.put("A1", "VAT KA sử dụng"); t.put("B1", "(All)")
     t.put("E1", "Sale source data"); t.put("F1", pre_total, ACC0)
@@ -337,25 +448,44 @@ def build_shopee(sku: pd.DataFrame, settings: dict, meta: dict, log: RunLog) -> 
     wb = Workbook(write_only=True)
     checks: list[dict] = []
 
+    rates = vat_rates(settings)
+    if tuple(rates) != (1.05, 1.08, 1.10):
+        # The Shopee template's geometry is hard-wired to this trio: the PV sum side
+        # block puts 1.05 on its first row and 1.10 on its last, and the per-rate
+        # tabs are named for them. A different list must extend the template, not
+        # silently drop a rate's rows out of the layout.
+        raise ReconHardStop(
+            f"vat_factors.rates is {list(rates)}, but the Shopee workbook template "
+            f"lays out control rows and tabs for exactly [1.05, 1.08, 1.1]. "
+            f"Changing the rate list is a template change in "
+            f"src/finance_template.py, not a config edit.")
+    default_factor = float((settings.get("vat_factors") or {}).get("default", 1.08))
+    match, catch_all = invoice_buckets(settings, "shopee")
+
     df = sku.sort_values(["store", "order_id"]).copy()
     ok = df[df["check_status"] == "ok"].copy()
     ret = df[df["check_status"] == "Return"].copy()
-    ok["bucket"] = ok["store"].map(lambda s: _bucket(s, SHOPEE_BUCKETS, "Others"))
+    ok["bucket"] = ok["store"].map(lambda s: _bucket(s, match, catch_all))
 
     pre_total = float(ok["amount_pre_vat"].sum())
     wv_total = float(ok["amount_with_vat"].sum())
     by_rate_pre = {r: float(ok.loc[ok["vat_factor"].round(2) == r, "amount_pre_vat"].sum())
-                   for r in VAT_RATES}
+                   for r in rates}
     recomb_wv = sum(v * r for r, v in by_rate_pre.items())
 
-    # Pivot frames first (PV sum reads their recombined totals).
+    # Pivot frames first (PV sum reads their recombined totals). Tab order and the
+    # side-block row order are template geometry; the contract only decides which
+    # stores land in each bucket.
     brand_names = ("Curel", "KAO", "Merries", "Kate", "Others")
-    brand_piv = {b: _sku_pivot(ok[ok["bucket"] == b], ["sku_id", "sku_name"], recombine=True)
+    _assert_buckets_have_tabs("shopee", match, catch_all, set(brand_names))
+    brand_piv = {b: _sku_pivot(ok[ok["bucket"] == b], ["sku_id", "sku_name"],
+                               recombine=True, default_factor=default_factor)
                  for b in brand_names}
     brand_pre = {b: float(p["pre"].sum()) for b, p in brand_piv.items()}
     vat_piv = {r: _sku_pivot(ok[ok["vat_factor"].round(2) == r],
-                             ["store", "sku_id", "sku_name"], recombine=True)
-               for r in VAT_RATES}
+                             ["store", "sku_id", "sku_name"], recombine=True,
+                             default_factor=default_factor)
+               for r in rates}
     vat_pre = {r: float(p["pre"].sum()) for r, p in vat_piv.items()}
 
     # Partial-return invoiceable total = the template's 'return'!Q5.
@@ -392,6 +522,13 @@ def build_shopee(sku: pd.DataFrame, settings: dict, meta: dict, log: RunLog) -> 
     t.put("I10", "Diff"); t.put("J10", pre_total - j9, ACC0); t.put("K10", wv_total - k9, ACC0)
     t.put("J11", _verdict(pre_total - j9, tol_drift, PVSUM_OK, PVSUM_BAD))
     t.put("K11", _verdict(wv_total - k9, tol_drift, PVSUM_OK, PVSUM_BAD))
+    # D3: row 1, as on tiktok (rows >= data_start_row are dropped by emit).
+    # Present = every store in the input, returns included — a store that only
+    # refunded this window is still not "absent".
+    stamp = _roster_stamp(meta, sku["store"].unique())
+    if stamp:
+        t.put("A1", ROSTER_STAMP_LABEL)
+        t.put("B1", stamp)
     t.label_row(4, 1, ["Source.Name", "Create_Order_Month", "Finance_Month", "VAT KA sử dụng",
                        "Sum of Amount before VAT", "Sum of Check total"])
     t.emit(pvt[["store", "com", "fm", "vat_factor", "pre", "wv"]], data_start_row=5,
@@ -424,7 +561,7 @@ def build_shopee(sku: pd.DataFrame, settings: dict, meta: dict, log: RunLog) -> 
     t.put("N1", "check"); t.put("O1", "no VAT"); t.put("P1", "with VAT"); t.put("Q1", "check")
     t.put("M2", "Tổng xuất HD (lines + return 1 phần)"); t.put("N2", wv_total + partial_total, ACC0)
     t.put("M3", "Return 1 phần phải xuất HD"); t.put("N3", partial_total, ACC0)
-    for i, r in enumerate(VAT_RATES):
+    for i, r in enumerate(rates):
         t.put(f"L{2 + i}", r, ACC2)
         t.put(f"O{2 + i}", by_rate_pre[r], ACC0)
         t.put(f"P{2 + i}", by_rate_pre[r] * r, ACC0)
@@ -510,7 +647,8 @@ def build_shopee(sku: pd.DataFrame, settings: dict, meta: dict, log: RunLog) -> 
 
     # --- PV xuat HD (exact SKU pivot; drop-detection check at 1,000) ---
     t = _Tab(wb, "PV xuat HD")
-    piv = _sku_pivot(ok, ["store", "sku_id", "sku_name"], recombine=False)
+    piv = _sku_pivot(ok, ["store", "sku_id", "sku_name"], recombine=False,
+                     default_factor=default_factor)
     pivot_pre = float(piv["pre"].sum())
     t.put("A1", "VAT KA sử dụng"); t.put("B1", "(All)")
     t.put("E1", "Sale source data"); t.put("F1", pre_total, ACC0)
@@ -539,9 +677,20 @@ def build_lazada(rev: pd.DataFrame, settings: dict, meta: dict, log: RunLog,
     checks: list[dict] = []
     month_label = meta.get("month_label", "")
     period_label = meta.get("period_label", "")
+    rates = vat_rates(settings)
+    if tuple(rates) != (1.05, 1.08, 1.10):
+        # Same hard-wiring as Shopee's: the Summary block puts 1.05 on row 7, the
+        # brand rows at 1.08 and 1.10 on row 12, and the per-rate tab pairs are
+        # named for the trio.
+        raise ReconHardStop(
+            f"vat_factors.rates is {list(rates)}, but the Lazada workbook template "
+            f"lays out its Summary rows and per-rate tab pairs for exactly "
+            f"[1.05, 1.08, 1.1]. Changing the rate list is a template change in "
+            f"src/finance_template.py, not a config edit.")
+    match, catch_all = invoice_buckets(settings, "lazada")
 
     df = rev.sort_values(["store", "order_id"]).copy()
-    df["bucket"] = df["store"].map(lambda s: _bucket(s, LAZADA_BUCKETS, "Others"))
+    df["bucket"] = df["store"].map(lambda s: _bucket(s, match, catch_all))
     df["money"] = df["credits"].fillna(0) + df["promo"].fillna(0)   # actual settled VND incl VAT
 
     # Order-less revenue: ledger rows the team's Lib maps to 1.Doanh Thu but
@@ -574,12 +723,14 @@ def build_lazada(rev: pd.DataFrame, settings: dict, meta: dict, log: RunLog,
     # Sale report = ALL Doanh Thu money incl. order-less items (matching the
     # team's bucket view); the invoiceable portion excludes them.
     orderless_rate = {r: float(orderless.loc[orderless["vat_rate"].round(2) == r, "money"].sum())
-                      for r in VAT_RATES}
-    sale_report = {r: float(at(r)["money"].sum()) + orderless_rate[r] for r in VAT_RATES}
-    no_vat_exact = {r: float(at(r)["check_no_vat"].sum()) for r in VAT_RATES}
-    rate_piv = {r: laz_pivot(at(r)) for r in VAT_RATES}
-    brand_piv = {b: laz_pivot(df[df["bucket"] == b])
-                 for b in ("Curel.xlsx", "KAO.xlsx", "Merries.xlsx", "Others")}
+                      for r in rates}
+    sale_report = {r: float(at(r)["money"].sum()) + orderless_rate[r] for r in rates}
+    no_vat_exact = {r: float(at(r)["check_no_vat"].sum()) for r in rates}
+    rate_piv = {r: laz_pivot(at(r)) for r in rates}
+    # Tab layout is template geometry, as on the other two platforms.
+    brand_tabs = ("Curel.xlsx", "KAO.xlsx", "Merries.xlsx", "Others")
+    _assert_buckets_have_tabs("lazada", match, catch_all, set(brand_tabs))
+    brand_piv = {b: laz_pivot(df[df["bucket"] == b]) for b in brand_tabs}
     brand_wv = {b: float(p["wv"].sum()) for b, p in brand_piv.items()}
     rate_wv = {r: float(p["wv"].sum()) for r, p in rate_piv.items()}
     rate_novat = {r: float(p["no_vat"].sum()) for r, p in rate_piv.items()}
@@ -606,14 +757,23 @@ def build_lazada(rev: pd.DataFrame, settings: dict, meta: dict, log: RunLog,
     t.put("D16", "Order đã xuất HD trước đó"); t.put("F16", prior_invoiced, PLAIN2)
     t.put("D17", "Diff"); t.put("F17", summary_diff, PLAIN2)
     t.put("D18", "Check"); t.put("F18", _verdict(summary_diff, TOL_PIVOT_DRIFT_LAZADA))
+    # D3: row 1, as on the other two platforms. Lazada has no roster today, so
+    # the relaxed set is empty and this never fires — implemented anyway so the
+    # day expected_stores.lazada is answered needs no template change.
+    stamp = _roster_stamp(
+        meta, pd.concat([rev["store"], classified["store"]]).unique()
+        if classified is not None else rev["store"].unique())
+    if stamp:
+        t.put("A1", ROSTER_STAMP_LABEL)
+        t.put("B1", stamp)
     t.emit(widths={"D": 44, "E": 16, "F": 20})
     checks.append({"tab": "Summary", "check": "sale report vs invoice total (with VAT)",
                    "diff": summary_diff, "tol": TOL_PIVOT_DRIFT_LAZADA,
                    "verdict": _verdict(summary_diff, TOL_PIVOT_DRIFT_LAZADA)})
 
     # --- per-rate pair: 'X KA used' (SKU invoice view) + 'X' (exact lines) ---
-    for rate in VAT_RATES:
-        key = {1.05: "1.05", 1.08: "1.08", 1.10: "1.10"}[rate]
+    for rate in rates:
+        key = f"{rate:.2f}"
         sub = at(rate)
         piv = rate_piv[rate]
 
@@ -675,7 +835,7 @@ def build_lazada(rev: pd.DataFrame, settings: dict, meta: dict, log: RunLog,
                        "verdict": _verdict(line_diff, TOL_LAZ_LINE)})
 
     # --- brand tabs (template: totals at F2, header row 3) ---
-    for b in ("Curel.xlsx", "KAO.xlsx", "Merries.xlsx", "Others"):
+    for b in brand_tabs:
         t = _Tab(wb, b)
         piv = brand_piv[b]
         stores = df.loc[df["bucket"] == b, "store"].unique()

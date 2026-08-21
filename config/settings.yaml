@@ -14,6 +14,78 @@
 # `default:` line to 1.10 and nothing else.
 vat_factors:
   default: 1.08
+  # The closed set of rates the workbooks SPLIT by — per-rate control rows,
+  # per-rate pivot tabs ('1.05 KA', '1.08 KA', '1.10 KA', Lazada's Summary
+  # rows). Read out of the team's own template files, where these three are
+  # the only rates any tab lays out. Was `finance_template.VAT_RATES`, code
+  # until 2026-08-20 (docs/14 A14); the values are unchanged. Distinct from
+  # `default` above: that is what an unlisted SKU falls through to, this is
+  # what the workbook layout enumerates. The Shopee and Lazada templates
+  # hard-wire their control-row GEOMETRY to exactly this trio, so those
+  # builders hard-stop on any other list — extending it is a template change,
+  # stated in `finance_template.vat_rates`.
+  rates: [1.05, 1.08, 1.10]
+
+# Which invoice bucket each STORE's lines land in, per platform: `match` is an
+# ordered (needle -> bucket) list walked against the lowercased store name,
+# first hit wins; `default` is the catch-all for a store no needle matches.
+# Evidence: the team's own "PV sum" bucket pivots (TikTok For KA file, both
+# May windows: "KAO 8%", "Merries 8%", "Others 8%"; Shopee/Lazada For KA files
+# name Curel/KAO/Merries/Kate splits) — reverse-engineered with the rest of
+# the template in M2.5 and verified by the committed goldens ever since.
+# Was `finance_template.TIKTOK_BUCKETS`/`SHOPEE_BUCKETS`/`LAZADA_BUCKETS`,
+# code until 2026-08-20 (docs/14 A14); the values are unchanged.
+#
+# What is NOT here, deliberately: the workbook TAB layout (which bucket gets a
+# tab, in what order, the control-block cell positions). That is template
+# geometry pinned to the team's own files and stays in src/finance_template.py;
+# a bucket named here that the template has no tab for hard-stops the run
+# rather than leaking its money into a pivot-drift breach.
+invoice_buckets:
+  tiktok:
+    match:
+      kao: "KAO 8"
+      merries: "Merries 8"
+    default: "Others 8"
+  shopee:
+    match:
+      curel: "Curel"
+      kao: "KAO"
+      merries: "Merries"
+      kate: "Kate"
+    default: "Others"
+  lazada:
+    # The Lazada template names its brand tabs after the team's source FILES
+    # ("Curel.xlsx"), which is why the bucket names carry an extension.
+    match:
+      curel: "Curel.xlsx"
+      kao: "KAO.xlsx"
+      merries: "Merries.xlsx"
+    default: "Others"
+
+# The Lazada ledger's bucket vocabulary, as the team's Lib port spells it
+# (config_fee_types maps each fee NAME into one of these buckets; this key says
+# which bucket IS revenue and which ones net into the invoiced unit price).
+# Was `lazada.REVENUE_BUCKET`/`PROMO_BUCKETS`, code until 2026-08-20 (docs/14
+# A14); values unchanged.
+fee_buckets:
+  lazada:
+    # Revenue = gross "Item Price Credit" lines (even free gifts credit full
+    # price). Verified by tools/calc_verify_lazada.py against the team's own
+    # "PV used" pivots — 1,306 revenue lines exact (src/lazada.py header).
+    revenue: "1.Doanh Thu"
+    # Promotional buckets whose per-(order, SKU) charges net INTO the invoiced
+    # unit price (evidence: gift lines credit full price, their Flexi-Combo
+    # chargeback zeroes them in "PV used"; voucher/coin lines reduce the paired
+    # product's Price KA by exactly their allocated amount / VAT). Dropping one
+    # from this list OVER-states every affected invoice line
+    # (docs/08-KNOWN-DEFECTS.md#110), which is why an absent list hard-stops.
+    promo:
+      - "2.Promotional Charges Flexi-Combo"
+      - "3.Promotional Charges Vouchers"
+      - "3.1 Seller Funded Marketing Voucher"
+      - "4.1 LazCoints Discount"
+      - "5. Lazcoin discount"
 
 # Team-owned master (additive-only, maintained by the team): fee-type
 # mapping (Lib sheet) + per-SKU VAT exceptions (VAT sheet). Read live at

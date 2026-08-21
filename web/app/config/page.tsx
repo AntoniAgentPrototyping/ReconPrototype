@@ -83,7 +83,11 @@ export default async function ConfigPage() {
                 {config.git_commit ? (
                   config.git_commit.slice(0, 12)
                 ) : (
-                  <span className="muted">not a git checkout</span>
+                  <span className="muted">
+                    none — in this deployment the database is the audit record:
+                    every applied change is a content-addressed version row naming
+                    who approved it (D60)
+                  </span>
                 )}
               </td>
             </tr>

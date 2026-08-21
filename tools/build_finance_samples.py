@@ -71,7 +71,7 @@ def sample_lazada(period: str, settings: dict, meta: dict, log: RunLog,
     cl, unmapped = lazada.classify_ledger(ledger, fee_types, vat_sku, settings, log)
     if len(unmapped):
         log.warn(f"{len(unmapped)} unmapped fee rows are NOT in this sample")
-    rev = lazada.revenue_lines(cl, log)
+    rev = lazada.revenue_lines(cl, settings, log)
     wb, checks = finance_template.build_lazada(rev, settings, meta, log)
     path = OUT / f"Laz result KA used {meta['label']}.xlsx"
     finance_template.write_workbook(wb, path, checks, log)

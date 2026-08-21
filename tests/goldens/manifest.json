@@ -487,14 +487,9 @@
       "partial_roster": true,
       "rebaselined": {
         "changed": [
-          "fingerprint_digest",
-          "stage_row_counts",
-          "stores_seen",
-          "variance_count",
-          "variances_digest",
           "workbook"
         ],
-        "reason": "Golden coverage broadened: the Xmenforboss 1-10 sub-window (income settled 2026-05-01..10, the same window as Masan) had never been staged. Window goes 1 -> 2 stores. Zero order-id overlap between the two stores' income files, so the window still partitions cleanly. Every digest moves by construction - more input, not changed behaviour. Roadmap immediate to-do #2."
+        "reason": "D3/D63: partial-roster stamp ('Roster' + absent-store sentence, PV sum A1/B1) closes the D46 deferral; expected delta is exactly these two cells on the four partial-roster windows"
       },
       "stage_row_counts": {
         "apply_settlement_bounds": 119382,
@@ -514,8 +509,8 @@
         "schema": 1,
         "sheets": [
           {
-            "cell_count": 48,
-            "digest": "d911c65017c405bab07edb923accf655bc2d22593e594f96641e1afa1151d337",
+            "cell_count": 50,
+            "digest": "678a06c72b7194fe6f9b5b0562c9444f065e9576fa29d99cf7bd1e33ce352daa",
             "index": 0,
             "max_col": 11,
             "max_row": 8,
@@ -615,6 +610,12 @@
     "2026-05_s2/shopee": {
       "fingerprint_digest": "sha256:702c1eeb8de8dc1970495394048aef4750bd157e4410b95ee0cc4acf4510569b",
       "partial_roster": true,
+      "rebaselined": {
+        "changed": [
+          "workbook"
+        ],
+        "reason": "D3/D63: partial-roster stamp ('Roster' + absent-store sentence, PV sum A1/B1) closes the D46 deferral; expected delta is exactly these two cells on the four partial-roster windows"
+      },
       "stage_row_counts": {
         "apply_settlement_bounds": 39691,
         "classify_shopee_income": 14989,
@@ -633,8 +634,8 @@
         "schema": 1,
         "sheets": [
           {
-            "cell_count": 36,
-            "digest": "30b298299c03ebc8e56582fde5bd494119adf093625222b950f1c33f697cd634",
+            "cell_count": 38,
+            "digest": "0265b08fbca2f3591927dfd34cd6bd6400198c99f00b6286e0e8e5d6f76cb9f4",
             "index": 0,
             "max_col": 11,
             "max_row": 6,
@@ -734,6 +735,12 @@
     "2026-05_s3/shopee": {
       "fingerprint_digest": "sha256:1d5a5cd44700c85411ea78c3d44092d89f1232ab25edb49e8c0f512335265b18",
       "partial_roster": true,
+      "rebaselined": {
+        "changed": [
+          "workbook"
+        ],
+        "reason": "D3/D63: partial-roster stamp ('Roster' + absent-store sentence, PV sum A1/B1) closes the D46 deferral; expected delta is exactly these two cells on the four partial-roster windows"
+      },
       "stage_row_counts": {
         "apply_settlement_bounds": 44890,
         "classify_shopee_income": 17080,
@@ -752,8 +759,8 @@
         "schema": 1,
         "sheets": [
           {
-            "cell_count": 30,
-            "digest": "06edd859e53902e25ab6f514d7c1e21a33d546e14b3d890c8a2f82c6b865abba",
+            "cell_count": 32,
+            "digest": "f40bac0de17f97e99fee5d4cab07f5c540b6a0125e93d2c3c749c648ed3e4133",
             "index": 0,
             "max_col": 11,
             "max_row": 5,
@@ -855,14 +862,9 @@
       "partial_roster": true,
       "rebaselined": {
         "changed": [
-          "fingerprint_digest",
-          "stage_row_counts",
-          "stores_seen",
-          "variance_count",
-          "variances_digest",
           "workbook"
         ],
-        "reason": "Golden coverage broadened: the Mars store's income (settled 2026-05-01..17, the same window) plus its two complementary order exports had never been staged. Window goes 1 -> 2 stores. The two Mars order files were checked for the double-pull class first: 1 shared order in 24,408, and each alone covers only ~half the income orders, so they are parts and not re-pulls. Every digest moves by construction - more input, not changed behaviour. Roadmap immediate to-do #2."
+        "reason": "D3/D63: partial-roster stamp ('Roster' + absent-store sentence, PV sum A1/B1) closes the D46 deferral; expected delta is exactly these two cells on the four partial-roster windows"
       },
       "stage_row_counts": {
         "apply_settlement_bounds": 65551,
@@ -882,8 +884,8 @@
         "schema": 1,
         "sheets": [
           {
-            "cell_count": 25,
-            "digest": "97fdb3fe085fdbe3fed8df1e8ab9696e3dd37cc0313e0387b909704e2a88e6a3",
+            "cell_count": 27,
+            "digest": "c45ef825120c09e85adcffa41cdc591cf68431acd2906af4532209edde6d0dd9",
             "index": 0,
             "max_col": 8,
             "max_row": 6,

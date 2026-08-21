@@ -198,8 +198,10 @@ export type SessionInfo = {
 export type BoardRow = {
   platform: string;
   period: string;
-  job_id: number;
-  job_state: "queued" | "leased" | "done" | "error" | "cancelled";
+  /** NULL when the window is known only from uploads or a roster declaration —
+   *  nothing has been queued for it yet (D2). */
+  job_id: number | null;
+  job_state: "queued" | "leased" | "done" | "error" | "cancelled" | null;
   /** Since M6 this comes from the WINDOW's declaration, not from the job — so the
    *  board shows what a person stated about the window, with their reason. */
   partial_roster: boolean;
@@ -209,7 +211,7 @@ export type BoardRow = {
    *  directory rather than uploads: no preview was computed. */
   roster_missing: number | null;
   requested_by: string | null;
-  queued_at: string;
+  queued_at: string | null;
   run_id: number | null;
   status: "ok" | "variance" | "unverified" | "hard_stop" | null;
   exit_code: number | null;
@@ -220,6 +222,9 @@ export type BoardRow = {
   config_was_pinned: boolean;
   finding_count: number | null;
   job_count: number;
+  /** Live (non-rejected) uploads recorded for this window — what there is to
+   *  show about a window that has never been queued (D2). */
+  upload_count: number;
   /** 'window' for a settlement run, 'month_master' for the month-end summary
    *  (M8 Phase 3). The api already splits these into separate lists, so a board
    *  row is always a window; this is here for the master rows. */
@@ -282,6 +287,10 @@ export type RosterDeclaration = {
   reason: string | null;
   declared_by: string;
   declared_at: string;
+  /** WHICH expected stores are declared absent (D3). NULL is the blanket —
+   *  every expected store optional — the only state that existed before
+   *  migration 021, kept for declarations that predate the store list. */
+  declared_absent_stores: string[] | null;
 };
 
 export type WindowPlan = {
@@ -291,9 +300,16 @@ export type WindowPlan = {
   stores_present: string[];
   missing_stores: string[];
   unexpected_stores: string[];
+  /** The roster this window runs under, as names — the declaration form's
+   *  picklist (D3). Business identifiers, never customer PII. */
+  expected_stores: string[];
   expected_store_count: number;
   problems: string[];
   roster_declaration: RosterDeclaration | null;
+  /** Declared-absent stores that now HAVE files (D3's re-evaluation nudge).
+   *  Their figures are included either way; the declaration no longer
+   *  describes the window. */
+  declared_absent_present: string[];
   /** What `POST /jobs` will do with this window as it stands. */
   ready: boolean;
 };
@@ -390,6 +406,9 @@ export type Run = {
   finished_at: string | null;
   config_version_id: number | null;
   config_was_pinned: boolean;
+  /** What this run queued next (A4): the month-master chain's outcome sentence,
+   *  including a failure to queue. NULL = nothing chained. */
+  chained: string | null;
   artifacts: Artifact[];
   exception_sheets?: ExceptionSheet[];
 };
@@ -413,6 +432,12 @@ export type ExceptionRow = {
   sheet: string;
   fingerprint: string;
   payload: Record<string, unknown>;
+  /** The standing decision on this fingerprint (D1). Annotates, never hides:
+   *  a dispositioned row still appears on every run, badged. */
+  disposition: "reviewed" | "expected" | null;
+  disposition_reason: string | null;
+  disposition_by: string | null;
+  decided_at: string | null;
 };
 
 export type LogLine = {

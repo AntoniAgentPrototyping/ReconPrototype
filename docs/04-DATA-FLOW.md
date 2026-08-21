@@ -117,7 +117,7 @@ Controls:
 - Fingerprints hash store names; committed manifests contain integer counts and digests only, enforced by `tests/goldens/test_manifest_integrity.py`.
 - When probing real files, report schemas, column names and counts — **never cell values**.
 
-Note the asymmetry worth planning around: PII is stripped at read, but the **raw files themselves** sit wherever they were staged. Any future upload path must strip at the boundary and keep raw exports on a short retention. M4 deliberately did **not** build that upload path — an upload boundary is the PII-stripping boundary and deserves its own milestone rather than being bolted onto a job queue ([defect 2.3](08-KNOWN-DEFECTS.md#23-there-is-no-upload-or-staging-endpoint--open-m5)).
+Note the asymmetry worth planning around: PII is stripped at read, but the **raw files themselves** sit wherever they were staged. Any future upload path must strip at the boundary and keep raw exports on a short retention. M4 deliberately did **not** build that upload path — an upload boundary is the PII-stripping boundary and deserves its own milestone rather than being bolted onto a job queue ([defect 2.3](08-KNOWN-DEFECTS.md#23-there-is-no-upload-or-staging-endpoint--fixed-m5-2026-08-14)).
 
 ### Since M6: the upload boundary, and the first real retention mechanism
 
@@ -131,7 +131,7 @@ That asymmetry is now closed for anything arriving through the browser, which si
 
 **Filenames are renamed on the way in**, to a uniform scheme, because store identity is derived from them and a consistent name is one fewer thing to parse defensively. The rename is proved a fixed point of the pipeline's own parser and gated by the golden comparison on all three platforms ([D44](06-DECISIONS.md#d44)).
 
-**What M4 added to this picture.** The run log now also lives in Postgres (`run_log_lines`), carrying store names and row counts and **no cell values** — the pipeline never logs them, so this is the exposure `run_log.txt` already had on disk, now in a database with no authentication in front of it ([2.1](08-KNOWN-DEFECTS.md#21-the-api-is-unauthenticated--open-m5), [2.6](08-KNOWN-DEFECTS.md#26-the-run-log-in-postgres-contains-store-names--accepted)). `jobs.refs` holds the team's reference totals — store names and revenue figures, no customer data. The artifact table stores paths and a transfer hash, never contents.
+**What M4 added to this picture.** The run log now also lives in Postgres (`run_log_lines`), carrying store names and row counts and **no cell values** — the pipeline never logs them, so this is the exposure `run_log.txt` already had on disk, now in a database with no authentication in front of it ([2.1](08-KNOWN-DEFECTS.md#21-the-api-is-unauthenticated--fixed-m5-2026-08-14), [2.6](08-KNOWN-DEFECTS.md#26-the-run-log-in-postgres-contains-store-names--accepted)). `jobs.refs` holds the team's reference totals — store names and revenue figures, no customer data. The artifact table stores paths and a transfer hash, never contents.
 
 ## Determinism
 

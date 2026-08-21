@@ -17,18 +17,29 @@
  * action's `Origin` against its `Host`; and action ids are unguessable.
  *
  * **Behind a reverse proxy that rewrites `Host`, the second of those is exactly what
- * breaks.** When this app gets a real hostname, set:
+ * breaks.** Since Phase 6 (C4) the fix is wired rather than a comment: build with
  *
- *     experimental: { serverActions: { allowedOrigins: ["recon.example.com"] } }
+ *     RECON_ALLOWED_ORIGINS=recon.example.com   (comma-separated for several)
  *
- * Left unset deliberately rather than guessed: a wrong value here fails every
- * mutation with an opaque error, and localhost needs none.
+ * and `serverActions.allowedOrigins` is set from it. A BUILD-time value, because
+ * this file is serialized into the standalone output — an image built for a
+ * hostname is built FOR it (deploy/docker-compose.yml passes it as a build arg).
+ * Unset means unset: localhost needs none, and a wrong value here fails every
+ * mutation with an opaque error.
  */
+const allowedOrigins = (process.env.RECON_ALLOWED_ORIGINS ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "standalone",
   reactStrictMode: true,
   poweredByHeader: false,
+  ...(allowedOrigins.length
+    ? { experimental: { serverActions: { allowedOrigins } } }
+    : {}),
 };
 
 export default nextConfig;

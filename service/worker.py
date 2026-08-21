@@ -39,6 +39,7 @@ running more worker PROCESSES, which is what `FOR UPDATE SKIP LOCKED` is for.
 from __future__ import annotations
 
 import argparse
+import logging
 import shutil
 import signal
 import sys
@@ -50,9 +51,11 @@ from pathlib import Path
 from src import master_summary, pipeline
 from src.pipeline import RunStatus
 
+from . import retention
 from .artifacts import ArtifactStore, build_artifact_store
 from .config import ServiceSettings
 from .models import Job, JobKind, JobState
+from .obs import event
 from .repository import Repository
 from .runlog import QueueRunLog, RepositoryLogSink
 
@@ -65,7 +68,9 @@ class JobOutcome:
     artifacts: list[str]
     # What this job queued next, if anything (M8 Phase 3). Carried here rather
     # than written to the run log, because the log has already been flushed and
-    # stored by the time the chain runs — see `_chain_month_master`.
+    # stored by the time the chain runs — see `_chain_month_master`. Since A4 it
+    # is also persisted on the run row (`runs.chained`, migration 019), so a
+    # failure to queue the master is visible outside the worker's stdout.
     chained: str | None = None
 
 
@@ -76,6 +81,8 @@ class Worker:
         self.store = store
         self.settings = settings
         self._stopping = False
+        self._log = logging.getLogger("recon.worker")
+        self._last_sweep: float | None = None
 
     # -- the loop -----------------------------------------------------------
 
@@ -114,22 +121,70 @@ class Worker:
             # reported unhealthy, which is the correct outcome. It must not be a
             # worker that crashes instead of doing its job.
             pass
+        # The DATABASE beat (C6): the file above restarts a hung container; this
+        # row is what lets /healthz — a different process — say "a worker exists".
+        # Same must-not-crash posture: a database the beat cannot reach will fail
+        # the claim() two lines later, which is the loud path.
+        try:
+            self.repo.record_worker_heartbeat(self.settings.worker_id)
+        except Exception:                                       # noqa: BLE001
+            pass
 
     def serve(self, *, once: bool = False, drain: bool = False) -> list[JobOutcome]:
         outcomes: list[JobOutcome] = []
         while not self._stopping:
             self._touch_heartbeat()
-            self.repo.reclaim_expired()
+            swept = self.repo.reclaim_expired()
+            if swept.get("requeued") or swept.get("dead"):
+                # C5: the reclaim sweep acting is an operational event someone
+                # should be able to alert on — it means a worker died mid-job.
+                event(self._log, "reclaimed_expired_leases",
+                      level=logging.WARNING,
+                      requeued=swept.get("requeued", []), dead=swept.get("dead", []))
+            self._maybe_sweep_retention()
             job = self.repo.claim(self.settings.worker_id, self.settings.lease_seconds)
             if job is None:
                 if once or drain:
                     break
                 time.sleep(self.settings.poll_interval_s)
                 continue
-            outcomes.append(self.execute(job))
+            event(self._log, "job_claimed", job_id=job.id,
+                  platform=job.platform, period=job.period)
+            started = time.monotonic()
+            outcome = self.execute(job)
+            event(self._log, "job_finished", job_id=job.id, run_id=outcome.run_id,
+                  status=outcome.status.value, platform=job.platform,
+                  period=job.period, wall_s=round(time.monotonic() - started, 1),
+                  artifacts=len(outcome.artifacts))
+            outcomes.append(outcome)
             if once:
                 break
         return outcomes
+
+    def _maybe_sweep_retention(self) -> None:
+        """C10, on the worker because it is the process that owns scratch. Never
+        fails a loop turn: retention losing a race with a disk is a warning, not
+        a reason to stop claiming settlement runs."""
+        interval = self.settings.retention_interval_s
+        if not interval:
+            return
+        now = time.monotonic()
+        if self._last_sweep is not None and now - self._last_sweep < interval:
+            return
+        self._last_sweep = now
+        try:
+            report = retention.sweep(self.repo, self.settings)
+            event(self._log, "retention_sweep",
+                  level=logging.WARNING if report.warnings else logging.INFO,
+                  scratch_dirs=len(report.scratch_dirs_removed),
+                  incoming_files=report.incoming_files_removed,
+                  bytes_freed=report.scratch_bytes_freed,
+                  log_lines=report.log_lines_deleted,
+                  sessions=report.sessions_deleted,
+                  disk_free_gb=report.disk_free_gb,
+                  warnings=report.warnings)
+        except Exception:                                       # noqa: BLE001
+            self._log.exception("retention sweep failed")
 
     # -- one job ------------------------------------------------------------
 
@@ -159,7 +214,8 @@ class Worker:
             # reads the same files as different stores (service/materialize.py).
             mat = self._materialize(job, scratch, resolved, log)
             self._report_order_coverage(job, log)
-            partial = self._roster_declared_partial(job, log)
+            partial, roster_stores = self._roster_declaration(job, log)
+            self._report_stale_declaration(job, mat, roster_stores, partial, log)
             refs = self._references(job, log)
 
             # A fresh settings dict per job — see the module docstring.
@@ -169,6 +225,7 @@ class Worker:
                 input_root=mat.input_root,
                 output_root=scratch,
                 refs=refs, log=log, partial_roster=partial,
+                roster_stores=roster_stores,
                 settings_text=resolved.content if resolved else None)
 
             result = pipeline.run(ctx)
@@ -189,6 +246,9 @@ class Worker:
                 run_id, status=result.status, findings=result.findings,
                 checks=result.checks, metrics=result.metrics.to_dict(),
                 roster_missing=mat.roster_missing,
+                # A4: the chain's outcome, on the run row — the log is already
+                # stored by the time the chain runs (see `_chain_month_master`).
+                chained=chained,
                 # B1: a `ReconHardStop` message is already written for a human,
                 # and `docs/09-OPERATIONS.md` is written against these strings, so
                 # it passes through untouched. The class-name prefix is dropped —
@@ -277,6 +337,11 @@ class Worker:
         except ActiveJobExists:
             return f"month-end master for {month} already queued"
         except Exception as exc:                                # noqa: BLE001
+            # A queueing failure is quiet by nature — the settlement run itself
+            # succeeded — so it gets a WARNING in the service log (C5's alerting
+            # hook) as well as the sentence on the run row.
+            event(self._log, "month_master_chain_failed", level=logging.WARNING,
+                  month=month, error=f"{type(exc).__name__}: {exc}")
             return (f"could not queue the month-end master for {month}: "
                     f"{type(exc).__name__}: {exc} (this window's finance file is "
                     f"unaffected)")
@@ -436,24 +501,70 @@ class Worker:
                 f"window. This window's export does not cover what it settles "
                 f"(defect 2.12); the revenue leaves the invoice as unmatched.")
 
-    def _roster_declared_partial(self, job: Job, log) -> bool:
-        """Whether this WINDOW was declared partial — not whether this run asked.
+    def _roster_declaration(self, job: Job, log) -> tuple[bool, list[str] | None]:
+        """Whether this WINDOW was declared partial, and for WHICH stores.
 
         The per-run flag is gone (M6, workstream C). `check_stores` is unchanged
         and still hard-stops an undeclared incomplete window; all that moved is
         where the override is stated. `jobs.partial_roster` is still read as a
         fallback so a job enqueued by an older api is not silently reinterpreted.
+
+        The second element is D3's store list: the names `apply_partial_roster`
+        will relax, or None for the blanket (every expected store optional) — the
+        only behaviour that existed before migration 021, kept for declarations
+        that predate it and warned about, because a blanket is exactly the state
+        where a forgotten store is waved through with the legitimately absent.
         """
         if not hasattr(self.repo, "window_declaration"):
-            return job.partial_roster
+            return job.partial_roster, None
         declaration = self.repo.window_declaration(job.platform, job.period)
         if declaration is None:
-            return job.partial_roster
+            return job.partial_roster, None
         if declaration["roster_declared_partial"]:
+            stores = declaration.get("declared_absent_stores")
             log.warn(f"ROSTER DECLARED PARTIAL for {job.platform} {job.period} by "
                      f"{declaration['declared_by']}: {declaration['reason']}")
-            return True
-        return False
+            if stores:
+                log.warn(f"  declared absent: {sorted(stores)}")
+            else:
+                log.warn("  blanket declaration (every expected store optional) — "
+                         "a store nobody meant to excuse is excused too. Name the "
+                         "absent stores on the window page to narrow it.")
+            return True, sorted(stores) if stores else None
+        return False, None
+
+    def _report_stale_declaration(self, job: Job, mat, declared: list[str] | None,
+                                  partial: bool, log) -> None:
+        """D3's re-evaluation: a declaration the window has outgrown, said aloud.
+
+        Legibility, not money. A declared-absent store that now HAS files is
+        merely present-and-optional — its figures are in every total already.
+        What is wrong is the record: the declaration no longer describes the
+        window, and the workbook's caveat would overstate what is missing.
+
+        Deliberately a warn, never a hard stop (the run is right) and never a
+        `RunResult` finding (findings are produced by `src/` from the frames it
+        reads; this is a service-side comparison of a declaration against an
+        upload set). The run log is board-surfaced and mirrored to the database,
+        which is exactly the visibility a record-keeping mismatch needs.
+
+        Only in uploads mode: a directory-staged run has no upload set to compare
+        against, and `mat.missing_stores` is not computed there either.
+        """
+        if not partial or mat.source != "uploads":
+            return
+        found = {f.store_canonical for f in mat.files if f.store_canonical}
+        stale = sorted(set(declared or []) & found)
+        if stale:
+            log.warn(f"ROSTER DECLARATION STALE for {job.platform} {job.period}: "
+                     f"declared-absent store(s) now have files: {stale}. Their "
+                     f"figures ARE included in this run; withdraw or re-declare on "
+                     f"the window page so the record matches the window.")
+        if not mat.missing_stores and not stale:
+            log.warn(f"ROSTER DECLARATION STALE for {job.platform} {job.period}: "
+                     f"declared partial, but every expected store has a file. "
+                     f"Withdraw the declaration so an incomplete future upload of "
+                     f"this window hard-stops again.")
 
     def _references(self, job: Job, log) -> dict:
         """The team's figures this run gets to be checked against (A3).
@@ -589,7 +700,9 @@ def build_worker(settings: ServiceSettings) -> tuple[Worker, "object"]:
     from .repository_m5 import M5Repository
     pool = db.make_pool(settings.database_url, min_size=1, max_size=4)
     with pool.connection() as conn:
-        db.migrate(conn)
+        applied = db.migrate(conn)
+    if applied:
+        event(logging.getLogger("recon.worker"), "migrations_applied", files=applied)
     # M5Repository, not the plain queue: the worker now reads uploads and the
     # window's roster declaration, both of which live on it. It stays duck-typed
     # about them (`hasattr`) so a plain `Repository` remains constructible, which
@@ -605,6 +718,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--once", action="store_true", help="claim at most one job, then exit")
     ap.add_argument("--drain", action="store_true", help="run until the queue is empty")
     args = ap.parse_args(argv)
+
+    from .obs import setup_logging
+    setup_logging("worker")
 
     settings = ServiceSettings.from_env()
     worker, pool = build_worker(settings)

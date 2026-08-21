@@ -134,10 +134,11 @@ def test_fingerprints_never_pair_a_client_name_with_a_figure(golden_window):
     would tie a named client to revenue. That is why by_store is keyed on
     store_h. Workbook SHEET names are a different matter and are deliberately
     not covered here: Lazada's brand tabs ('KAO.xlsx', 'Curel.xlsx',
-    'Merries.xlsx') are structural constants already committed in
-    src/finance_template.py:90-92, and they carry a digest and a cell count —
-    never an amount. Recording them discloses nothing new, and the differ needs
-    them to report a missing or reordered sheet at all.
+    'Merries.xlsx') are structural names already committed in the seed contract
+    (`invoice_buckets.lazada` in config/settings.yaml since A14; module constants
+    in src/finance_template.py before that), and they carry a digest and a cell
+    count — never an amount. Recording them discloses nothing new, and the differ
+    needs them to report a missing or reordered sheet at all.
     """
     if golden_window is None:
         pytest.skip("no goldens on this machine")

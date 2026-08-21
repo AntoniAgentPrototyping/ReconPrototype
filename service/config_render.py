@@ -42,7 +42,8 @@ import yaml
 # derived, because this is the reading order of a document somebody maintains: the
 # money model first, then how files are found and read, then who the stores are.
 KEY_ORDER = (
-    "vat_factors", "masters_file", "reader_engine", "tolerances",
+    "vat_factors", "invoice_buckets", "fee_buckets",
+    "masters_file", "reader_engine", "tolerances",
     "window_settlement_bounds", "number_style", "numeric_coercion",
     "drop_unmapped_columns", "dedupe_rows", "cross_window_order_backfill",
     "dayfirst", "date_formats",
@@ -208,6 +209,33 @@ def read_config(conn) -> tuple[dict[str, Any], dict[str, str]]:
                 target[name] = emit
             evidence.setdefault("tolerances", ev or "")
 
+        # --- invoice buckets -------------------------------------------------
+        # The NULL-needle row is the catch-all and renders as `default`; the rest
+        # render as `match` in sort_order, which is walk order and therefore
+        # meaning (first matching needle wins).
+        cur.execute("""select platform, needle, bucket, evidence
+                       from config_invoice_buckets
+                       order by sort_order, platform, needle""")
+        for platform, needle, bucket, ev in cur.fetchall():
+            node = values.setdefault("invoice_buckets", {}).setdefault(platform, {})
+            if needle is None:
+                node["default"] = bucket
+            else:
+                node.setdefault("match", {})[needle] = bucket
+            evidence.setdefault("invoice_buckets", ev or "")
+
+        # --- fee bucket roles ------------------------------------------------
+        cur.execute("""select platform, role, bucket, evidence
+                       from config_fee_buckets
+                       order by sort_order, platform, role, bucket""")
+        for platform, role, bucket, ev in cur.fetchall():
+            node = values.setdefault("fee_buckets", {}).setdefault(platform, {})
+            if role == "revenue":
+                node["revenue"] = bucket
+            else:
+                node.setdefault("promo", []).append(bucket)
+            evidence.setdefault("fee_buckets", ev or "")
+
         # --- settlement bounds ---------------------------------------------
         cur.execute("""select period, from_date, to_date, evidence
                        from config_settlement_bounds order by sort_order, period""")
@@ -259,6 +287,10 @@ REQUIRED_KEYS = (
     "vat_factors", "masters_file", "tolerances", "number_style",
     "numeric_coercion", "drop_unmapped_columns", "dedupe_rows", "file_formats",
     "store_from_filename", "expected_stores", "column_maps",
+    # A14 (2026-08-20): the bucket lists and the rate list moved out of code with
+    # hard-stop accessors, so a rendered config without them cannot build a
+    # workbook — absence should fail here, in a test, not in a settlement run.
+    "invoice_buckets", "fee_buckets",
     # Absent means `off`, which is the SAFE direction (today's behaviour, and every
     # golden was produced under it) — so this is not a DANGEROUS_DEFAULT. It is
     # required anyway, for the reason `drop_unmapped_columns` is: a contract that

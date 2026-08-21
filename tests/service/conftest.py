@@ -99,6 +99,18 @@ def repo(pool):
         # missing table here is an immediate hard error in every DB test.
         cur.execute("truncate jobs, users, user_sessions, config_versions, "
                     "config_proposals, uploads restart identity cascade")
+        # `artifact_downloads` (migration 018) needs no entry: it references
+        # runs(id) on delete cascade and runs follow jobs. `worker_heartbeats`
+        # (017) references nothing, so it is truncated explicitly — a beat left
+        # behind would make a test's /healthz report a worker that is another
+        # test's.
+        cur.execute("truncate worker_heartbeats")
+        # Dispositions (migration 020) key on the FINGERPRINT, which is plain
+        # text — deliberately not an FK, so no cascade reaches them. A decision
+        # left behind would badge another test's identical fingerprint (the
+        # smoke window's rows hash the same every run, by design).
+        cur.execute("truncate exception_dispositions, exception_disposition_events "
+                    "restart identity")
         # `upload_order_index` (migration 015) needs no entry: it references
         # uploads(id) `on delete cascade`, so the truncate above takes its rows with
         # it. Recorded rather than left to be rediscovered — this list is where
@@ -124,7 +136,8 @@ def repo(pool):
         cur.execute("truncate config_scalars, config_platforms, config_reading, "
                     "config_column_maps, config_stores, config_store_aliases, "
                     "config_store_brands, config_tolerances, "
-                    "config_settlement_bounds, config_fee_types, config_vat_sku")
+                    "config_settlement_bounds, config_fee_types, config_vat_sku, "
+                    "config_invoice_buckets, config_fee_buckets")
     return M5Repository(pool)
 
 

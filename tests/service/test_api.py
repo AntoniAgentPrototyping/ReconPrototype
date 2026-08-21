@@ -181,6 +181,38 @@ def test_a_partial_declaration_without_a_reason_is_refused(client):
     }).status_code == 201
 
 
+def test_a_declaration_names_which_stores_are_absent(client):
+    """D3: the boolean made EVERY expected store optional, so a genuinely
+    forgotten store was waved through with the legitimately absent ones. The
+    declaration now carries the list, and the pipeline relaxes only those."""
+    r = client.post("/windows/roster", json={
+        "platform": "shopee", "period": "2026-05_s1", "partial": True,
+        "reason": "two storefronts wind down this month",
+        "stores": [" Xmenforboss ", "Masan", "Masan"]})
+    assert r.status_code == 201
+    assert r.json()["declared_absent_stores"] == ["Masan", "Xmenforboss"], \
+        "stripped, deduped, sorted — one canonical spelling of the claim"
+
+    fetched = client.get("/windows/shopee/2026-05_s1").json()
+    assert fetched["roster_declaration"]["declared_absent_stores"] == \
+        ["Masan", "Xmenforboss"]
+
+    # Re-declaring without a list falls back to the blanket — the pre-021 state,
+    # kept expressible for a declaration made before anyone knows what's missing.
+    again = client.post("/windows/roster", json={
+        "platform": "shopee", "period": "2026-05_s1", "partial": True,
+        "reason": "declared before the exports arrive"})
+    assert again.status_code == 201
+    assert again.json()["declared_absent_stores"] is None
+
+
+def test_naming_stores_on_a_complete_window_is_refused(client):
+    r = client.post("/windows/roster", json={
+        "platform": "shopee", "period": "2026-05_s1", "partial": False,
+        "stores": ["Masan"]})
+    assert r.status_code == 422, "a complete window has no absent stores to name"
+
+
 # ---------------------------------------------------------------------------
 # Listing, fetching, cancelling
 # ---------------------------------------------------------------------------
@@ -469,3 +501,38 @@ def test_an_unknown_artifact_is_404(client, repo):
     repo.claim("w1", 60)
     run_id = repo.start_run(job["id"], "lazada", "2026-05_l1")
     assert client.get(f"/runs/{run_id}/artifacts/nope.xlsx").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# The download read-audit (Phase 6 / C12, 2026-08-20)
+# ---------------------------------------------------------------------------
+
+def test_a_download_writes_an_audit_row(client, repo, store, tmp_path):
+    """Every workbook carries every store's revenue; who fetched it is a fact the
+    system must be able to answer (the presigned-URL refusal was argued partly on
+    audit grounds, and until this table the audit did not exist)."""
+    run_id, art = _stored_artifact(client, repo, store, tmp_path)
+    repo.record_artifact(run_id, name=art.name, uri=art.uri, bytes_=art.bytes,
+                         sha256=art.sha256)
+
+    assert repo.list_artifact_downloads(run_id=run_id) == []
+    assert client.get(f"/runs/{run_id}/artifacts/{art.name}").status_code == 200
+    rows = repo.list_artifact_downloads(run_id=run_id)
+    assert len(rows) == 1
+    assert rows[0]["artifact_name"] == art.name
+    assert rows[0]["downloaded_by"], "the session subject must be recorded"
+
+    # A second read is a second row: this is a log, not a flag.
+    client.get(f"/runs/{run_id}/artifacts/{art.name}")
+    assert len(repo.list_artifact_downloads(run_id=run_id)) == 2
+
+
+def test_a_refused_download_is_not_audited_as_a_read(client, repo, store, tmp_path):
+    """Tampered bytes are refused with 502 (2.4's replacement gap) — and the
+    refusal must not record a read that never happened."""
+    run_id, art = _stored_artifact(client, repo, store, tmp_path)
+    repo.record_artifact(run_id, name=art.name, uri=art.uri, bytes_=art.bytes,
+                         sha256="0" * 64)
+
+    assert client.get(f"/runs/{run_id}/artifacts/{art.name}").status_code == 502
+    assert repo.list_artifact_downloads(run_id=run_id) == []

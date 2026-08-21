@@ -308,6 +308,29 @@ TABLES: dict[str, TableSpec] = {
         grouped_by="platform",
     ),
 
+    "config_invoice_buckets": TableSpec(
+        name="config_invoice_buckets",
+        title="Invoice buckets",
+        blurb="Which invoice bucket a storefront's lines land in. The match text "
+              "is compared against the lowercased store name, first hit wins; the "
+              "entry with no match text is the catch-all for every store nothing "
+              "matches. The workbook's tabs themselves are fixed to the team's "
+              "template — naming a bucket the template has no tab for stops the "
+              "run with a sentence, and removing a catch-all does the same.",
+        key=(_PLATFORM_KEY,
+             Column("needle", Kind.TEXT, "Match text", nullable=True,
+                    help="A fragment of the store name, e.g. 'kao'. Leave it empty "
+                         "to address the platform's catch-all entry.")),
+        columns=(
+            Column("bucket", Kind.TEXT, "Bucket",
+                   help="Must be a bucket the workbook template lays out a tab "
+                        "for; anything else stops the next run rather than "
+                        "leaking money into a drift breach."),
+        ),
+        order_by="sort_order, platform, needle",
+        grouped_by="platform",
+    ),
+
     "config_tolerances": TableSpec(
         name="config_tolerances",
         title="Money tolerances",
@@ -355,6 +378,24 @@ TABLES: dict[str, TableSpec] = {
         columns=(Column("bucket", Kind.TEXT, "Bucket"),
                  Column("status", Kind.TEXT, "Status", nullable=True)),
         order_by="sort_order, fee_name",
+    ),
+
+    "config_fee_buckets": TableSpec(
+        name="config_fee_buckets",
+        title="Ledger bucket roles",
+        blurb="Which Lazada ledger bucket is revenue, and which ones net into the "
+              "invoiced unit price as promotions. Removing a promotion bucket "
+              "OVER-states every affected invoice line — the credit stops being "
+              "subtracted — so every change here needs its reason.",
+        key=(Column("platform", Kind.ENUM, "Platform",
+                    options=(("lazada", "lazada"),)),
+             Column("role", Kind.ENUM, "Role",
+                    options=(("revenue", "Revenue — the lines that are invoiced"),
+                             ("promo", "Promotion — nets into the unit price"))),
+             Column("bucket", Kind.TEXT, "Bucket name",
+                    help="As the fee-type mapping spells it, e.g. '1.Doanh Thu'.")),
+        columns=(),
+        order_by="sort_order, platform, role, bucket",
     ),
 
     "config_vat_sku": TableSpec(
@@ -553,6 +594,20 @@ def _coerce_scalar_value(existing: Any, value: Any) -> Any:
     if isinstance(existing, list):
         if not isinstance(value, list):
             raise RowEditError("this setting is a list of values")
+        # A list keeps its ELEMENT type too. `vat_factors.rates` is a list of
+        # numbers, and the browser control submits text — "1.05" stored as a string
+        # would compare equal to no `vat_factor.round(2)` and silently zero every
+        # per-rate row, the same shape as `dedupe_rows` becoming "false".
+        if existing and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                            for v in existing):
+            numbers = []
+            for v in value:
+                try:
+                    numbers.append(float(str(v).strip()))
+                except (TypeError, ValueError):
+                    raise RowEditError(
+                        f"this setting is a list of numbers; {v!r} is not") from None
+            return numbers
         return [str(v).strip() for v in value if str(v).strip()]
 
     if isinstance(value, (list, dict)):
@@ -741,6 +796,20 @@ def _table_rules(conn, spec: TableSpec, key: dict, values: dict,
 
     if spec.name == "config_vat_sku" and float(merged.get("rate") or 0) <= 0:
         raise RowEditError("a VAT factor must be greater than zero")
+
+    if spec.name == "config_fee_buckets" and key.get("role") == "revenue" \
+            and existing is None:
+        with conn.cursor() as cur:
+            cur.execute("""select bucket from config_fee_buckets
+                           where platform = %s and role = 'revenue'""",
+                        (key.get("platform"),))
+            held = [r[0] for r in cur.fetchall()]
+        if held:
+            raise RowEditError(
+                f"{key.get('platform')} already names {held[0]!r} as its revenue "
+                f"bucket. Revenue is ONE bucket — two would make every invoice "
+                f"line ambiguous. Remove the current one in this same proposal if "
+                f"the ledger's vocabulary really changed.")
 
 
 # ---------------------------------------------------------------------------

@@ -19,10 +19,18 @@ import { queueRun, type ActionResult } from "./actions";
  * (docs/06-DECISIONS.md#d33). The message says so rather than reading as a
  * failure.
  */
-export function QueueForm() {
+export function QueueForm({
+  known = [],
+}: {
+  /** Windows the board already knows about (D2) — offered as suggestions so a
+   *  period does not have to be typed from memory. Free text stays possible,
+   *  because a brand-new period is exactly the thing this form creates. */
+  known?: { platform: string; period: string }[];
+}) {
   const [state, action, pending] = useActionState<ActionResult | null, FormData>(queueRun, null);
   const [platform, setPlatform] = useState("lazada");
   const [period, setPeriod] = useState("");
+  const suggestions = [...new Set(known.filter((k) => k.platform === platform).map((k) => k.period))];
 
   return (
     <div className="panel">
@@ -53,8 +61,14 @@ export function QueueForm() {
             placeholder="2026-05_l1"
             value={period}
             onChange={(e) => setPeriod(e.target.value)}
+            list="known-windows"
             required
           />
+          <datalist id="known-windows">
+            {suggestions.map((p) => (
+              <option key={p} value={p} />
+            ))}
+          </datalist>
         </div>
         <button type="submit" disabled={pending}>
           {pending ? "Queueing…" : "Queue run"}

@@ -210,7 +210,7 @@ Delta was stated in advance and confirmed exactly: **workbook digests unchanged*
 
 - ~~**`exceptions.xlsx` is never written in production**~~ — fixed in M2; `pipeline.write_artifacts` writes it whenever any exception sheet is populated.
 - ~~**In-place mutation of a passed-in frame**~~ — **fixed (2026-08-19).** `_blank_repeats` copies before blanking. **The hazard was sharper than this entry said**, and worth recording because it changes the item from cosmetic to load-bearing: in each caller the blanked column is a *duplicate of a sibling column in the same frame* — `"Source.Name"` and `"Source.Name non repeat"` are both `df["store"]`. Under pandas 2.x the dict-of-Series constructor copies, so they are distinct arrays; under a no-copy construction they would share storage and blanking the "non repeat" column would **empty the real store column on invoice tabs**. That is the concrete thing the `pandas<3` pin stands in front of. The pin **stays**: Copy-on-Write changes far more than one function, and lifting it still needs its own measured golden run. No cell moved (copy semantics are identical under pandas 2.x).
-- ~~**Lazada config is code, not YAML**~~ — **fixed in M8/1.7 (2026-08-18).** `WEEKLY_MAP`, `DAILY_MAP`, `SHEETS` and `STORE_PATTERN` moved into `column_maps.lazada`, `sheet_names.lazada` and `store_from_filename.lazada`; `src/lazada.py` reads them through `column_map()` / `sheet_name()` / `store_pattern()`, which hard-stop rather than falling back to a copy. The four modules in `service/` and `tools/` that imported the constants now go through the contract, and the four Lazada golden windows re-ran unmoved. **The bucket names are still code** — `REVENUE_BUCKET` and `PROMO_BUCKETS` in `src/lazada.py`, alongside `finance_template.py`'s invoice buckets, which is [A14](14-PRODUCTION-READINESS.md) and its own commit.
+- ~~**Lazada config is code, not YAML**~~ — **fixed in M8/1.7 (2026-08-18).** `WEEKLY_MAP`, `DAILY_MAP`, `SHEETS` and `STORE_PATTERN` moved into `column_maps.lazada`, `sheet_names.lazada` and `store_from_filename.lazada`; `src/lazada.py` reads them through `column_map()` / `sheet_name()` / `store_pattern()`, which hard-stop rather than falling back to a copy. The four modules in `service/` and `tools/` that imported the constants now go through the contract, and the four Lazada golden windows re-ran unmoved. **The bucket-name residual closed 2026-08-20** ([A14](14-PRODUCTION-READINESS.md)): `REVENUE_BUCKET`/`PROMO_BUCKETS` became `fee_buckets.lazada`, the three invoice-bucket lists became `invoice_buckets.<platform>`, and `VAT_RATES` became `vat_factors.rates` (migration `016`) — all read through hard-stop accessors with no code fallback, all values verbatim, all eight goldens re-run unmoved. The workbook *tab layout* stays code deliberately (template geometry pinned to the team's files); a configured bucket the template has no tab for hard-stops rather than leaking into a drift breach.
 - ~~**A group-by inconsistency inside Lazada**~~ — **fixed (2026-08-19).** The promo aggregation in `lazada.revenue_lines` lacked the `dropna=False` its revenue-side sibling twelve lines above had, so a promo row with a null product name (or SKU) left the pool while its revenue counterpart stayed. **The direction is what made this the priority among the smaller items:** promo amounts are credits that *reduce* the invoiced unit price (`price_ka = (credits + promo) / units / VAT`), so a dropped promo row makes `price_ka` too **high** — an over-statement, billing the client too much. Every other open defect in this area under-states.
 
   *Measured before the edit:* **0 null `sku_id` and 0 null `product_name` promo rows across all nine staged Lazada windows** (May `l1`–`l4`, July `l1`–`l5`), so the divergence was latent and no cell moved — the four Lazada goldens regenerate unchanged. Closed while the direction of the error was known rather than after an export arrives with a blank product name.
@@ -220,7 +220,7 @@ Delta was stated in advance and confirmed exactly: **workbook digests unchanged*
 - **No run provenance** — three separate claims, and they now have three different answers. Split so nobody closes the wrong one:
   - *`run_log.txt` is unstructured* — **open, both paths.** `src/runlog.py:7-41` is a `list[str]`; `service/runlog.py:50-57` subclasses it deliberately so the text cannot drift from the CLI's, adding a `seq` and a DB mirror rather than structure.
   - *No input hashes or config version* — **open for a CLI run, closed for a service run.** A service run records `runs.config_version_id` and `config_was_pinned`, logs the version and its digest into the run log (`service/worker.py:435-436`), stores the full config text content-addressed in `config_versions`, writes a per-file `materialized.json` with `sha256`/`object_key`/`upload_id`, digest-verifies every materialised input before it is read, and records a `sha256` per artifact. A `tools/devrun.py` run records none of it: `build_context` reads `settings.yaml` off disk and no digest is taken. **That asymmetry is itself the finding** — the developer path is the one with no provenance.
-  - *No per-row lineage* — **open, and the real remaining gap.** Nothing associates an output cell with the input rows that produced it. The closest thing is `source_file`, carried on Lazada ledger rows into the workbook, which is file-level. Owned by the unified transaction store in [10-ROADMAP](10-ROADMAP.md); the upload order index added for [2.12](#212-a-windows-order-export-does-not-cover-the-orders-it-settles--open-found-2026-08-19-july-month-end-tie) is its first additive piece.
+  - *No per-row lineage* — **open, and the real remaining gap.** Nothing associates an output cell with the input rows that produced it. The closest thing is `source_file`, carried on Lazada ledger rows into the workbook, which is file-level. Owned by the unified transaction store in [10-ROADMAP](10-ROADMAP.md); the upload order index added for [2.12](#212-a-windows-order-export-does-not-cover-the-orders-it-settles--fixed-2026-08-20-residual-named-found-2026-08-19-july-month-end-tie) is its first additive piece.
 
   *Struck from this entry 2026-08-19:* "The parity fingerprints are the first step toward fixing this." They were not. `tools/fingerprint.py` is golden-gate machinery with **zero** references in `service/`; what became run provenance was the config-version table and the upload digest chain, by an unrelated route. (`run_exceptions.fingerprint` is a different concept — a stable exception identity.)
 
@@ -261,7 +261,7 @@ Rewriting an export before the verified pipeline reads it is a real risk, and it
 
 *This entry described a staging endpoint that no longer exists.* `POST /uploads/{id}/stage` was **deleted in M6** — the bucket is the window, so there is no staging step, and `service/materialize.py` assembles the scratch tree at run time instead (`service/api.py:1094-1095`). An operator reading the old text would look for a route that is gone. The M6 shape is better than what this entry claimed; the claim was simply not updated.
 
-*The residual — **FIXED (2026-08-19)**, [D57](06-DECISIONS.md#d57).* It read: *"deciding which window an export belongs to is still `tools/stage_exports.py`'s job", and `POST /uploads` takes `period` as a form field validated for character safety only (`_safe_period`) — no settlement date is ever read.* That was true, and expensive: **[2.12](#212-a-windows-order-export-does-not-cover-the-orders-it-settles--open-found-2026-08-19-july-month-end-tie) is the price tag** at 4,527,401,608 VND of July understatement, two instances of which are confirmed byte-identical mis-pulled order files.
+*The residual — **FIXED (2026-08-19)**, [D57](06-DECISIONS.md#d57).* It read: *"deciding which window an export belongs to is still `tools/stage_exports.py`'s job", and `POST /uploads` takes `period` as a form field validated for character safety only (`_safe_period`) — no settlement date is ever read.* That was true, and expensive: **[2.12](#212-a-windows-order-export-does-not-cover-the-orders-it-settles--fixed-2026-08-20-residual-named-found-2026-08-19-july-month-end-tie) is the price tag** at 4,527,401,608 VND of July understatement, two instances of which are confirmed byte-identical mis-pulled order files.
 
 The door now reads the settlement span out of the pass the sanitizer already makes — no second read, and dates parsed through `ingest.date_format` rather than a second spelling ([D54](06-DECISIONS.md#d54)). It does **three different things** with the answer, and the differences are the point:
 
@@ -390,7 +390,7 @@ Applying a goldens-affecting config change runs one canary window inline, in the
 
 ---
 
-### 2.12 A window's order export does not cover the orders it settles — `OPEN` (found 2026-08-19, July month-end tie)
+### 2.12 A window's order export does not cover the orders it settles — **FIXED (2026-08-20)**, residual named (found 2026-08-19, July month-end tie)
 
 **Found by the first external month-end comparison** ([07-VERIFICATION](07-VERIFICATION.md)),
 which is the argument for doing that comparison at all. Eleven of 205 store-window
@@ -424,6 +424,9 @@ other four Shopee cells are small (`lashe` s2, `sanofi` s1/s3, `masan` s1).
 
 Total understatement against the team's July master: **4,527,401,608 VND** —
 2,417,721,642 on TikTok (~1.6% of its month) and 2,109,679,966 on Shopee (~2.0%).
+**That figure is the state on 2026-08-19, kept here as the finding. After the fix it is
+1,579,645,766** (see the close-out below); the numbers in this section describe the defect
+as measured, not the system as it stands.
 
 **Two of these are a mis-pull in the raw data, confirmed by digest.**
 `11. Order Purite 14.7.xlsx` (w2) is byte-identical to `12. Order Purite 7.7.xlsx`
@@ -479,19 +482,24 @@ no number has changed. What exists now:
   whose uploads predate the index is indistinguishable from perfect coverage, so it is
   never rendered as "covered".
 
-**The fix exists and is running in `report` mode (2026-08-19).** `src/backfill.py`
-borrows an order's SKU lines from the **nearest same-month predecessor window** that has
-them — one window per order, all of that window's files, predecessors only, income never
-re-read ([D59](06-DECISIONS.md#d59)). It is one mechanism with three modes,
-`cross_window_order_backfill: off | report | apply`:
+**The fix is in and switched on: `cross_window_order_backfill: apply` since 2026-08-20.**
+`src/backfill.py` borrows an order's SKU lines from the **nearest same-month predecessor
+window** that has them — one window per order, all of that window's files, predecessors
+only, income never re-read ([D59](06-DECISIONS.md#d59)). One mechanism, three modes:
 
 * **`off`** — byte-for-byte the behaviour every committed golden was produced under.
-* **`report`** (the default now) — measures it and says so: a tie-out INFO row naming the
-  recoverable settlement, a `Cross-window Orders` exceptions sheet carrying which order
-  came from which window and file, and log lines. **No number changes.** Proven, not
-  argued: the money gate re-ran all eight windows under `report` at zero tolerance.
-* **`apply`** — concatenates the borrowed lines before the explode. This moves cells and
-  has not been switched on.
+* **`report`** — measures it and says so: a tie-out INFO row naming the recoverable
+  settlement, a `Cross-window Orders` exceptions sheet carrying which order came from
+  which window and file, and log lines. **No number changes**, proven rather than argued
+  (the money gate re-ran all eight windows under it at zero tolerance). It was the default
+  from 2026-08-19 to 2026-08-20 — deliberately, so the computation that moves money had
+  been running in production before it was trusted with any.
+* **`apply`** — concatenates the borrowed lines before the explode. **The current
+  default.** It moves cells on real windows and moved **none** on the goldens.
+
+*The order of those two was the point.* Detection and fix are the same code path, so
+`report`'s own output pre-stated exactly what `apply` would do, per window, before the
+flip — and the flip then matched it. Report mode also caught its own bug that way (below).
 
 *Why this is not pooling with extra steps.* Borrowed orders enter the tie-out's **matched**
 population, so TikTok's per-order conservation (1 VND) and Shopee's revenue crossing run
@@ -549,8 +557,38 @@ with no matching order lines" fell from ~2,394,101,094 to **1,451,232,038**, of 
 Purite alone is 1,444,139,986 (41.1% of its settlement) — the byte-identical mis-pull,
 which no mode can recover.
 
-On `2026-07_s4` the effect is larger and needs reading carefully, because it looks at
-first like a control breaking. Shopee's revenue crossing BREACHES under `apply` (per-order
+**What masan's remaining 3% actually is (investigated 2026-08-20).** After `apply`, 736
+masan orders worth 66,461,933 VND still have no lines. They are **not** a mis-pull, not
+missing SKUs inside an order, and not the same-month rule — measured, in this order:
+
+* The orders have **no lines at all**, not partial ones ("729 of 40,299 orders deviate,
+  729 absent from the SKU frame entirely").
+* Every one was created **29–30 July** and settled 29–31 July — the month-end tail.
+* Their order ids appear in **none** of masan's four July exports: 0 of 736 against
+  s1 (254,910 distinct ids), s2 (277,191), s3 (272,002) and s4 (210,000). So this is a
+  platform-side gap, **not** a matching or normalisation fault on our side — which was
+  the first thing checked, because "present but unmatched" would have been our bug.
+* Not a status filter either: the export carries in-flight rows (`Đang giao`, `Đã giao`,
+  and ~57 in the buyer's return window) and its return-window dates run to 2026-08-11,
+  so the snapshot was taken in August, by which time those orders had completed.
+* Not a missing part: the 55 parts are contiguous `1..55` in both s3 and s4.
+
+**The likely cause is a truncated export, and two signatures say so.** masan's s4 export
+holds exactly **210,000** distinct orders — a suspiciously round number — and its newest
+order was created **31 July at 14:21**, mid-afternoon on the final day, where s3's export
+runs to 23:57 on its own last day. Both are what a row- or order-capped pull looks like
+when it fills up and stops. That is an inference, not a proof; what would settle it is a
+re-pull of masan's July orders in narrower date ranges and a comparison of the order count.
+
+**So the remedy is the same as purite's — a re-pull — for a different reason** (truncation
+rather than the wrong file), and it is **out of reach of backfill by construction**: the
+lines exist in no window, so there is nothing to borrow. This residual belongs to the
+"lines exist nowhere" class, but its cause is export completeness rather than ordinary
+business, which is why the month-over-month *change* in a store's coverage share is the
+signal worth watching.
+
+On `2026-07_s4` the crossing effect is larger and needs reading carefully, because it looks
+at first like a control breaking. Shopee's revenue crossing BREACHES under `apply` (per-order
 worst 893,000 VND, total −95,928,999). It also breaches under `report`, **harder**: total
 −2,111,292,476, per-order worst 3,276,000, with 11,260 orders unmatched against 736 and
 Masan at 66.8% unmatched against 3.0%. So `apply` improves that crossing by
@@ -585,6 +623,34 @@ return: **942,869,056 VND** in `w2` from `w1` (exactly abbott 941,081,056 + simi
 `w3`/`w4`/`w5`/`s3`. `purite` and `mondelez kinh do` recover **nothing** — their `w2`
 order files are the byte-identical mis-pulls named above, so the lines were never
 exported. No code closes that residual; a platform re-pull does.
+
+### 2.13 Control cells below a tab's data region never reach the workbook — `OPEN` (found 2026-08-21, during D3)
+
+`_Tab.emit` (`src/finance_template.py`) writes buffered control cells only for rows
+`1..data_start_row-1` when a tab emits a data frame; **every `put` at a row ≥
+`data_start_row` is silently dropped.** Verified empirically (a probe workbook, and
+the committed golden cellsets): TikTok's `PV sum` carries nothing below row 6 — the
+side block's third brand row, its G6/H6 totals, F7/G7/H7 diff and **G8/H8 verdicts**
+have never been in the file — and Shopee's `PV sum` loses rows 5–11, **including the
+J11 verdict that `TOL_PIVOT_DRIFT_SHOPEE`'s comment calls "the working verdict"**.
+Lazada's `Summary` is unaffected (it emits no data frame, so every buffered row is
+written).
+
+Two reasons this is `OPEN` rather than fixed on the spot:
+
+* The verdicts are not lost to the run — the same diffs and verdicts are appended to
+  `checks` (→ `fingerprint.json` and the run log), so the CONTROL exists; what is
+  missing is its rendering in the workbook the team reads.
+* Fixing `emit` to merge control cells into/below the data region **moves cells on
+  all eight goldens** (every TikTok/Shopee window gains its missing side-block cells),
+  which is a semantic change needing its own pre-stated delta and deliberate
+  rebaseline — exactly the discipline [D63](06-DECISIONS.md#d63) just went through
+  for two cells. Do not fold it into anything else.
+
+Found because D3's roster stamp was first placed at `PV sum` F10/G10 and never
+appeared; the stamp now lives at A1/B1, above every data region. When 2.13 is fixed,
+compare the restored cells against the team's own template geometry (the `put` calls
+record the intended positions) before rebaselining.
 
 ## Part 2 — Defects found in the team's own files
 

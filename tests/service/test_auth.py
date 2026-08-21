@@ -391,6 +391,10 @@ UNAUTHENTICATED = {
 # fails. This is what makes an accidental privilege change break a test.
 EXPECTED: dict[tuple[str, str], Role] = {
     ("GET", "/me"): Role.VIEWER,
+    # C5: operational tempo (queue depth, run outcomes, worker liveness). Viewer,
+    # not unauthenticated — /healthz answers the load balancer, this answers a
+    # person, and it says more.
+    ("GET", "/metrics"): Role.VIEWER,
     ("DELETE", "/sessions/current"): Role.VIEWER,
     ("POST", "/me/password"): Role.VIEWER,
 
@@ -404,6 +408,10 @@ EXPECTED: dict[tuple[str, str], Role] = {
     ("DELETE", "/users/{user_id}/sessions"): Role.ADMIN,
 
     ("GET", "/board"): Role.VIEWER,
+    # D2: which months exist — the same read the board already answers.
+    ("GET", "/months"): Role.VIEWER,
+    # A4: queueing a month master by hand is queueing work, same as POST /jobs.
+    ("POST", "/months/{month}/master"): Role.USER,
     ("POST", "/jobs"): Role.USER,
     ("GET", "/jobs"): Role.VIEWER,
     ("GET", "/jobs/{job_id}"): Role.VIEWER,
@@ -418,6 +426,12 @@ EXPECTED: dict[tuple[str, str], Role] = {
     ("GET", "/runs/{run_id}/artifacts/{name}"): Role.VIEWER,
     ("GET", "/runs/{run_id}/exceptions"): Role.VIEWER,
     ("GET", "/exceptions/{fingerprint}/history"): Role.VIEWER,
+    # D1: dispositioning is routine month-end triage — the person working the
+    # queue knows why a row is expected. The control is the recorded reason and
+    # the append-only event trail, not the rank. USER, matching the roster
+    # declaration.
+    ("POST", "/exceptions/{fingerprint}/disposition"): Role.USER,
+    ("DELETE", "/exceptions/{fingerprint}/disposition"): Role.USER,
 
     ("POST", "/uploads"): Role.USER,
     ("GET", "/uploads"): Role.VIEWER,

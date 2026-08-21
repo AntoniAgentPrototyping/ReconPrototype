@@ -228,6 +228,69 @@ export async function queueRun(_prev: ActionResult | null, form: FormData): Prom
   return { ok: true, message: `Queued ${platform} ${period}.` };
 }
 
+export async function queueMonthMaster(
+  _prev: ActionResult | null,
+  form: FormData,
+): Promise<ActionResult> {
+  const month = String(form.get("month") ?? "").trim();
+  // A4: rebuild the month summary without re-running any window. The automatic
+  // chain covers the normal case; this covers a late reference total or a
+  // corrected window. A 409 means one is already waiting, which is fine — it
+  // will read every window finished by the time it runs.
+  try {
+    await api(`/months/${encodeURIComponent(month)}/master`, { method: "POST" });
+  } catch (error) {
+    return { ok: false, message: describe(error) };
+  }
+  revalidatePath("/");
+  return { ok: true, message: `Queued the month summary for ${month}.` };
+}
+
+// ---------------------------------------------------------------------------
+// Exception dispositions (D1)
+// ---------------------------------------------------------------------------
+
+export async function setExceptionDisposition(
+  _prev: ActionResult | null,
+  form: FormData,
+): Promise<ActionResult> {
+  const fingerprint = String(form.get("fingerprint") ?? "");
+  const disposition = String(form.get("disposition") ?? "");
+  const reason = String(form.get("reason") ?? "").trim();
+  const runId = String(form.get("run_id") ?? "");
+  // The decision annotates the fingerprint across runs; it never hides the row.
+  // The actor is the session — the API refuses one supplied in the body.
+  try {
+    await api(`/exceptions/${encodeURIComponent(fingerprint)}/disposition`, {
+      method: "POST",
+      body: { disposition, reason },
+    });
+  } catch (error) {
+    return { ok: false, message: describe(error) };
+  }
+  revalidatePath(`/runs/${runId}`);
+  return { ok: true, message: "" };
+}
+
+export async function clearExceptionDisposition(
+  _prev: ActionResult | null,
+  form: FormData,
+): Promise<ActionResult> {
+  const fingerprint = String(form.get("fingerprint") ?? "");
+  const reason = String(form.get("reason") ?? "").trim();
+  const runId = String(form.get("run_id") ?? "");
+  try {
+    await api(`/exceptions/${encodeURIComponent(fingerprint)}/disposition`, {
+      method: "DELETE",
+      body: { reason },
+    });
+  } catch (error) {
+    return { ok: false, message: describe(error) };
+  }
+  revalidatePath(`/runs/${runId}`);
+  return { ok: true, message: "" };
+}
+
 // ---------------------------------------------------------------------------
 // Uploads and the window roster declaration (M6)
 // ---------------------------------------------------------------------------
@@ -304,6 +367,10 @@ export async function declareRoster(
   const period = String(form.get("period") ?? "").trim();
   const partial = form.get("partial") === "on";
   const reason = String(form.get("reason") ?? "").trim();
+  // D3: which stores the declaration covers. An empty selection is sent as
+  // null — the blanket — because "partial, but I cannot name the stores yet"
+  // is a legitimate early-month state; the run log names it as a blanket.
+  const stores = form.getAll("stores").map(String).filter(Boolean);
 
   if (partial && reason.length < 8) {
     return {
@@ -317,7 +384,13 @@ export async function declareRoster(
   try {
     await api("/windows/roster", {
       method: "POST",
-      body: { platform, period, partial, reason: reason || null },
+      body: {
+        platform,
+        period,
+        partial,
+        reason: reason || null,
+        stores: partial && stores.length > 0 ? stores : null,
+      },
     });
   } catch (error) {
     return { ok: false, message: describe(error) };

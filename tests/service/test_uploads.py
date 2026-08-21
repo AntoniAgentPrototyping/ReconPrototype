@@ -739,3 +739,114 @@ def test_the_mispull_warning_reaches_the_response_through_the_real_sibling_query
     body = r.json()
     assert "2026-05-10" in body["span_warning"], body["span_warning"]
     assert "window_settlement_bounds" in body["span_warning"]
+
+
+# ---------------------------------------------------------------------------
+# The size cap (Phase 6 / C7, 2026-08-20)
+# ---------------------------------------------------------------------------
+
+def test_an_oversized_upload_is_refused_before_anything_reads_it(
+        repo, store, service_settings, issue_session, tmp_path):
+    """Refused at 413 naming the limit, before the sanitizer or the object store
+    see a byte. The cap is proven by a bounded read, not trusted from
+    Content-Length — a body that fills the extra byte is over whatever the
+    header claimed."""
+    from dataclasses import replace
+
+    from fastapi.testclient import TestClient
+
+    from service.api import create_app
+    from service.auth import AuthPolicy
+
+    app = create_app(repo, store,
+                     settings=replace(service_settings, max_upload_mb=1),
+                     policy=AuthPolicy(enabled=True))
+    client = TestClient(app)
+    client.headers["Authorization"] = f"Bearer {issue_session('recon.user')}"
+
+    big = tmp_path / "1_TestStore.xlsx"
+    big.write_bytes(b"x" * (2 * 1024 * 1024))
+    with big.open("rb") as fh:
+        r = client.post("/uploads", files={"file": (big.name, fh)},
+                        data={"platform": "lazada", "period": WINDOW,
+                              "kind": "weekly"})
+    assert r.status_code == 413
+    assert "1 MB" in r.json()["detail"], "the refusal must name the limit"
+    assert repo.list_uploads(platform="lazada", period=WINDOW) == [], (
+        "an oversized body must leave no trace")
+
+
+def test_a_file_under_the_cap_still_uploads(upload_client, tmp_path):
+    """The control: the default cap (512 MB, ~2.8x the largest real export)
+    changes nothing for a legitimate file."""
+    path = sample_export(tmp_path, "2_CapControl.xlsx")
+    with path.open("rb") as fh:
+        r = upload_client.post("/uploads", files={"file": (path.name, fh)},
+                               data={"platform": "lazada", "period": WINDOW,
+                                     "kind": "weekly"})
+    assert r.status_code == 201
+
+
+def test_ready_respects_which_stores_the_declaration_names(
+        upload_client, repo, service_settings):
+    """D3: a missing store the declaration does not name will hard-stop the run,
+    and `ready` must say so rather than promising a run the pipeline refuses."""
+    from service import config_store
+
+    document = config_store.parse(
+        config_store.read_text(service_settings.config_dir))
+    document["expected_stores"]["tiktok"] = ["Store A", "Store B"]
+    version = repo.record_config_version(config_store.dump(document),
+                                         source="proposal", created_by="test")
+    repo.pin_period_config("tiktok", "2026-05_d3", version["id"],
+                           pinned_by="test", reason="pinned for this test")
+
+    params = {"platform": "tiktok", "period": "2026-05_d3"}
+    plan = upload_client.get("/uploads/plan", params=params).json()
+    assert plan["missing_stores"] == ["Store A", "Store B"]
+    assert plan["expected_stores"] == ["Store A", "Store B"], \
+        "the declaration form's picklist reads names, not a count"
+    assert plan["ready"] is False
+
+    # Naming ONE of the two missing stores does not make the window ready.
+    upload_client.post("/windows/roster", json={
+        "platform": "tiktok", "period": "2026-05_d3", "partial": True,
+        "reason": "Store A wound down this month", "stores": ["Store A"]})
+    plan = upload_client.get("/uploads/plan", params=params).json()
+    assert plan["ready"] is False, \
+        "Store B is missing and undeclared — POST /jobs would hard-stop"
+
+    # Naming both does.
+    upload_client.post("/windows/roster", json={
+        "platform": "tiktok", "period": "2026-05_d3", "partial": True,
+        "reason": "both storefronts wound down this month",
+        "stores": ["Store A", "Store B"]})
+    plan = upload_client.get("/uploads/plan", params=params).json()
+    assert plan["ready"] is True
+
+    # A blanket declaration still covers everything (pre-021 rows).
+    upload_client.post("/windows/roster", json={
+        "platform": "tiktok", "period": "2026-05_d3", "partial": True,
+        "reason": "declared before the store list existed"})
+    plan = upload_client.get("/uploads/plan", params=params).json()
+    assert plan["ready"] is True
+
+
+def test_the_plan_flags_a_declared_absent_store_that_now_has_files(
+        upload_client, tmp_path):
+    """D3's re-evaluation nudge: the page re-renders after every upload action,
+    so `declared_absent_present` IS the upload-time hook — no listener needed."""
+    path = sample_export(tmp_path, "2_KAO.xlsx")
+    with path.open("rb") as fh:
+        assert upload_client.post(
+            "/uploads", files={"file": (path.name, fh)},
+            data={"platform": "lazada", "period": WINDOW,
+                  "kind": "weekly"}).status_code == 201
+    upload_client.post("/windows/roster", json={
+        "platform": "lazada", "period": WINDOW, "partial": True,
+        "reason": "KAO expected absent this week", "stores": ["KAO"]})
+
+    plan = upload_client.get("/uploads/plan",
+                             params={"platform": "lazada", "period": WINDOW}).json()
+    assert plan["declared_absent_present"] == ["KAO"], \
+        "the declaration no longer describes the window, and the page must say so"

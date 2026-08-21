@@ -13,6 +13,12 @@
 > * **Ask 2 — the July raw exports.** Received: 1,051 files, 9.8 GB, all three
 >   platforms. Staged into 14 windows (`2026-07_l1..l5`, `_s1..s4`, `_w1..w5`).
 >
+> **Ask 3 was created by what Asks 1 and 2 made possible (2026-08-20): two order
+> exports need re-pulling.** The July comparison closed 4,527,401,608 VND of gap down
+> to 1,579,645,766, and what remains is not something code can reach — the order lines
+> exist in no export at all. Two different shapes, so two different asks; see
+> [Ask 3](#ask-3--two-july-order-exports-re-pulled) below.
+>
 > **One caveat on the CSVs, and it is not the team's fault.** Excel's
 > "CSV (Comma delimited)" writes the system ANSI codepage, so every Vietnamese
 > storefront name was destroyed on export — `Unilever Chăm Sóc Vẻ Đẹp` arrived as
@@ -111,6 +117,45 @@ per-window files it aggregates — that is an internal consistency check and it 
 worth having. What we cannot do is the check that actually matters: comparing our
 figures against a file the team produced independently. That claim stays open in
 [07-VERIFICATION.md](07-VERIFICATION.md) until July is staged.
+
+---
+
+## Ask 3 — two July order exports, re-pulled
+
+Created 2026-08-20, after the cross-window fix landed. The July gap is down from
+4,527,401,608 VND to **1,579,645,766**, and every cell that could be closed in code has
+been. What is left needs data that was never exported, in two distinct shapes. **Both are
+order exports only — no income file is involved, and nothing here is a re-send of a file
+we already have.**
+
+**3a — `purite`, TikTok, window `2026-07_w2` (worth 1,444,052,986 VND, 91% of the
+residual).** The file in that folder, `11. Order Purite 14.7.xlsx`, is **byte-identical**
+to w1's `12. Order Purite 7.7.xlsx` (sha `9bd3750061f4`). The same export was saved twice
+and labelled for the later window, so w2's own order lines were never pulled. The Mondelez
+Kinh Do folder for w2 has the same shape — a file still named `7.7`, byte-identical to
+w1's (`f7e3dda0d99a`), worth 6,992,600. **What we need:** the order export for those two
+storefronts covering w2's own range, pulled fresh.
+
+**3b — `masan`, Shopee, window `2026-07_s4` (worth 66,461,933 VND).** Different cause,
+and it is worth stating why we think so. 736 orders that s4 settles appear in **none** of
+masan's four July order exports — checked by order id against all four (0 of 736 against
+s1, s2, s3 and s4). They were all created 29–30 July and settled 29–31 July. Two
+signatures suggest the export was **truncated** rather than wrong: it holds exactly
+**210,000** distinct orders, and its newest order was created **31 July at 14:21** —
+mid-afternoon on the final day, where the s3 export runs to 23:57 on its own last day.
+**What we need:** masan's July orders re-pulled in **narrower date ranges** (a few days at
+a time) so no single request hits whatever cap this hit, and the resulting order count so
+we can confirm the truncation theory.
+
+**What happens without it:** these two amounts stay out of the invoice and stay reported
+every run, as a named reconciling item rather than a silent loss — which is the state
+before this fix, for these cells only. Nothing is wrong with the pipeline; it cannot
+invoice lines that were never exported.
+
+**What is NOT being asked:** we are not asking for the month's order files to be combined
+or re-pulled as one range. Pooling July's TikTok order exports into w2 was measured at a
+**4.5× over-count** (183,102,704,362 against a reference of 40,060,544,029), because the
+same order line appears in several exports.
 
 ---
 

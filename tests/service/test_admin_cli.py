@@ -184,3 +184,30 @@ def test_an_admin_may_withdraw_anyone_s_proposal(editor_client):
     admin = editor_client("recon.admin", subject="admin2@ada")
     proposal_id = _propose(author).json()["id"]
     assert admin.post(f"/config/proposals/{proposal_id}/withdraw").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# A4 — the master's break-glass enqueue
+# ---------------------------------------------------------------------------
+
+def test_enqueue_master_queues_one_and_refuses_a_second(admin_cli, repo):
+    """The CLI half of `POST /months/{month}/master`, for when the api is not an
+    option — same reason `reset-password` lives here."""
+    from service.models import JobKind
+
+    code, out = admin_cli("job", "enqueue-master", "--month", "2026-07")
+    assert code == 0 and "queued the month-end master for 2026-07" in out
+
+    masters = [j for j in repo.list_jobs() if j.kind is JobKind.MONTH_MASTER]
+    assert len(masters) == 1
+    assert masters[0].requested_by == "service.admin", \
+        "the CLI has no session; the door it came through is the attribution"
+
+    code, out = admin_cli("job", "enqueue-master", "--month", "2026-07")
+    assert code == 1 and "not queued" in out
+
+
+def test_enqueue_master_refuses_a_malformed_month(admin_cli, repo):
+    code, out = admin_cli("job", "enqueue-master", "--month", "2026-07_w1")
+    assert code == 1 and "not a month" in out
+    assert repo.list_jobs() == []

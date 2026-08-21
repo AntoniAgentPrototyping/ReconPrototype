@@ -1,4 +1,6 @@
+import { Disposition } from "./disposition";
 import { api, type ExceptionRow, type ExceptionSheet } from "@/lib/api";
+import { t, type Lang } from "@/lib/words";
 
 /**
  * The exception queue for one run.
@@ -7,13 +9,24 @@ import { api, type ExceptionRow, type ExceptionSheet } from "@/lib/api";
  * unmatched-settlement class alone is ~11,765 orders, so the queue stores a
  * bounded slice — and a capped queue that looks complete is a lie with a UI on
  * it. Where rows were dropped, it says so, with the real total.
+ *
+ * Since D1 each row also carries its standing decision, and a user can make
+ * one. The decision follows the fingerprint across runs and is a BADGE, never
+ * a filter the reader did not ask for: `openOnly` is offered explicitly, and
+ * the default view is always the whole queue.
  */
 export async function ExceptionQueue({
   runId,
   sheets,
+  lang,
+  canDecide,
+  openOnly,
 }: {
   runId: number;
   sheets: ExceptionSheet[];
+  lang: Lang;
+  canDecide: boolean;
+  openOnly: boolean;
 }) {
   if (sheets.length === 0) {
     return (
@@ -25,7 +38,7 @@ export async function ExceptionQueue({
   }
 
   const { exceptions } = await api<{ exceptions: ExceptionRow[] }>(
-    `/runs/${runId}/exceptions?limit=200`,
+    `/runs/${runId}/exceptions?limit=200${openOnly ? "&open_only=true" : ""}`,
   );
 
   const columnsOf = (rows: ExceptionRow[]) => {
@@ -36,6 +49,13 @@ export async function ExceptionQueue({
 
   return (
     <>
+      <p className="small">
+        {openOnly ? (
+          <a href={`/runs/${runId}`}>{t(lang, "showAll")}</a>
+        ) : (
+          <a href={`/runs/${runId}?open=1`}>{t(lang, "needsDecisionOnly")}</a>
+        )}
+      </p>
       {sheets.map((sheet) => {
         const rows = exceptions.filter((e) => e.sheet === sheet.sheet);
         const columns = columnsOf(rows);
@@ -63,6 +83,7 @@ export async function ExceptionQueue({
                   {columns.map((c) => (
                     <th key={c}>{c}</th>
                   ))}
+                  <th>{t(lang, "decision")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -79,6 +100,25 @@ export async function ExceptionQueue({
                         {format(row.payload[c])}
                       </td>
                     ))}
+                    <td className="small">
+                      {canDecide ? (
+                        <Disposition row={row} runId={runId} lang={lang} />
+                      ) : row.disposition ? (
+                        <span
+                          className="badge muted"
+                          title={`${t(lang, "decidedBy")} ${row.disposition_by ?? "—"}: ${row.disposition_reason ?? ""}`}
+                        >
+                          {t(
+                            lang,
+                            row.disposition === "expected"
+                              ? "dispositionExpected"
+                              : "dispositionReviewed",
+                          )}
+                        </span>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

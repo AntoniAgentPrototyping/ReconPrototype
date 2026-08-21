@@ -255,6 +255,14 @@ def test_the_rows_that_can_move_a_cell_are_marked(conn):
              values={"value": True}),
         edit(table="config_scalars", op="upsert", key={"key": "number_style"},
              values={"value": "vietnamese"}),
+        # A14: a bucket row decides which tab a store's money lands on.
+        edit(table="config_invoice_buckets", op="upsert",
+             key={"platform": "tiktok", "needle": "biore"},
+             values={"bucket": "KAO 8"},
+             evidence="routing a new storefront to the KAO invoice"),
+        edit(table="config_fee_buckets", op="upsert",
+             key={"platform": "lazada", "role": "promo", "bucket": "6. New"},
+             values={}, evidence="a new promo bucket nets into the unit price"),
     ]
     for one in cases:
         assert config_rows.invalidating(conn, [one]), (
@@ -446,3 +454,69 @@ def test_a_new_row_lands_at_the_end_and_rendering_stays_stable(conn):
     assert config_render.render(conn) == once, "rendering is not deterministic"
     roster = config_store.parse(once)["expected_stores"]["tiktok"]
     assert roster[-1] == "Zed Test"
+
+
+# ---------------------------------------------------------------------------
+# A14 — the bucket tables and the numeric-list scalar (2026-08-20)
+# ---------------------------------------------------------------------------
+
+def test_a_second_revenue_bucket_is_refused_with_the_reason(conn):
+    """Revenue is ONE bucket. Two rows would make `lazada.revenue_lines`
+    ambiguous, and the YAML shape cannot even represent it — the row editor is
+    the only path that could add one, so it is where the refusal lives."""
+    with pytest.raises(RowEditError, match="ONE bucket"):
+        config_rows.apply(conn, [edit(
+            table="config_fee_buckets", op="upsert",
+            key={"platform": "lazada", "role": "revenue", "bucket": "9.Another"},
+            values={}, evidence="pretending the ledger has two revenue buckets")],
+            who="test")
+
+
+def test_a_promo_bucket_can_be_added_and_reaches_the_contract(conn):
+    from service import config_render
+
+    config_rows.apply(conn, [edit(
+        table="config_fee_buckets", op="upsert",
+        key={"platform": "lazada", "role": "promo", "bucket": "6. New Voucher"},
+        values={}, evidence="a new promo bucket appeared in the September Lib")],
+        who="test")
+    parsed = config_store.parse(config_render.render(conn))
+    assert "6. New Voucher" in parsed["fee_buckets"]["lazada"]["promo"]
+    # And the committed vocabulary is still there, in seed order first.
+    assert parsed["fee_buckets"]["lazada"]["revenue"] == "1.Doanh Thu"
+
+
+def test_the_catch_all_bucket_is_a_row_addressed_by_an_empty_match_text(conn):
+    """The NULL-needle row IS the platform's catch-all — editable like any other
+    row rather than a sentinel string pretending to be a match."""
+    from service import config_render
+
+    config_rows.apply(conn, [edit(
+        table="config_invoice_buckets", op="upsert",
+        key={"platform": "tiktok", "needle": ""},
+        values={"bucket": "Others 8"},
+        evidence="touching the catch-all through the editor")], who="test")
+    parsed = config_store.parse(config_render.render(conn))
+    assert parsed["invoice_buckets"]["tiktok"]["default"] == "Others 8"
+    assert parsed["invoice_buckets"]["tiktok"]["match"]["kao"] == "KAO 8"
+
+
+def test_a_numeric_list_scalar_keeps_its_element_type(conn):
+    """The browser control submits text. `vat_factors.rates` stored as strings
+    would compare equal to no `vat_factor.round(2)` and silently zero every
+    per-rate row — the `dedupe_rows`-becoming-"false" failure shape, one level
+    down."""
+    config_rows.apply(conn, [edit(
+        table="config_scalars", op="upsert", key={"key": "vat_factors.rates"},
+        values={"value": ["1.05", "1.08", "1.1"]})], who="test")
+    row = next(r for r in config_rows.read_rows(conn, "config_scalars")
+               if r["key"] == "vat_factors.rates")
+    assert row["value"] == [1.05, 1.08, 1.1]
+    assert all(type(v) is float for v in row["value"])
+
+
+def test_a_non_number_in_a_numeric_list_is_refused(conn):
+    with pytest.raises(RowEditError, match="list of numbers"):
+        config_rows.apply(conn, [edit(
+            table="config_scalars", op="upsert", key={"key": "vat_factors.rates"},
+            values={"value": ["1.05", "ten percent"]})], who="test")

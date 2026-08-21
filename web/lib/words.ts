@@ -109,6 +109,19 @@ export const WORDS: Record<string, Entry> = {
   },
   storesAbsent: { en: "store(s) with no file", vi: "cửa hàng chưa có file" },
   nothingQueued: { en: "Nothing has been run yet.", vi: "Chưa có lần chạy nào." },
+  // D2: a window whose exports were uploaded but which nobody has run. These rows
+  // were invisible while the board only listed queued work.
+  notRun: { en: "not yet run", vi: "chưa chạy" },
+  filesUploaded: { en: "file(s) uploaded", vi: "file đã tải lên" },
+  month: { en: "Month", vi: "Tháng" },
+  allMonths: { en: "All months", vi: "Tất cả các tháng" },
+  show: { en: "Show", vi: "Xem" },
+  monthSummary: { en: "Month summary", vi: "Tổng hợp tháng" },
+  buildMonthSummary: { en: "Build the month summary", vi: "Tạo tổng hợp tháng" },
+  buildMonthSummaryHint: {
+    en: "Consolidates the month's finished periods into one file. Normally queued automatically when a period finishes; use this to rebuild it without re-running anything.",
+    vi: "Gộp các kỳ đã chạy xong của tháng vào một file. Bình thường sẽ tự xếp hàng khi một kỳ chạy xong; dùng nút này để tạo lại mà không phải chạy lại kỳ nào.",
+  },
 
   // -- a run --------------------------------------------------------------
   filesProduced: { en: "Files this run produced", vi: "File lần chạy này tạo ra" },
@@ -129,6 +142,27 @@ export const WORDS: Record<string, Entry> = {
   runLog: { en: "What the run did, step by step", vi: "Diễn biến của lần chạy" },
   exceptions: { en: "Rows needing a decision", vi: "Dòng cần quyết định" },
   updatingLive: { en: "updating automatically", vi: "đang tự cập nhật" },
+
+  // -- exception decisions (D1). "Expected" is the finance sense: a known,
+  // accepted discrepancy that recurs — not something to fix.
+  dispositionReviewed: { en: "reviewed", vi: "đã xem xét" },
+  dispositionExpected: { en: "expected", vi: "lệch đã biết" },
+  markReviewed: { en: "Mark as reviewed", vi: "Đánh dấu đã xem xét" },
+  markExpected: { en: "Mark as expected", vi: "Đánh dấu là lệch đã biết" },
+  decisionReason: {
+    en: "Why — this note is the record",
+    vi: "Lý do — ghi chú này chính là hồ sơ",
+  },
+  decisionHint: {
+    en: "The decision follows this row across runs and is shown as a badge. It never hides the row — a marked amount that grows must still be seen.",
+    vi: "Quyết định sẽ đi theo dòng này qua các lần chạy và hiện thành nhãn. Dòng không bao giờ bị ẩn — số đã đánh dấu mà tăng lên vẫn phải được nhìn thấy.",
+  },
+  reopen: { en: "Re-open", vi: "Mở lại" },
+  decidedBy: { en: "decided by", vi: "quyết định bởi" },
+  needsDecisionOnly: { en: "Show only rows needing a decision", vi: "Chỉ hiện dòng cần quyết định" },
+  showAll: { en: "Show everything", vi: "Hiện tất cả" },
+  decision: { en: "Decision", vi: "Quyết định" },
+  save: { en: "Save", vi: "Lưu" },
 
   // Timings. "Compute" was hinted as "DataFrame math" and "Serialize" as
   // "openpyxl workbook building" — both are the names of Python libraries.

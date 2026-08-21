@@ -88,7 +88,7 @@ Why that test is cheap enough to keep in the default suite: Lazada `_l1` runs in
 
 The queue's own claims are verified against a **real PostgreSQL 17.10**, not a substitute — `FOR UPDATE SKIP LOCKED` is a statement about what two transactions do to each other, and lease expiry is a statement about `now()`. Eight threads racing on five jobs claim each exactly once. The tests create and drop their own database and skip (loudly) when `RECON_TEST_DATABASE_URL` is unset.
 
-**What the M4 gate does not cover:** the container images, which have never been built ([defect 2.2](08-KNOWN-DEFECTS.md#22-deploydockerfile-and-deploydocker-composeyml-have-never-been-built--open)); anything about authentication, because there is none ([2.1](08-KNOWN-DEFECTS.md#21-the-api-is-unauthenticated--open-m5)); and behaviour under a genuinely concurrent *pipeline* load — the worker runs one job at a time by design and multi-process concurrency is proven at the queue, not at the pipeline.
+**What the M4 gate does not cover:** the container images, which have never been built ([defect 2.2](08-KNOWN-DEFECTS.md#22-deploydockerfile-and-deploydocker-composeyml-have-never-been-built--fixed-m5-2026-08-14)); anything about authentication, because there is none ([2.1](08-KNOWN-DEFECTS.md#21-the-api-is-unauthenticated--fixed-m5-2026-08-14)); and behaviour under a genuinely concurrent *pipeline* load — the worker runs one job at a time by design and multi-process concurrency is proven at the queue, not at the pipeline.
 
 ### The M5 gate
 
@@ -102,7 +102,7 @@ M5 added authentication, an upload boundary, config versioning, a config editor 
 
 **The containers were built and run.** `db` + `api` + `worker` + `web` came up; the api answered `/healthz` on the private network, `/board` without a token returned **401**, a token minted through `service.admin` authenticated as `recon.admin`, and the containerised worker claimed a job and executed it. Defect 2.2 is closed.
 
-**What the M5 gate does not cover:** the web UI has never been opened in a browser ([defect 2.8](08-KNOWN-DEFECTS.md#28-the-web-app-has-never-been-opened-in-a-browser--open)) — it type-checks under `strict` and its container serves, and that is all. Nor does anything here verify Entra ID SSO, which is not built.
+**What the M5 gate does not cover:** the web UI has never been opened in a browser ([defect 2.8](08-KNOWN-DEFECTS.md#28-the-web-app-had-never-been-opened-in-a-browser--closed-2026-08-17)) — it type-checks under `strict` and its container serves, and that is all. Nor does anything here verify Entra ID SSO, which is not built.
 
 Suite baseline: **`435 passed, 3 skipped, 0 xfailed`** with Postgres available (`167` before M4, `319` after it; the 240 service tests skip without `RECON_TEST_DATABASE_URL`). The xfail count is the number worth watching — it was 12 through M0/M1 and is now zero, because every pinned control gap has been closed ([08-KNOWN-DEFECTS](08-KNOWN-DEFECTS.md)). An empty drift detector detects nothing, so a newly discovered gap needs a newly pinned test. The second venv and the "run in both runtimes" rule are retired ([D21](06-DECISIONS.md#d21)).
 
@@ -299,11 +299,15 @@ two reasons are worth stating because a future change could break either:
 So the common path costs no extra I/O, which matters because order exports are the
 largest inputs in the tree.
 
-**Not verified, and named as such:** `apply` mode has never been run against real data.
-Its expected effect is measured (`w2` +942,869,056 VND from `w1`; `s4` +1,390,095,674
-from `s3`; `s2` +173,429) but measured by `tools/measure_order_coverage.py`, which is a
-*different* implementation of the same idea from the one that would execute. Agreement
-between the two is a check worth making at the flip, not an assumption to carry into it.
+**As written on 2026-08-19, and kept because what happened next is the point:** *"`apply`
+mode has never been run against real data. Its expected effect is measured (`w2`
++942,869,056 VND from `w1`; `s4` +1,390,095,674 from `s3`; `s2` +173,429) but measured by
+`tools/measure_order_coverage.py`, which is a **different** implementation of the same idea
+from the one that would execute. Agreement between the two is a check worth making at the
+flip, not an assumption to carry into it."*
+
+That paragraph is now superseded — `apply` has been the default since 2026-08-20 and is
+measured below — but the check it insisted on is what found the defect immediately after.
 
 **That check was made on 2026-08-20, and the two did not agree.** The tool reads through
 `ingest.read_parts`; the pipeline's borrow read through `read_files` only, so it never

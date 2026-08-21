@@ -91,6 +91,16 @@ export default async function WindowPage({
   const total = kinds.reduce((n, k) => n + (plan.files[k]?.length ?? 0), 0);
   const canEdit = me.role !== "recon.viewer";
   const declaration = plan.roster_declaration;
+  // D3: a named declaration covers only the stores it names; NULL is the
+  // blanket and covers everything. A missing store outside the list means the
+  // run hard-stops, and this page must not promise otherwise.
+  const declaredList = declaration?.declared_absent_stores ?? null;
+  const uncovered =
+    declaredList === null
+      ? []
+      : plan.missing_stores.filter((s) => !declaredList.includes(s));
+  const declarationCovers =
+    (declaration?.roster_declared_partial ?? false) && uncovered.length === 0;
 
   return (
     <>
@@ -180,8 +190,19 @@ export default async function WindowPage({
         </div>
       )}
 
+      {/* D3's re-evaluation nudge: this page re-renders after every upload
+          action, so it IS the upload-time hook. The figures are included either
+          way — the record just no longer describes the window. */}
+      {plan.declared_absent_present.length > 0 && (
+        <div className="notice">
+          {vi
+            ? `Cửa hàng đã khai báo vắng nay đã có file: ${plan.declared_absent_present.join(", ")}. Số liệu của các cửa hàng này VẪN được tính; hãy rút lại hoặc khai báo lại để hồ sơ khớp với kỳ.`
+            : `Declared-absent store(s) now have files: ${plan.declared_absent_present.join(", ")}. Their figures ARE included; withdraw or re-declare so the record matches the period.`}
+        </div>
+      )}
+
       {plan.missing_stores.length > 0 ? (
-        <div className={`notice ${declaration?.roster_declared_partial ? "" : "bad"}`}>
+        <div className={`notice ${declarationCovers ? "" : "bad"}`}>
           <strong>
             {vi
               ? `${plan.missing_stores.length} cửa hàng dự kiến chưa có file:`
@@ -189,13 +210,17 @@ export default async function WindowPage({
           </strong>{" "}
           <span className="mono">{plan.missing_stores.join(", ")}</span>
           <div className="muted small" style={{ marginTop: 6 }}>
-            {declaration?.roster_declared_partial
+            {declarationCovers && declaration
               ? vi
                 ? `${declaration.declared_by} đã xác nhận kỳ này chỉ có một phần cửa hàng — “${declaration.reason}”. Hệ thống sẽ chạy tiếp, và tổng số ở đây chỉ là một phần của tháng.`
                 : `Declared partial by ${declaration.declared_by} — “${declaration.reason}”. The run will proceed and its totals are only part of the month.`
-              : vi
-                ? "Nếu không có xác nhận, hệ thống sẽ dừng ở đây. Đó là cố ý: một kỳ thiếu cửa hàng mà không ai biết sẽ cho ra file trông đầy đủ nhưng xuất thiếu hoá đơn."
-                : "Without a declaration the run will stop here. That is deliberate: a period quietly missing a store produces a file that looks complete and under-invoices."}
+              : declaration?.roster_declared_partial
+                ? vi
+                  ? `Xác nhận thiếu cửa hàng chưa bao gồm: ${uncovered.join(", ")}. Hệ thống sẽ dừng — thêm cửa hàng vào xác nhận bên dưới, hoặc tải file lên.`
+                  : `The declaration does not cover: ${uncovered.join(", ")}. The run will stop — add them to the declaration below, or upload their files.`
+                : vi
+                  ? "Nếu không có xác nhận, hệ thống sẽ dừng ở đây. Đó là cố ý: một kỳ thiếu cửa hàng mà không ai biết sẽ cho ra file trông đầy đủ nhưng xuất thiếu hoá đơn."
+                  : "Without a declaration the run will stop here. That is deliberate: a period quietly missing a store produces a file that looks complete and under-invoices."}
           </div>
         </div>
       ) : (
@@ -289,7 +314,8 @@ export default async function WindowPage({
             platform={platform}
             period={period}
             declaration={declaration}
-            missingCount={plan.missing_stores.length}
+            missingStores={plan.missing_stores}
+            expectedStores={plan.expected_stores}
           />
         </>
       )}

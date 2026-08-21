@@ -133,6 +133,11 @@ class Run:
     # `ingest.check_stores`, and nothing branches on this.
     roster_missing: int | None = None
 
+    # What this run queued next (A4): the month-master chain's outcome sentence,
+    # including a failure to queue. On the run row rather than in the run log,
+    # because the log is already stored when the chain runs (migration 019).
+    chained: str | None = None
+
     @property
     def in_flight(self) -> bool:
         return self.finished_at is None

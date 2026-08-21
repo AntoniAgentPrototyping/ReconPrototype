@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
+import { MasterForm } from "./master-form";
 import { QueueForm } from "./queue-form";
 import { ReclaimButton } from "./reclaim-button";
 import { api, whoami, type BoardRow } from "@/lib/api";
@@ -35,10 +36,12 @@ export default async function BoardPage({
   // `month_masters` is a separate list, not a window with platform 'all' — a
   // month-end summary rendered as a settlement period would invite someone to
   // read it as one more window (M8 Phase 3).
-  const { windows, month_masters = [] } = await api<{
-    windows: BoardRow[];
-    month_masters?: BoardRow[];
-  }>(`/board${query}`);
+  const [{ windows, month_masters = [] }, { months }] = await Promise.all([
+    api<{ windows: BoardRow[]; month_masters?: BoardRow[] }>(`/board${query}`),
+    // D2: which months exist, so the filter is a picker rather than a URL you
+    // have to know to edit.
+    api<{ months: string[] }>("/months"),
+  ]);
 
   const byPlatform = new Map<string, BoardRow[]>();
   for (const row of windows) {
@@ -54,7 +57,30 @@ export default async function BoardPage({
           : `${windows.length} settlement period${windows.length === 1 ? "" : "s"}${month ? ` in ${month}` : ""}. Each shows its most recent run; the count beside it says how many times it has been run.`}
       </p>
 
-      {me.role !== "recon.viewer" && <QueueForm />}
+      {/* D2: the month filter existed only as a URL parameter somebody had to
+          know about. A plain GET form, so it works without any client code. */}
+      {months.length > 0 && (
+        <form className="row" action="/" method="get" style={{ marginBottom: 12 }}>
+          <div>
+            <label htmlFor="month-filter">{t(lang, "month")}</label>
+            <select id="month-filter" name="month" defaultValue={month ?? ""}>
+              <option value="">{t(lang, "allMonths")}</option>
+              {months.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          </div>
+          <button type="submit" className="secondary" style={{ alignSelf: "end" }}>
+            {t(lang, "show")}
+          </button>
+        </form>
+      )}
+
+      {me.role !== "recon.viewer" && (
+        <QueueForm known={windows.map((w) => ({ platform: w.platform, period: w.period }))} />
+      )}
       {/* C1: only when something is actually showing as running — this ends other
           people's in-flight work and should not be a standing invitation. */}
       {me.role === "recon.admin" && windows.some((w) => w.job_state === "leased") && <ReclaimButton />}
@@ -75,9 +101,16 @@ export default async function BoardPage({
           it consolidates the month's finished windows and is REBUILT whenever
           another one finishes, so it is partial for most of the month. Its own
           run page names which windows it covers and which it does not. */}
-      {month_masters.length > 0 && (
+      {(month_masters.length > 0 || me.role !== "recon.viewer") && (
         <section>
-          <h2>{lang === "vi" ? "Tổng hợp tháng" : "Month summary"}</h2>
+          <h2>{t(lang, "monthSummary")}</h2>
+          {/* A4: the summary is queued automatically when a period finishes; the
+              form exists for rebuilding one when nothing has run — a late
+              reference total, a repinned period. */}
+          {me.role !== "recon.viewer" && (
+            <MasterForm lang={lang} defaultMonth={month ?? months[0] ?? ""} />
+          )}
+          {month_masters.length > 0 && (
           <div className="panel" style={{ padding: 0 }}>
             <table>
               <thead>
@@ -116,6 +149,7 @@ export default async function BoardPage({
               </tbody>
             </table>
           </div>
+          )}
         </section>
       )}
 
@@ -188,6 +222,14 @@ export default async function BoardPage({
                           · {row.job_count} {lang === "vi" ? "lần chạy" : "runs"}
                         </span>
                       )}
+                      {/* D2: a window known only from its uploads — say what
+                          there is, which is the files waiting to be run. */}
+                      {row.upload_count > 0 && !row.run_id && (
+                        <span className="muted small">
+                          {" "}
+                          · {row.upload_count} {t(lang, "filesUploaded")}
+                        </span>
+                      )}
                     </td>
                     <td>
                       {row.run_id ? (
@@ -255,6 +297,8 @@ function Verdict({ row, lang }: { row: BoardRow; lang: Lang }) {
       </span>
     );
   }
+  // D2: a window with uploads (or a declaration) and no job at all.
+  if (!row.job_state) return <span className="badge muted">{t(lang, "notRun")}</span>;
   if (row.job_state === "leased")
     return <span className="badge running">{jobState(lang, "leased")}</span>;
   if (row.job_state === "error")

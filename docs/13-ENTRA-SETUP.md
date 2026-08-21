@@ -1,6 +1,6 @@
 # 13 — Entra ID and Azure access (one-time, done by a human in the portal)
 
-M5 closes [defect 2.1](08-KNOWN-DEFECTS.md#21-the-api-is-unauthenticated--open-m5) — the api has no authentication. The code for that can be written here; the **app registration cannot**, because it lives in your Microsoft tenant and needs someone with directory permissions. This page is the checklist for doing it, written for a first time in the Microsoft ecosystem.
+M5 closes [defect 2.1](08-KNOWN-DEFECTS.md#21-the-api-is-unauthenticated--fixed-m5-2026-08-14) — the api has no authentication. The code for that can be written here; the **app registration cannot**, because it lives in your Microsoft tenant and needs someone with directory permissions. This page is the checklist for doing it, written for a first time in the Microsoft ecosystem.
 
 Everything here is a portal task. None of it touches this repo, and none of it is reversible-by-accident — an app registration does nothing until an application uses its credentials.
 
@@ -71,7 +71,7 @@ So **Application Developer will not let you create a PostgreSQL server**, and Co
 
 ## First: is Azure actually the target?
 
-Worth deciding before requesting anything, because it changes the ask. The hosting decision is **not made** — `deploy/docker-compose.yml` describes Postgres + api + worker as containers and says nothing about where they run, and it has [never been built](08-KNOWN-DEFECTS.md#22-deploydockerfile-and-deploydocker-composeyml-have-never-been-built--open).
+Worth deciding before requesting anything, because it changes the ask. The hosting decision is **not made** — `deploy/docker-compose.yml` describes Postgres + api + worker as containers and says nothing about where they run, and it has [never been built](08-KNOWN-DEFECTS.md#22-deploydockerfile-and-deploydocker-composeyml-have-never-been-built--fixed-m5-2026-08-14).
 
 Azure is the obvious default *if* the organisation is already a Microsoft shop (Entra for identity, D365 as the eventual posting target), because identity, secrets and the database can all use one credential model. It is not the only option, and nothing built so far is Azure-specific — the service talks plain PostgreSQL and writes artifacts through a one-method storage interface.
 
@@ -83,7 +83,7 @@ Azure is the obvious default *if* the organisation is already a Microsoft shop (
 |---|---|---|
 | A dedicated **resource group** (e.g. `rg-recon-dev`) | **Contributor**, scoped to that resource group | Create and manage everything below. Scoping to one resource group — rather than the subscription — is what makes this a reasonable ask. |
 | **Azure Database for PostgreSQL — Flexible Server** | covered by Contributor above | The job queue, run records and run log ([D29](06-DECISIONS.md#d29)). Burstable B1ms is adequate at ~14 jobs a month. |
-| **Storage account** (blob) | Contributor **plus** `Storage Blob Data Contributor` | The artifact store — the second `ArtifactStore` implementation ([defect 2.4](08-KNOWN-DEFECTS.md#24-artifacts-are-local-filesystem-only--open)) — and staged raw exports. |
+| **Storage account** (blob) | Contributor **plus** `Storage Blob Data Contributor` | The artifact store — the second `ArtifactStore` implementation ([defect 2.4](08-KNOWN-DEFECTS.md#24-artifacts-are-local-filesystem-only--fixed-m6-2026-08-17)) — and staged raw exports. |
 | **Key Vault** | Contributor **plus** `Key Vault Secrets Officer` | The Entra client secret and database credentials. |
 | **Container Registry** | `AcrPush` | Pushing the api/worker image. |
 | **Container Apps** or **App Service** | covered by Contributor above | Running that image. |

@@ -32,6 +32,13 @@ from psycopg.types.json import Jsonb
 from .repository import NotFound
 from .repository_identity import IdentityRepository
 
+# Which upload rows count as evidence that a window exists (D2). `platform` is
+# nullable (a file can be recorded before it is classified) and a rejected
+# upload is not evidence. ONE spelling, interpolated into both `month_windows`
+# and `board` — the two queries whose drift would make the month-end master and
+# the board disagree about which windows are real.
+UPLOAD_EVIDENCE = "platform is not null and state <> 'rejected'"
+
 
 class ProposalConflict(RuntimeError):
     """The config changed under an editor's feet.
@@ -698,26 +705,33 @@ class M5Repository(IdentityRepository):
     # -- window roster declaration ------------------------------------------
 
     def declare_window_roster(self, platform: str, period: str, *, partial: bool,
-                              reason: str | None, declared_by: str) -> dict:
+                              reason: str | None, declared_by: str,
+                              stores: list[str] | None = None) -> dict:
         """Record, once per window, that an incomplete roster is expected.
 
         Replaces `jobs.partial_roster`. The difference is not the plumbing — the
         worker still passes the same flag into `build_context` — it is that this
         is stated once, with a reason, by a named person, and is visible to whoever
         reviews the numbers. A checkbox on the queue form was none of those things.
+
+        `stores` names WHICH expected stores the declaration covers (D3, migration
+        021). None is the legacy blanket — every expected store optional — kept
+        expressible because existing declarations predate the column and because a
+        declaration can legitimately predate knowing which stores will be missing.
         """
         with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""
                 insert into windows (platform, period, roster_declared_partial,
-                                     reason, declared_by)
-                values (%s, %s, %s, %s, %s)
+                                     reason, declared_by, declared_absent_stores)
+                values (%s, %s, %s, %s, %s, %s)
                 on conflict (platform, period) do update
                 set roster_declared_partial = excluded.roster_declared_partial,
                     reason = excluded.reason,
                     declared_by = excluded.declared_by,
+                    declared_absent_stores = excluded.declared_absent_stores,
                     declared_at = now()
                 returning *
-            """, (platform, period, partial, reason, declared_by))
+            """, (platform, period, partial, reason, declared_by, stores))
             return self._one(cur)
 
     def window_declaration(self, platform: str, period: str) -> dict | None:
@@ -792,19 +806,15 @@ class M5Repository(IdentityRepository):
         """
         like = f"{month}_%"
         with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("""
+            cur.execute(f"""
                 with known as (
                     select platform, period from runs     where period like %(like)s
                     union
                     select platform, period from windows  where period like %(like)s
                     union
-                    -- `platform` is nullable on uploads (a file can be recorded
-                    -- before it is classified) and a rejected upload is not
-                    -- evidence that a window exists.
                     select platform, period from uploads
                      where period like %(like)s
-                       and platform is not null
-                       and state <> 'rejected'
+                       and {UPLOAD_EVIDENCE}
                 ),
                 latest as (
                     select distinct on (platform, period)
@@ -858,15 +868,100 @@ class M5Repository(IdentityRepository):
             return [dict(r) for r in cur.fetchall()]
 
     def exceptions(self, run_id: int, *, sheet: str | None = None,
-                   limit: int = 200, offset: int = 0) -> list[dict]:
+                   limit: int = 200, offset: int = 0,
+                   open_only: bool = False) -> list[dict]:
+        """The queue, with each row's standing decision joined on (D1).
+
+        The join ANNOTATES; it never hides. `open_only` is an explicit filter a
+        screen may offer — the default answer always carries every row, because
+        the fingerprint hashes identity columns, not amounts, and an "expected"
+        variance that has quietly grown must still be in front of someone. Same
+        transparency rule as `truncated` on the sheet counts above.
+        """
         with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""
-                select id, sheet, fingerprint, payload, created_at
-                from run_exceptions
-                where run_id = %(run_id)s
-                  and (%(sheet)s::text is null or sheet = %(sheet)s)
-                order by id limit %(limit)s offset %(offset)s
-            """, {"run_id": run_id, "sheet": sheet, "limit": limit, "offset": offset})
+                select e.id, e.sheet, e.fingerprint, e.payload, e.created_at,
+                       d.disposition, d.reason as disposition_reason,
+                       d.actor as disposition_by, d.decided_at
+                from run_exceptions e
+                left join exception_dispositions d on d.fingerprint = e.fingerprint
+                where e.run_id = %(run_id)s
+                  and (%(sheet)s::text is null or e.sheet = %(sheet)s)
+                  and (not %(open_only)s or d.fingerprint is null)
+                order by e.id limit %(limit)s offset %(offset)s
+            """, {"run_id": run_id, "sheet": sheet, "limit": limit,
+                  "offset": offset, "open_only": open_only})
+            return [dict(r) for r in cur.fetchall()]
+
+    # -- exception dispositions (D1, migration 020) --------------------------
+
+    def set_exception_disposition(self, fingerprint: str, *, disposition: str,
+                                  reason: str, actor: str) -> dict:
+        """Attach a decision to a fingerprint, and record that it happened.
+
+        The event row is written in the SAME transaction as the upsert, exactly
+        like `pin_period_config`: current state and its history cannot disagree.
+        """
+        with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                insert into exception_dispositions (fingerprint, disposition, reason, actor)
+                values (%s, %s, %s, %s)
+                on conflict (fingerprint) do update
+                    set disposition = excluded.disposition,
+                        reason = excluded.reason,
+                        actor = excluded.actor,
+                        decided_at = now()
+                returning *
+            """, (fingerprint, disposition, reason, actor))
+            row = self._one(cur)
+            cur.execute("""
+                insert into exception_disposition_events
+                    (fingerprint, action, disposition, reason, actor)
+                values (%s, 'mark', %s, %s, %s)
+            """, (fingerprint, disposition, reason, actor))
+            return row
+
+    def clear_exception_disposition(self, fingerprint: str, *,
+                                    actor: str, reason: str) -> bool:
+        """Re-open a dispositioned exception, leaving a record that it was.
+
+        Same shape as `unpin_period_config`: the standing decision is read inside
+        the transaction so the `clear` event can name what was released — after
+        the delete there is nowhere left to look it up.
+        """
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute("select disposition from exception_dispositions "
+                        "where fingerprint = %s", (fingerprint,))
+            found = cur.fetchone()
+            if not found:
+                return False
+            released = found[0]
+            cur.execute("delete from exception_dispositions where fingerprint = %s",
+                        (fingerprint,))
+            deleted = cur.rowcount == 1
+            if deleted:
+                cur.execute("""
+                    insert into exception_disposition_events
+                        (fingerprint, action, disposition, reason, actor)
+                    values (%s, 'clear', %s, %s, %s)
+                """, (fingerprint, released, reason, actor))
+            return deleted
+
+    def exception_disposition(self, fingerprint: str) -> dict | None:
+        with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("select * from exception_dispositions where fingerprint = %s",
+                        (fingerprint,))
+            return self._one(cur)
+
+    def exception_disposition_events(self, fingerprint: str | None = None) -> list[dict]:
+        """Mark/clear history, newest first. Read-only over an append-only table."""
+        with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                select id, fingerprint, action, disposition, reason, actor, at
+                from exception_disposition_events
+                where (%(fp)s::text is null or fingerprint = %(fp)s)
+                order by at desc, id desc
+            """, {"fp": fingerprint})
             return [dict(r) for r in cur.fetchall()]
 
     def exception_history(self, fingerprint: str, *, limit: int = 20) -> list[dict]:
@@ -890,11 +985,20 @@ class M5Repository(IdentityRepository):
     def board(self, month: str | None = None) -> list[dict]:
         """One row per settlement window: its latest job, run and verdict.
 
-        `distinct on` picks the newest run per window in one pass. A window with
-        two runs shows the most recent — with `run_count` alongside, because a
-        window that has been run four times is telling you something.
+        **Windows with uploads but no run appear (D2).** This was `from jobs`
+        until 2026-08-21, so a window whose exports were uploaded but never
+        queued was invisible — 17 uploaded files appearing nowhere. The `known`
+        union is the same evidence rule as `month_windows`, with one deliberate
+        difference: the first arm is JOBS rather than runs, because a queued job
+        has no run yet and must appear. A row with no job carries NULL job and
+        run fields plus `upload_count`, which is what there is to show about it.
 
-        **`partial_roster` now comes from `windows`, not from `jobs`.** The board is
+        `distinct on` in `latest_job` picks the newest job per window in one
+        pass. A window with two runs shows the most recent — with `job_count`
+        alongside, because a window that has been run four times is telling you
+        something.
+
+        **`partial_roster` comes from `windows`, not from `jobs`.** The board is
         where a reviewer sees that a window's totals are a subset of the month, so
         it must show the declaration a person made about the WINDOW — with its
         reason and its author — rather than a flag on whichever job happened to be
@@ -902,9 +1006,21 @@ class M5Repository(IdentityRepository):
         silently lose their caveat.
         """
         with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("""
-                select distinct on (j.platform, j.period)
-                       j.platform, j.period, j.kind, j.id as job_id,
+            cur.execute(f"""
+                with known as (
+                    select platform, period from jobs
+                    union
+                    select platform, period from windows
+                    union
+                    select platform, period from uploads where {UPLOAD_EVIDENCE}
+                ),
+                latest_job as (
+                    select distinct on (platform, period) *
+                      from jobs
+                     order by platform, period, id desc
+                )
+                select k.platform, k.period,
+                       coalesce(j.kind, 'window') as kind, j.id as job_id,
                        j.state as job_state,
                        coalesce(w.roster_declared_partial, j.partial_roster)
                            as partial_roster,
@@ -914,14 +1030,39 @@ class M5Repository(IdentityRepository):
                        r.wall_s, r.peak_rss_mb, r.config_was_pinned, r.roster_missing,
                        jsonb_array_length(r.findings) as finding_count,
                        (select count(*) from jobs j2
-                        where j2.platform = j.platform and j2.period = j.period) as job_count
-                from jobs j
+                        where j2.platform = k.platform and j2.period = k.period) as job_count,
+                       (select count(*) from uploads u
+                        where u.platform = k.platform and u.period = k.period
+                          and u.state <> 'rejected') as upload_count
+                from known k
+                left join latest_job j on j.platform = k.platform and j.period = k.period
                 left join runs r on r.job_id = j.id
-                left join windows w on w.platform = j.platform and w.period = j.period
-                where (%(month)s::text is null or j.period like %(month)s || '%%')
-                order by j.platform, j.period, j.id desc
+                left join windows w on w.platform = k.platform and w.period = k.period
+                where (%(month)s::text is null or k.period like %(month)s || '%%')
+                order by k.platform, k.period
             """, {"month": month})
             return [dict(r) for r in cur.fetchall()]
+
+    def months(self) -> list[str]:
+        """Every month the system has evidence for, newest first (D2).
+
+        The month is the prefix every period shares (`2026-07_w1` → `2026-07`);
+        a month-master job's period IS the month, so `left(..., 7)` covers both.
+        Same evidence rule as the board, so the picker can never offer a month
+        the board would render empty.
+        """
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(f"""
+                select distinct left(period, 7) as month from (
+                    select period from jobs
+                    union
+                    select period from windows
+                    union
+                    select period from uploads where {UPLOAD_EVIDENCE}
+                ) known
+                order by month desc
+            """)
+            return [row[0] for row in cur.fetchall()]
 
 
 class DuplicateUpload(RuntimeError):

@@ -180,6 +180,36 @@ def cmd_job_list(repo: M5Repository, args) -> int:
     return 0
 
 
+def cmd_audit_downloads(repo: M5Repository, args) -> int:
+    """Who downloaded which workbook (**C12**). The rows are written by the api on
+    every successful download; this is where an operator reads them."""
+    rows = repo.list_artifact_downloads(run_id=args.run, limit=args.limit)
+    if not rows:
+        print("no downloads recorded")
+        return 0
+    print(f"{'at':<25} {'run':>5}  {'by':<28} artifact")
+    for r in rows:
+        print(f"{r['at'].strftime('%Y-%m-%d %H:%M:%S%z'):<25} {r['run_id']:>5}  "
+              f"{r['downloaded_by']:<28} {r['artifact_name']}")
+    return 0
+
+
+def cmd_retention_sweep(repo: M5Repository, args) -> int:
+    """One retention pass, by hand (**C10**). `--dry-run` says what would go.
+
+    The worker runs the same sweep on its own schedule; this exists for the
+    operator who wants to see it happen, or to free a disk *now*.
+    """
+    from .config import ServiceSettings
+    from .retention import sweep
+
+    settings = ServiceSettings.from_env()
+    report = sweep(repo, settings, dry_run=args.dry_run)
+    for line in report.lines():
+        print(line)
+    return 0
+
+
 def cmd_job_reclaim(repo: M5Repository, args) -> int:
     """Deal with leases whose worker stopped talking (**C1**).
 
@@ -206,6 +236,37 @@ def cmd_job_reclaim(repo: M5Repository, args) -> int:
         print(f"marked {len(failed)} job(s) as failed: {failed}")
         print("Their runs are closed as hard_stop, so the board no longer shows "
               "them running. Look at each one before re-queueing the window.")
+    return 0
+
+
+def cmd_job_enqueue_master(repo: M5Repository, args) -> int:
+    """Queue a month-end master by hand (**A4**), when the api is not an option.
+
+    The break-glass half of `POST /months/{month}/master` — same reason
+    `reset-password` lives here: the browser path needs a working api and a
+    signed-in user, and the moment this is needed (a master must be rebuilt
+    without re-running any window) may not have either.
+    """
+    from .models import ALL_PLATFORMS, JobKind
+    from .repository import ActiveJobExists
+
+    month = args.month
+    if not (len(month) == 7 and month[:4].isdigit() and month[4] == "-"
+            and month[5:].isdigit() and 1 <= int(month[5:]) <= 12):
+        print(f"{month!r} is not a month; expected the form 2026-07")
+        return 1
+    try:
+        job, created = repo.enqueue(
+            ALL_PLATFORMS, month, kind=JobKind.MONTH_MASTER.value,
+            # The CLI has no session; name the door it came through instead of
+            # leaving the audit column empty.
+            requested_by="service.admin",
+            priority=-1)
+    except ActiveJobExists as exc:
+        print(f"not queued: {exc}")
+        return 1
+    print(f"queued the month-end master for {month} (job {job.id})"
+          if created else f"job {job.id} already covers {month}")
     return 0
 
 
@@ -326,6 +387,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="close out jobs whose worker died. Requeues only while attempts "
              "remain, which by default means never — see D30",
     ).set_defaults(func=cmd_job_reclaim)
+    master = jsub.add_parser(
+        "enqueue-master",
+        help="queue a month-end master by hand (A4) — for rebuilding one "
+             "without re-running any window")
+    master.add_argument("--month", required=True, help="e.g. 2026-07")
+    master.set_defaults(func=cmd_job_enqueue_master)
+
+    audit = sub.add_parser("audit", help="read audits: who downloaded what")
+    asub = audit.add_subparsers(dest="audit_cmd", required=True)
+    downloads = asub.add_parser("downloads", help="workbook downloads, newest first")
+    downloads.add_argument("--run", type=int, default=None, help="one run only")
+    downloads.add_argument("--limit", type=int, default=200)
+    downloads.set_defaults(func=cmd_audit_downloads)
+
+    ret = sub.add_parser("retention", help="age out scratch, dead sessions, old log mirrors")
+    rsub = ret.add_subparsers(dest="retention_cmd", required=True)
+    rsweep = rsub.add_parser("sweep", help="run one retention pass now")
+    rsweep.add_argument("--dry-run", action="store_true",
+                        help="report what would be removed, remove nothing")
+    rsweep.set_defaults(func=cmd_retention_sweep)
 
     config = sub.add_parser("config", help="inspect config versions and pins")
     csub = config.add_subparsers(dest="action", required=True)

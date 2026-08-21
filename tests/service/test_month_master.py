@@ -171,3 +171,59 @@ def test_a_master_with_nothing_to_consolidate_stops(repo, worker):
     run = repo.get_run(outcomes[0].run_id)
     assert "nothing to consolidate" in (run.error or "").lower() \
         or "no window" in (run.error or "").lower()
+
+
+# ---------------------------------------------------------------------------
+# A4 — the chain's outcome is durable, and a person can queue a master
+# ---------------------------------------------------------------------------
+
+def test_the_chain_outcome_is_on_the_run_row(repo, worker, window):
+    """The chain cannot write to the run log (it is already stored), and worker
+    stdout is not a record. `runs.chained` is where the sentence lands (019)."""
+    repo.enqueue("lazada", window)
+    outcome = worker.serve(once=True)[0]
+
+    run = repo.get_run(outcome.run_id)
+    assert run.chained is not None
+    assert "queued the month-end master" in run.chained
+    assert run.chained == outcome.chained, \
+        "the stdout sentence and the stored sentence must be the same sentence"
+
+
+def test_a_hard_stop_chains_nothing_and_says_nothing(repo, worker, service_settings):
+    repo.enqueue("lazada", "2026-01_l9")     # no input staged for it
+    outcome = worker.serve(once=True)[0]
+    assert repo.get_run(outcome.run_id).chained is None
+
+
+def test_a_master_can_be_queued_by_hand(repo, make_client):
+    """A4's manual trigger: rebuilding a master must not require re-running a
+    window as a side effect — that would be a second settlement run."""
+    client = make_client("recon.user", username="planner@ada")
+    r = client.post(f"/months/{MONTH}/master")
+    assert r.status_code == 201
+
+    body = r.json()
+    assert body["platform"] == ALL_PLATFORMS
+    assert body["period"] == MONTH
+    assert body["kind"] == "month_master"
+    # From the session, never a body field — the standing audit rule.
+    assert body["requested_by"] == "planner@ada"
+
+
+def test_a_second_hand_queued_master_is_refused_while_one_waits(repo, make_client):
+    client = make_client("recon.user")
+    assert client.post(f"/months/{MONTH}/master").status_code == 201
+    r = client.post(f"/months/{MONTH}/master")
+    assert r.status_code == 409, \
+        "one master in flight per month — the queued one will read every " \
+        "window finished by the time it runs"
+
+
+def test_a_malformed_month_is_refused_not_queued(make_client):
+    """A wrong month would not error later — it would queue a master that covers
+    nothing and report a clean-looking empty file. Refuse it at the door."""
+    client = make_client("recon.user")
+    assert client.post("/months/2026-13/master").status_code == 422
+    assert client.post("/months/2026-05_l1/master").status_code == 422
+    assert client.post("/months/202607/master").status_code == 422

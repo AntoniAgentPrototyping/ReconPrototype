@@ -391,3 +391,101 @@ def test_the_worker_reports_itself_alive_between_jobs(
     worker.serve(once=True)          # no jobs queued: one turn, then out
     assert worker.heartbeat_path().exists()
     assert worker.heartbeat_path().read_text(encoding="utf-8") == service_settings.worker_id
+
+
+# ---------------------------------------------------------------------------
+# D3 — the declaration names its stores, and a stale one is said aloud
+# ---------------------------------------------------------------------------
+
+def test_a_blanket_declaration_still_works_and_is_named_as_one(
+        repo: Repository, worker: Worker, window):
+    """A declaration with no store list is the pre-021 blanket: every expected
+    store optional. It must keep working — a re-run must make the same claim the
+    first run did — and it must be CALLED a blanket, because it is exactly the
+    state where a forgotten store is waved through."""
+    repo.declare_window_roster("lazada", window, partial=True,
+                               reason="declared before the store list existed",
+                               declared_by="test")
+    repo.enqueue("lazada", window)
+    outcome = worker.serve(once=True)[0]
+
+    assert outcome.status is not RunStatus.HARD_STOP
+    lines, _, _ = repo.log_lines(outcome.run_id, limit=5000)
+    text = "\n".join(l.text for l in lines)
+    assert "ROSTER DECLARED PARTIAL" in text
+    assert "blanket declaration" in text
+    assert "PARTIAL ROSTER" in text
+
+
+def test_a_declaration_naming_an_unknown_store_hard_stops_naming_it(
+        repo: Repository, worker: Worker, window):
+    """The declaration was written against SOME roster; if the run's own config
+    does not know the name (a repin, a rename, an empty roster), silently
+    ignoring it would resurrect the misleading 'missing store' stop one step
+    later. Better to stop HERE with the bad name in the sentence."""
+    repo.declare_window_roster("lazada", window, partial=True,
+                               reason="names a store lazada's roster lacks",
+                               declared_by="test", stores=["Pediasure"])
+    repo.enqueue("lazada", window)
+    outcome = worker.serve(once=True)[0]
+
+    assert outcome.status is RunStatus.HARD_STOP
+    run = repo.get_run(outcome.run_id)
+    assert "Pediasure" in (run.error or ""), \
+        "the hard stop must name the store the roster does not know"
+
+
+def test_a_stale_declaration_is_said_aloud(repo: Repository, worker: Worker):
+    """D3's re-evaluation, on the seam: `_report_stale_declaration` compares the
+    declared-absent set against what actually materialised. Unit-level because
+    the smoke window materialises from a directory, where there is no upload set
+    to compare (and the method must stay silent there — also asserted)."""
+    from pathlib import Path
+
+    from service.materialize import Materialization, MaterializedFile
+    from src.runlog import RunLog
+
+    class Recording(RunLog):
+        def __init__(self):
+            self.warned: list[str] = []
+        def warn(self, msg):                                    # noqa: D102
+            self.warned.append(msg)
+        def add(self, msg):                                     # noqa: D102
+            pass
+
+    def mat(source: str, stores: list[str], missing: list[str]) -> Materialization:
+        m = Materialization(input_root=Path("x"), source=source)
+        m.files = [MaterializedFile(upload_id=1, kind="weekly", store=s,
+                                    store_canonical=s, original=f"{s}.xlsx",
+                                    name=f"{s}.xlsx", object_key="k", sha256="0" * 64,
+                                    bytes=1) for s in stores]
+        m.missing_stores = missing
+        return m
+
+    job = repo.enqueue("lazada", "2026-05_stale")[0]
+
+    # A declared-absent store that now HAS files: warned, with the store named.
+    log = Recording()
+    worker._report_stale_declaration(job, mat("uploads", ["KAO"], []), ["KAO"], True, log)
+    assert any("ROSTER DECLARATION STALE" in w and "KAO" in w for w in log.warned)
+
+    # Blanket declaration on a complete window: warned as outgrown.
+    log = Recording()
+    worker._report_stale_declaration(job, mat("uploads", ["KAO"], []), None, True, log)
+    assert any("every expected store has a file" in w for w in log.warned)
+
+    # A declaration the window has NOT outgrown: silent.
+    log = Recording()
+    worker._report_stale_declaration(job, mat("uploads", ["KAO"], ["Masan"]),
+                                     ["Masan"], True, log)
+    assert log.warned == []
+
+    # Directory-staged input: no upload set to compare, so no claim is made.
+    log = Recording()
+    worker._report_stale_declaration(job, mat("input_root", ["KAO"], []), ["KAO"], True, log)
+    assert log.warned == []
+
+    # Not declared partial at all: nothing to re-evaluate.
+    log = Recording()
+    worker._report_stale_declaration(job, mat("uploads", ["KAO"], []), None, False, log)
+    assert log.warned == []

@@ -276,6 +276,27 @@ class IdentityRepository(Repository):
             """, (reason, session_id))
             return cur.rowcount > 0
 
+    def prune_dead_sessions(self, older_than_days: int, *, dry_run: bool = False) -> int:
+        """Retention (C10): remove sessions that have been DEAD — revoked, or past
+        their absolute expiry — for more than `older_than_days`. Live sessions are
+        never candidates, and the grace period exists because a dead session is
+        still evidence while someone might want to look at it (003 records
+        client_ip and user_agent for exactly that)."""
+        with self._conn() as conn, conn.cursor() as cur:
+            if dry_run:
+                cur.execute("""
+                    select count(*) from user_sessions
+                    where coalesce(revoked_at, absolute_expires_at)
+                          < now() - make_interval(days => %s)
+                """, (older_than_days,))
+                return int(cur.fetchone()[0])
+            cur.execute("""
+                delete from user_sessions
+                where coalesce(revoked_at, absolute_expires_at)
+                      < now() - make_interval(days => %s)
+            """, (older_than_days,))
+            return cur.rowcount
+
     def revoke_sessions_for_user(self, user_id: int, *, reason: str,
                                  except_session_id: int | None = None) -> int:
         """Sign a person out everywhere. One statement, so password-change,
