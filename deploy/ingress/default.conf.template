@@ -1,0 +1,88 @@
+# The front door (Phase 6 / C4 + C9). Rendered by the nginx image's envsubst
+# from RECON_SERVER_NAME and RECON_MAX_UPLOAD_MB; started only under
+# `--profile ingress`, so the default local stack stays loopback-only.
+#
+# What this is, in one sentence: TLS termination, the PINNED proxy that owns
+# X-Forwarded-For, and the per-IP rate limits the api deliberately does not
+# implement (service/ratelimit.py throttles per USERNAME and defers per-IP to
+# the component that can see a real client address — this one).
+#
+# X-Forwarded-For is SET, never appended: a client-supplied header must not be
+# able to smuggle an address past a limiter or into a session row
+# (user_sessions.client_ip). This proxy is the only thing `web` should ever be
+# reached through when a hostname exists.
+#
+# TEMPLATE SHARP EDGE: the nginx image's envsubst substitutes every $VAR that is
+# DEFINED in the container's environment. $host, $remote_addr etc. survive only
+# because no HOST/REMOTE_ADDR variable is set — never add an env var to the
+# ingress service whose name matches an nginx variable used below.
+# (Rendered and `nginx -t`-verified inside nginx:1.27-alpine, 2026-08-20.)
+
+# Per-IP flood control. Two zones:
+#
+#   general    every request. 30 r/s absorbs the run page's log polling with an
+#              order of magnitude to spare.
+#   mutations  only requests carrying the Next-Action header — every server
+#              action: sign-in, queueing a run, config proposals, uploads. The
+#              map yields an empty key for everything else, and nginx skips
+#              empty keys, so plain page loads never touch this zone.
+#
+# These are flood control, not the brute-force control: account-level sign-in
+# throttling lives in the api (10 failures per username per 5 minutes) and
+# survives restarts via users.locked_until. The /login location below just makes
+# an IP hammering the sign-in form cheap to shed.
+limit_req_zone $binary_remote_addr zone=general:10m rate=30r/s;
+map $http_next_action $recon_mutation_key {
+    ""      "";
+    default $binary_remote_addr;
+}
+limit_req_zone $recon_mutation_key zone=mutations:10m rate=2r/s;
+limit_req_zone $binary_remote_addr zone=login:10m rate=10r/m;
+limit_req_status 429;
+
+server {
+    listen 80;
+    server_name ${RECON_SERVER_NAME};
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${RECON_SERVER_NAME};
+
+    # Mounted from RECON_INGRESS_CERTS (outside the repo tree). Self-signed until
+    # a hostname exists — deploy/ingress/make-self-signed.sh mints a pair — and a
+    # real certificate drops into the same two filenames.
+    ssl_certificate     /etc/nginx/certs/recon.crt;
+    ssl_certificate_key /etc/nginx/certs/recon.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    # Matches the api's per-file cap (RECON_MAX_UPLOAD_MB, C7) so an oversized
+    # upload is refused at the door with 413 instead of half-transferred.
+    client_max_body_size ${RECON_MAX_UPLOAD_MB}m;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    location = /login {
+        limit_req zone=login burst=10 nodelay;
+        limit_req zone=general burst=60 nodelay;
+        proxy_pass http://web:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    location / {
+        limit_req zone=mutations burst=10 nodelay;
+        limit_req zone=general burst=60 nodelay;
+        proxy_pass http://web:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        # Streaming responses (the run page polls; uploads are large): don't
+        # buffer a 400 MB body to disk twice.
+        proxy_request_buffering off;
+        proxy_read_timeout 300s;
+    }
+}

@@ -1,6 +1,22 @@
-# The whole stack: Postgres + MinIO + api + worker + web.
+# The whole stack: Postgres + MinIO + api + worker + web (+ ingress and backup
+# under profiles).
 #
-#   cd deploy && cp .env.example .env && $EDITOR .env && docker compose up --build
+#   cp .env.example "$LOCALAPPDATA/recon-deploy/.env"   # then edit it
+#   cd deploy && docker compose --env-file "$LOCALAPPDATA/recon-deploy/.env" up --build
+#
+# The real .env lives OUTSIDE this tree since 2026-08-20 (C13): the repo is
+# OneDrive-synced, and gitignore does not stop a sync client from shipping
+# database credentials to a cloud tenant. `deploy/.env` still works mechanically
+# for anyone who missed this note; it should stay empty.
+#
+# Optional profiles:
+#   --profile ingress   nginx front door: TLS, pinned X-Forwarded-For, per-IP
+#                       rate limits (C4/C9). Needs RECON_INGRESS_CERTS pointing
+#                       at a cert pair — deploy/ingress/make-self-signed.sh
+#                       mints one until a hostname exists.
+#   --profile backup    nightly pg_dump into the db-backups volume (C3). The
+#                       drill that proves a dump restores is
+#                       tools/db_restore_drill.sh, run it quarterly.
 #
 # Status, stated precisely because the M4 header here overclaimed and then
 # underclaimed in turn: this file WAS brought up and exercised on 2026-08-17 with
@@ -177,10 +193,79 @@ services:
     # ceiling, not a wait: a worker that is idle exits immediately.
     stop_grace_period: 400s
 
+  # Nightly logical backup (C3). The database is the audit trail — run history,
+  # config versions, approvals, exception records — and the artifacts bucket
+  # would survive a database loss while the record of who ran what would not.
+  # pg_dump -Fc, 14 dated files kept in the volume. THIS IS HALF THE CONTROL:
+  # a backup that has never been restored is a hope, not a backup — the restore
+  # drill is tools/db_restore_drill.sh and docs/09 says how often (quarterly).
+  # Getting a copy OFF this host is the hosting side's half; until then the
+  # volume at least survives a container loss, not a disk loss. Stated, not
+  # glossed.
+  db-backup:
+    image: postgres:17
+    profiles: ["backup"]
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_USER: ${POSTGRES_USER:-recon}
+      POSTGRES_DB: ${POSTGRES_DB:-recon}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          name="/backups/recon-$(date +%Y%m%d-%H%M%S).dump"
+          pg_dump -h db -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -Fc -f "$$name" \
+            && echo "backup: wrote $$name ($(wc -c < "$$name") bytes)" \
+            || echo "backup FAILED: $$name"
+          ls -1t /backups/recon-*.dump 2>/dev/null | tail -n +$$((BACKUP_KEEP + 1)) \
+            | xargs -r rm -f
+          sleep 86400
+        done
+    volumes:
+      - db-backups:/backups
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # The front door (C4 + C9), under a profile so the default local stack stays
+  # loopback-only. TLS termination, the PINNED proxy that owns X-Forwarded-For,
+  # and the per-IP rate limits the api deliberately defers to the component
+  # that can see a real client address (service/ratelimit.py's argument).
+  ingress:
+    image: nginx:1.27-alpine
+    profiles: ["ingress"]
+    environment:
+      RECON_SERVER_NAME: ${RECON_SERVER_NAME:-localhost}
+      RECON_MAX_UPLOAD_MB: ${RECON_MAX_UPLOAD_MB:-512}
+    volumes:
+      - ./ingress/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      # Outside the tree, same C13 rule as .env. Self-signed until a hostname
+      # exists (deploy/ingress/make-self-signed.sh); a real certificate later
+      # replaces the same two files.
+      - ${RECON_INGRESS_CERTS:?run deploy/ingress/make-self-signed.sh and set RECON_INGRESS_CERTS}:/etc/nginx/certs:ro
+    ports:
+      # The only 0.0.0.0 publish in this file, and it exists only under the
+      # profile. When this runs, the browser's address is https://<server-name>/
+      # — web's own loopback publish below stays as the escape hatch.
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - web
+    restart: unless-stopped
+
   web:
     build:
       context: ../web
       dockerfile: Dockerfile
+      args:
+        # Next validates a server action's Origin against Host, which is exactly
+        # what a proxy that rewrites Host breaks (web/next.config.mjs). Baked at
+        # BUILD time because next.config is serialized into the standalone build
+        # — so an image built for a hostname is built FOR it, stated here rather
+        # than discovered as every mutation failing with an opaque error.
+        RECON_ALLOWED_ORIGINS: ${RECON_ALLOWED_ORIGINS:-}
     environment:
       # Read at REQUEST time on the server, never baked in at build time — that is
       # what lets one image be promoted from here to a real deployment
@@ -198,6 +283,7 @@ services:
 
 volumes:
   db-data:
+  db-backups:
   objects:
   scratch:
   # `artifacts` is gone: finished workbooks live in the recon-artifacts bucket and
