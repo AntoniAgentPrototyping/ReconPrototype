@@ -126,24 +126,44 @@ class _Missing:
 _MISSING = _Missing()
 
 
-def test_brand_map_rows_are_not_rendered_into_the_pipeline_contract(imported):
-    """The behaviour change this migration was most likely to make by accident.
+def test_every_brand_row_is_rendered_and_resolves_for_a_roster_store(imported):
+    """D12's fix, from the other end.
 
-    `store_to_brand` is `{}` today, so `ingest.derive_brand` falls back to the store
-    name for every store and warns. `config/brand_map.csv` holds 60 rows that only
-    the month-end master reads. Rendering those into `store_to_brand` would change
-    the brand of 28 stores — measured — inside what has to be an output-identical
-    refactor. Both mappings live in `config_store_brands`; only rows flagged
-    `in_pipeline_contract` are emitted (docs/14-PRODUCTION-READINESS.md D12).
+    **This test asserted the opposite until 2026-08-21**, and correctly so: while
+    there were two mappings, `store_to_brand` had to stay `{}` or a config
+    migration would have silently rebranded storefronts. There is one mapping now,
+    so the assertion inverts — every row renders, per platform, with its review
+    metadata.
+
+    The second half is the part that would have caught the real defect. Rendering
+    the rows was never the hard bit; making them RESOLVE was. brand_map.csv's keys
+    were normalised spellings and the pipeline's stores are roster spellings, so
+    the exact `.map()` this replaced hit 2 of 42 — a contract that looked populated
+    and branded almost nothing. So this resolves through `ingest.store_brands`,
+    which is the function the pipeline itself reads.
     """
+    from src import ingest
+
     _, rendered = _rendered(imported)
-    assert rendered["store_to_brand"] == {}, (
-        "brand_map.csv leaked into the pipeline contract — this silently rebrands "
-        "stores and moves the month-end master away from the weekly files")
+    brands = rendered["store_to_brand"]
+    assert set(brands) <= {"tiktok", "shopee", "lazada"}
+    assert brands.get("tiktok"), "the contract renders no TikTok brands"
 
     with imported._conn() as conn, conn.cursor() as cur:            # noqa: SLF001
         cur.execute("select count(*) from config_store_brands")
-        assert cur.fetchone()[0] > 0, "brand_map.csv should still be imported"
+        rows = cur.fetchone()[0]
+    assert sum(len(v) for v in brands.values()) == rows, (
+        "a brand row exists that the contract does not carry — the mapping the "
+        "editor shows and the mapping a run reads must be the same rows")
+
+    for platform in ("tiktok", "shopee"):
+        resolved = ingest.store_brands(rendered, platform)
+        roster = rendered["expected_stores"][platform]
+        assert [s for s in roster if ingest.norm_store(s) in resolved], (
+            f"no {platform} storefront resolves a brand")
+        # A brand keyed on a spelling no run ever produces is the D12 defect.
+        assert set(resolved) <= {ingest.norm_store(s) for s in roster}, (
+            f"{platform} has brand rows for storefronts the roster does not name")
 
 
 # ---------------------------------------------------------------------------

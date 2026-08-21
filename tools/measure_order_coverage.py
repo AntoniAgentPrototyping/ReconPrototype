@@ -107,7 +107,7 @@ def measure(input_root: Path, month: str, platform: str, settings: dict,
         try:
             income = _read(input_root / period / platform / "income", "income",
                            platform, settings, log)
-            income = ingest.derive_brand(income, settings, log)
+            income = ingest.derive_brand(income, settings, log, platform)
             income = ingest.apply_settlement_bounds(income, period, settings, log)
             side = explode_side(platform, income, log)
         except Exception as exc:

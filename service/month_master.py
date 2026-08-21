@@ -123,14 +123,8 @@ def collect(repo, store, month: str, *, scratch: Path, log,
     return coverage, windows
 
 
-def brand_map(config_dir: Path) -> dict[tuple[str, str], tuple[str, str, str]]:
-    """`config/brand_map.csv`, parsed by `master_summary.parse_brand_map`.
-
-    The read is here; the parsing rule is in `src/` so the CLI and the worker
-    cannot disagree about it. An absent file means every storefront stays unmapped
-    and is flagged — the honest fallback, since nothing is merged without a row.
-    """
-    path = Path(config_dir) / "brand_map.csv"
-    if not path.is_file():
-        return {}
-    return ms.parse_brand_map(path.read_text(encoding="utf-8-sig"))
+# `brand_map(config_dir)` was here until 2026-08-21, reading `config/brand_map.csv`
+# beside the config directory. The mapping is `store_to_brand` in the contract now
+# (D12), so the worker calls `ingest.brand_map(settings)` on the config it resolved
+# for the month — which is the point of the move: the master and a settlement run
+# read one mapping, and an edit made in the browser reaches both.

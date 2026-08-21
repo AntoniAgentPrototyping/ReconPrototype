@@ -109,8 +109,8 @@ def main() -> int:
                                    "orders", settings, log, "shopee")
         income = ingest.read_parts(input_dir / "income", config.column_map(settings, "shopee", "income"),
                                    "income", settings, log, "shopee")
-        orders = ingest.derive_brand(orders, settings, log)
-        income = ingest.derive_brand(income, settings, log)
+        orders = ingest.derive_brand(orders, settings, log, "shopee")
+        income = ingest.derive_brand(income, settings, log, "shopee")
         orders = orders[orders["store"] == args.store]
         income = income[income["store"] == args.store]
         print(f"  scoped to '{args.store}': {len(orders)} order rows, {len(income)} income rows")

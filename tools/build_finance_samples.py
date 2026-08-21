@@ -32,7 +32,7 @@ def sample_tiktok(period: str, settings: dict, meta: dict, log: RunLog,
                                "orders", settings, log, "tiktok")
     income = ingest.read_parts(d / "income", config.column_map(settings, "tiktok", "income"),
                                "income", settings, log, "tiktok")
-    orders, income = ingest.derive_brand(orders, settings, log), ingest.derive_brand(income, settings, log)
+    orders, income = ingest.derive_brand(orders, settings, log, "tiktok"), ingest.derive_brand(income, settings, log, "tiktok")
     cl = classify.classify_tiktok_income(income, log)
     good = cl[cl["check_status"] == classify.CHECK_GOOD]
     sku = calculate.explode_to_sku_tiktok(good, orders, log)
@@ -50,7 +50,7 @@ def sample_shopee(period: str, settings: dict, meta: dict, log: RunLog,
                                "orders", settings, log, "shopee")
     income = ingest.read_parts(d / "income", config.column_map(settings, "shopee", "income"),
                                "income", settings, log, "shopee")
-    orders, income = ingest.derive_brand(orders, settings, log), ingest.derive_brand(income, settings, log)
+    orders, income = ingest.derive_brand(orders, settings, log, "shopee"), ingest.derive_brand(income, settings, log, "shopee")
     cl = classify.classify_shopee_income(income, log)
     sku = calculate.explode_to_sku_shopee(cl, orders, log)
     sku = calculate.compute_sku_columns_shopee(sku, settings, log, vat_sku)

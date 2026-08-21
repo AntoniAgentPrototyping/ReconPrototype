@@ -288,21 +288,20 @@ TABLES: dict[str, TableSpec] = {
     "config_store_brands": TableSpec(
         name="config_store_brands",
         title="Storefront to brand",
-        blurb="The brand a storefront invoices under. Two mappings exist today and "
-              "disagree; only rows marked as part of the pipeline contract are read "
-              "by a settlement run.",
+        blurb="The brand a storefront invoices under. Read by every settlement run "
+              "and by the month-end master, which are the same rows since "
+              "2026-08-21 — there were two mappings and they disagreed. A "
+              "storefront with no row keeps its own name, the run says so, and the "
+              "master flags it for review; nothing is ever merged without a row.",
         key=(_PLATFORM_KEY, Column("store", Kind.TEXT, "Storefront")),
         columns=(
             Column("brand", Kind.TEXT, "Brand"),
             Column("confidence", Kind.ENUM, "Confidence", default="confirmed",
                    options=(("confirmed", "Confirmed"),
-                            ("needs_confirmation", "Needs confirmation"))),
-            Column("in_pipeline_contract", Kind.BOOL, "Used by the pipeline",
-                   default=False,
-                   help="Off means the month-end master reads it and a settlement "
-                        "run does not. Turning these on for the 60 imported rows "
-                        "would change the brand of 28 storefronts — its own "
-                        "reviewed change, with the delta stated in advance."),
+                            ("needs_confirmation", "Needs confirmation")),
+                   help="'Needs confirmation' is printed in red on the month-end "
+                        "master's mapping tab, which is how the team is asked to "
+                        "review it. It changes no number."),
         ),
         order_by="sort_order, platform, store",
         grouped_by="platform",
@@ -785,6 +784,29 @@ def _table_rules(conn, spec: TableSpec, key: dict, values: dict,
                 f"alias would point a file at a storefront no run expects. Add the "
                 f"storefront first — in this same proposal, which is what a basket "
                 f"of edits is for.")
+
+    if spec.name == "config_store_brands":
+        # The same rule as an alias, for the same reason: a mapping keyed on a
+        # storefront no run expects is configured and inert, and inert config is
+        # what looks like a decision. It is also how D12's real defect showed up —
+        # 40 of 42 imported rows named a spelling the pipeline never sees.
+        #
+        # Matched through the pipeline's own normalisation, not `in`: the roster
+        # says `ufood_store` and a person may reasonably type `ufood store`.
+        # Lazada has no roster at all (`expected_stores.lazada` is empty — register
+        # A6), and `_roster` returning nothing means "nobody has said", so the row
+        # is accepted. Refusing it would make Lazada's 18 brands unmanageable over
+        # a business question engineering does not own.
+        from src.ingest import norm_store
+
+        store = str(key.get("store") or "")
+        roster = _roster(conn, str(key.get("platform")))
+        if roster and norm_store(store) not in {norm_store(r) for r in roster}:
+            raise RowEditError(
+                f"{store!r} is not a {key.get('platform')} storefront, so a brand "
+                f"for it would never be read — the run resolves brands for the "
+                f"stores on the roster. Add the storefront first, in this same "
+                f"proposal, or correct the spelling.")
 
     if spec.name == "config_settlement_bounds":
         start, end = merged.get("from_date"), merged.get("to_date")

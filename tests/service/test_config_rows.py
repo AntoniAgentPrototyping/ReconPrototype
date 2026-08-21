@@ -520,3 +520,55 @@ def test_a_non_number_in_a_numeric_list_is_refused(conn):
         config_rows.apply(conn, [edit(
             table="config_scalars", op="upsert", key={"key": "vat_factors.rates"},
             values={"value": ["1.05", "ten percent"]})], who="test")
+
+
+# ---------------------------------------------------------------------------
+# Brand rows (D12) — the same roster rule an alias already carries
+# ---------------------------------------------------------------------------
+
+def test_a_brand_for_a_storefront_the_roster_does_not_name_is_refused(conn):
+    """The state D12 was fixing, as a refusal rather than a discovery.
+
+    Forty of the forty-two imported brand rows named a spelling the pipeline never
+    produces, so they were configured and inert — and inert config reads as a
+    decision. `config_store_aliases` has carried this rule since M8/1.6; brands get
+    it for the same reason.
+    """
+    with pytest.raises(RowEditError, match="not a tiktok storefront"):
+        config_rows.apply(conn, [edit(
+            table="config_store_brands", op="upsert",
+            key={"platform": "tiktok", "store": "Not A Real Store"},
+            values={"brand": "Nobody"},
+            evidence="a storefront no run will ever ask about")], who="test")
+
+
+def test_a_brand_row_may_spell_a_storefront_the_way_a_person_would(conn):
+    """The roster says `ufood_store`; a person types `ufood store`. Matched through
+    `ingest.norm_store`, which is the same function that resolves the brand at run
+    time — so what the editor accepts and what a run reads cannot disagree."""
+    config_rows.apply(conn, [edit(
+        table="config_store_brands", op="upsert",
+        key={"platform": "shopee", "store": "ufood store"},
+        values={"brand": "U Food"},
+        evidence="the roster underscores this storefront; a person will not")],
+        who="test")
+
+    rows = config_rows.read_rows(conn, "config_store_brands")
+    assert any(r["store"] == "ufood store" and r["brand"] == "U Food" for r in rows)
+
+
+def test_a_lazada_brand_is_accepted_because_lazada_has_no_roster(conn):
+    """`expected_stores.lazada` is empty — register A6, a business question nobody
+    here can answer. An empty roster means "nobody has said", not "nothing is
+    valid", so refusing would make Lazada's 18 brands unmanageable over a question
+    engineering does not own. The same posture the upload door takes with
+    `roster_checked: false`."""
+    config_rows.apply(conn, [edit(
+        table="config_store_brands", op="upsert",
+        key={"platform": "lazada", "store": "a lazada storefront"},
+        values={"brand": "Some Client"},
+        evidence="lazada has no roster to validate against (register A6)")],
+        who="test")
+
+    rows = config_rows.read_rows(conn, "config_store_brands")
+    assert any(r["store"] == "a lazada storefront" for r in rows)

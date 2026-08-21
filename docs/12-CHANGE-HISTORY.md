@@ -1132,3 +1132,102 @@ Recorded rather than fixed: `(settings.get("dayfirst") or {}).get(platform, Fals
 a real inversion (`dayfirst.tiktok: true`) and a dead one — `date_formats` takes
 precedence for both platforms that read it ([D54](06-DECISIONS.md#d54)) — so the walk
 cannot compare it and does not pretend to.
+
+## 2026-08-21 — D12: one storefront→brand mapping, in the database
+
+Register D12, decided as [D65](06-DECISIONS.md#d65). **All eight goldens re-ran at
+zero tolerance with no cell moved**, which was the delta stated before running it.
+
+**What there was.** `store_to_brand` in the contract, `{}` — so `ingest.derive_brand`
+fell back to the store name for every store and warned on every run — plus
+`config/brand_map.csv`, 60 rows read only by the month-end master through
+`master_summary.parse_brand_map`. `config_store_brands.in_pipeline_contract`
+(migration `007`) marked which of the two was in force, and existed so the config
+migration could avoid a behaviour change.
+
+**What the measurement changed about the plan.** The register and migration 007 both
+said rendering the CSV's rows would "change the brand of 28 stores". At the pipeline
+it was **2**: `derive_brand` used an exact `df["store"].map()`, the CSV's keys were
+`norm_store` spellings (`abbott grow`, `ufood store`) and the pipeline's stores are
+roster spellings (`Abbott grow`, `ufood_store`) — TikTok 0/25, Shopee 2/17, Lazada
+0/18. Flipping the flag would have rebranded two storefronts and silently left forty
+unbranded, with the contract looking fully populated. **That is worse than the empty
+map it replaced**, because an empty map warns about every store and a near-miss map
+warns only about the ones it missed. So the fix is the matching rule, not the flag.
+
+**What there is now.** One table, one rendered key, two projections:
+`ingest.store_brands(settings, platform)` for a run and `ingest.brand_map(settings)`
+for the master, both resolving through `norm_store` on **both** sides. Under it all
+25 TikTok and all 17 Shopee rows match the roster. The rendered key is per platform
+and each entry carries `brand` / `confidence` / `note`, because the master's "Brand
+mapping" tab is the surface the team reviews the mapping on. `brand_map.csv`,
+`parse_brand_map`, `month_master.brand_map` and `in_pipeline_contract` (migration
+`022`) are gone. `norm_store` moved `src/pipeline.py` → `src/ingest.py` as a pure
+re-exported move, because `pipeline` imports `ingest` and `derive_brand` needed it.
+
+**The shape change was free exactly now.** The key was `{}`, so every window pinned
+to a pre-change config renders an empty map and no pinned behaviour depends on the
+old flat shape. Once it has rows, changing it means repinning.
+
+**Three things found on the way, none of them D12 as written.**
+
+1. **The month-master worker read `load_settings(config_dir)`** — the container's own
+   baked copy of `config/`. Harmless until today and load-bearing the moment the
+   brand mapping became contract: a brand corrected in the editor would never have
+   reached the master while every settlement run used the new one. That is **A1 one
+   layer over**. It resolves through `_resolve_config` now, unpinned, because a
+   master is a month-level artifact that pins to no window.
+2. **`confidence` had two vocabularies** — the CSV's `high` against
+   `config_store_brands`' `confirmed` / `needs_confirmation` CHECK constraint. The
+   master flagged anything that was not `high` in red, so once the CSV became the
+   contract every row would have printed red and taught the team to ignore the
+   column. The database's words win.
+3. **Three Shopee storefronts have no brand row, deliberately** — `Tolpa`,
+   `pepsicofoods`, `xa_kho_gia_tot`, the July onboardings, which the CSV had already
+   missed. They fall back to their own name, the run reports it, and the master flags
+   them UNMAPPED. `tests/test_brand_mapping.py` asserts those three **by name**, so a
+   fourth unmapped storefront fails a test rather than joining a tolerated count.
+   Inventing a brand in a mapping the month-end master invoices from is not
+   engineering's call.
+
+**New refusals.** A bare `store_to_brand.tiktok.Kao: "KAO"` is a hard stop — reading
+it would mean inventing a `confidence`, and that field exists so nobody has to guess
+whether a mapping was reviewed. A brand row must name a roster storefront, the same
+rule `config_store_aliases` already carries and matched through `norm_store` too, so
+a person may type `ufood store` where the roster says `ufood_store`; Lazada is exempt
+and reported rather than refused, because `expected_stores.lazada` is empty (register
+A6) and an empty roster means "nobody has said".
+
+Also corrected while in the files: `docs/05-DOMAIN-RULES.md` still claimed "there is
+no config file for" invoice buckets, which **A14 had already made false** on
+2026-08-20 — fixed in place rather than quietly, since which layer owns a rule is
+what that document is for.
+
+**The master was measured too, because its risk is the mirror image of the
+pipeline's.** The golden gate proves no settlement cell moved; nothing gates the
+month-end master, and it had 60 **working** brand rows before this change — so the
+question there was not "did anything move" but "did anything stop resolving". July's
+master was built twice over the same 14 finance files, once with the deleted CSV
+(recovered with `git show`, keyed exactly as `parse_brand_map` did) and once from the
+contract:
+
+| | Before | After |
+|---|---|---|
+| `By brand` rows | 30 | 30, none added, removed or moved |
+| with-VAT total across the tab | 261,663,086,591.88 | 261,663,086,591.88 (diff 0.00) |
+| `Brand mapping` rows whose **brand** changed | — | **0 of 63** |
+| rows newly resolved by `norm_store` matching | — | **0** |
+
+All 60 changed rows changed in the `confidence` column only (`high` → `confirmed`,
+`needs-confirmation` → `needs_confirmation`), and the three rows that carried
+`needs-confirmation` still carry it — so the review request the tab exists to make
+survived the vocabulary change. The `note` column also changed on the three UNMAPPED
+rows, which named the deleted file; that column was not part of this comparison.
+
+**Zero newly resolved is the useful result, and it corrects how D12 was described.**
+The master's storefront labels are already `norm_store`-lowercased
+(`master_summary.per_store`), and the CSV's keys were written in that same spelling —
+so the old exact lookup was **correct for the master on all 60 rows**. The
+exact-match failure was only ever a *pipeline* problem, where stores arrive in roster
+spelling. The register's "two mappings that disagree" was right about both halves and
+named neither the key nor the reader that made them disagree.

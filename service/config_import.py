@@ -348,54 +348,38 @@ def _load_aliases(cur, settings, content, who, source) -> int:
 
 
 def _load_brands(cur, settings, config_dir: Path, who, source) -> int:
-    """`store_to_brand` plus brand_map.csv — two mappings that disagree today.
+    """`store_to_brand` — one mapping, per platform, since 2026-08-21 (D12).
 
-    settings.yaml's map is empty, so every store falls back to its own name with a
-    loud ingest warning; brand_map.csv has 60 rows and only the month-end master
-    reads it. Both land here, with the YAML winning on a collision because it is the
-    one the pipeline consults.
+    It was two: this key was `{}` while `config/brand_map.csv` held 60 rows that
+    only the month-end master read, and `in_pipeline_contract` marked which was in
+    force. The CSV is deleted, its rows are the contract, and the column is gone
+    (migration `022`). A run and the master now resolve a brand through the same
+    `ingest.store_brands`.
+
+    `note` lands in `evidence`, which is where a row's justification belongs and
+    what the editor serves (D42) — the CSV's own column was called `note` and meant
+    exactly that.
     """
     n = 0
     order = 0
-    path = config_dir / "brand_map.csv"
-    if path.is_file():
-        with path.open(encoding="utf-8-sig", newline="") as fh:
-            for row in csv.DictReader(fh):
-                platform = (row.get("platform") or "").strip().lower()
-                store = (row.get("storefront") or "").strip()
-                brand = (row.get("client_brand") or "").strip()
-                if platform not in ("tiktok", "shopee", "lazada") or not store or not brand:
-                    continue
-                confidence = (row.get("confidence") or "").strip().lower()
-                cur.execute(
-                    """insert into config_store_brands
-                         (platform, store, brand, confidence, in_pipeline_contract,
-                          evidence, changed_by, source, sort_order)
-                       values (%s, %s, %s, %s, false, %s, %s, %s, %s)
-                       on conflict (platform, store) do nothing""",
-                    (platform, _nfc(store), _nfc(brand),
-                     "needs_confirmation" if confidence.startswith("need") else "confirmed",
-                     (row.get("note") or "").strip(), who, source, order))
-                order += 1
-                n += cur.rowcount
-
-    # settings.yaml's own map — the one the PIPELINE reads, and the only one that
-    # renders back into `store_to_brand`. It is `{}` today, so this loop writes
-    # nothing and the rendered config keeps the empty map the pipeline has always
-    # been given. Merging the 60 brand_map.csv rows in here would change the brand
-    # of 28 stores inside a refactor; see the column comment in migration 007.
-    for store, brand in (settings.get("store_to_brand") or {}).items():
-        for platform in ("tiktok", "shopee", "lazada"):
+    for platform, stores in (settings.get("store_to_brand") or {}).items():
+        for store, value in (stores or {}).items():
+            # The shape check that matters lives in `ingest.store_brands`, which is
+            # what the pipeline reads; refusing here too would be a second
+            # definition of the same rule, so this only skips what it cannot store.
+            if not isinstance(value, dict) or not value.get("brand"):
+                continue
+            confidence = str(value.get("confidence") or "confirmed").strip().lower()
             cur.execute(
                 """insert into config_store_brands
-                     (platform, store, brand, confidence, in_pipeline_contract,
+                     (platform, store, brand, confidence,
                       evidence, changed_by, source, sort_order)
-                   values (%s, %s, %s, 'confirmed', true, %s, %s, %s, %s)
+                   values (%s, %s, %s, %s, %s, %s, %s, %s)
                    on conflict (platform, store) do update
-                     set brand = excluded.brand, confidence = 'confirmed',
-                         in_pipeline_contract = true""",
-                (platform, _nfc(store), _nfc(brand),
-                 "from settings.yaml store_to_brand", who, source, order))
+                     set brand = excluded.brand, confidence = excluded.confidence""",
+                (platform, _nfc(store), _nfc(str(value["brand"])),
+                 "needs_confirmation" if confidence.startswith("need") else "confirmed",
+                 _nfc(str(value.get("note") or "")), who, source, order))
             order += 1
             n += 1
     return n

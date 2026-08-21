@@ -133,8 +133,8 @@ def main() -> int:
                                    "orders", settings, log, "tiktok")
         income = ingest.read_parts(input_dir / "income", config.column_map(settings, "tiktok", "income"),
                                    "income", settings, log, "tiktok")
-        orders = ingest.derive_brand(orders, settings, log)
-        income = ingest.derive_brand(income, settings, log)
+        orders = ingest.derive_brand(orders, settings, log, "tiktok")
+        income = ingest.derive_brand(income, settings, log, "tiktok")
         orders = orders[orders["store"] == args.store]
         income = income[income["store"] == args.store]
         print(f"  scoped to store '{args.store}': {len(orders)} order rows, {len(income)} income rows")

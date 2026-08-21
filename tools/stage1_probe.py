@@ -51,8 +51,8 @@ def main(argv: list[str] | None = None) -> int:
         income = ingest.read_parts(input_dir / "income",
                                    config.column_map(settings, args.platform, "income"),
                                    "income", settings, log, args.platform)
-        orders = ingest.derive_brand(orders, settings, log)
-        income = ingest.derive_brand(income, settings, log)
+        orders = ingest.derive_brand(orders, settings, log, args.platform)
+        income = ingest.derive_brand(income, settings, log, args.platform)
         ingest.check_stores(orders, "orders", args.platform, settings, log)
         ingest.check_stores(income, "income", args.platform, settings, log)
     except ReconHardStop as stop:

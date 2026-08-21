@@ -181,22 +181,32 @@ def read_config(conn) -> tuple[dict[str, Any], dict[str, str]]:
             evidence.setdefault("store_aliases", ev or "")
 
         # --- store -> brand ------------------------------------------------
-        # ONLY rows flagged as part of the pipeline contract. The 60 rows imported
-        # from brand_map.csv are held here for the month-end master and are
-        # deliberately NOT rendered: emitting them would change the brand of 28
-        # stores, which is a behaviour change and not something a config migration
-        # gets to do quietly (migration 007, `in_pipeline_contract`).
+        # EVERY row, per platform, with the review metadata — one mapping since
+        # 2026-08-21 (D12, migration `022`). It was flat (store -> brand) and
+        # filtered on `in_pipeline_contract`, which existed only so that migration
+        # 007 could avoid a behaviour change; both are gone.
         #
-        # `store_to_brand` is flat (store -> brand), so a store selling under one
-        # brand on two platforms collapses to one entry. That is the pipeline's own
-        # shape (`ingest.derive_brand`), not something introduced here.
-        cur.execute("""select store, brand from config_store_brands
-                       where in_pipeline_contract
+        # Per platform because the table's key is `(platform, store)` and a flat map
+        # collapses a storefront selling under different brands on two platforms.
+        # `confidence` and `note` are rendered because `src/master_summary.py`
+        # paints all three on the month-end master's "Brand mapping" tab — the
+        # team's review surface — so they are contract, not editor decoration.
+        #
+        # No `evidence.setdefault` here, deliberately: a row's evidence IS its
+        # `note`, and captioning the whole key with the first row's note is the D42
+        # failure this design exists to avoid.
+        cur.execute("""select platform, store, brand, confidence, evidence
+                       from config_store_brands
                        order by sort_order, platform, store""")
-        brands = {store: brand for store, brand in cur.fetchall()}
         # Always emitted, even when empty: `derive_brand` warns loudly on an empty
-        # map, and that warning is a real signal (D12) that must not disappear
-        # because a key stopped being rendered.
+        # map, and that warning is a real signal that must not disappear because a
+        # key stopped being rendered.
+        brands: dict[str, dict[str, Any]] = {}
+        for platform, store, brand, confidence, note in cur.fetchall():
+            entry: dict[str, Any] = {"brand": brand, "confidence": confidence}
+            if note:
+                entry["note"] = note
+            brands.setdefault(platform, {})[store] = entry
         values["store_to_brand"] = brands
 
         # --- tolerances ----------------------------------------------------

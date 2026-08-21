@@ -497,6 +497,31 @@ def read_parts(
     return normalize_parts(combined, kind, settings, log, platform)
 
 
+def norm_store(name: str) -> str:
+    """Shared normalization so team file labels ('income U food.xlsx',
+    'Income.Masan part 1.xlsx') and pipeline store names compare equal.
+
+    Moved twice, and both moves were forced by the same rule — one spelling of
+    store identity, in the lowest module that can hold it. It came out of
+    `tools/full_run.py` in M2.6 because `src/` must not import from `tools/`
+    (`tests/test_io_boundary.py` pins that), and out of `src/pipeline.py` on
+    2026-08-21 because `derive_brand` has to normalise both sides of the
+    storefront->brand lookup and `pipeline` imports `ingest`, not the reverse
+    (docs/14 D12). Unchanged otherwise; `pipeline.norm_store` is re-exported so
+    every existing caller and `src/master_summary.py`'s import still resolve.
+
+    Note it already normalizes to NFC, which is the treatment headers did not get
+    until M2 (docs/08-KNOWN-DEFECTS.md#12).
+    """
+    s = unicodedata.normalize("NFC", str(name)).lower().strip()
+    s = re.sub(r"^\s*\d+[._ ]*", "", s)
+    s = re.sub(r"^(income|order)\b[. ]*", "", s)
+    s = re.sub(r"\s+part\s*\d+", "", s)
+    s = s.replace(".xlsx", "")
+    s = re.sub(r"[._]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def canonical_store(settings: dict, platform: str, store: str) -> str:
     """One store name through `store_aliases`, or itself if unmapped.
 
@@ -590,11 +615,64 @@ def normalize_parts(
     return combined
 
 
-def derive_brand(df: pd.DataFrame, settings: dict, log: RunLog) -> pd.DataFrame:
-    """Brand comes from the store→brand map; unmapped stores keep the store name."""
-    mapping = settings.get("store_to_brand") or {}
+def store_brands(settings: dict, platform: str) -> dict[str, tuple[str, str, str]]:
+    """`{norm_store(storefront): (brand, confidence, note)}` for one platform.
+
+    The single reader of `store_to_brand`, shared by `derive_brand` (which wants
+    the brand) and `src/master_summary.py` (which paints all three on the team's
+    review tab). Two projections of one contract key, never two keys.
+
+    **Keyed on `norm_store`, and that is the fix, not a convenience** (D12). The
+    mapping's storefronts were normalised spellings and the pipeline's stores are
+    roster spellings, so the exact `.map()` this replaced matched 2 of 42 rows —
+    which would have rebranded two storefronts and silently left forty unbranded
+    while the contract looked populated.
+
+    A per-store value must be a mapping. A bare string is refused rather than read
+    as the brand: it would mean inventing a `confidence`, and the whole point of
+    that field is that nobody has to guess whether a mapping was reviewed.
+    """
+    node = (settings.get("store_to_brand") or {}).get(platform) or {}
+    out: dict[str, tuple[str, str, str]] = {}
+    for store, value in node.items():
+        if not isinstance(value, dict) or not value.get("brand"):
+            raise ReconHardStop(
+                f"store_to_brand.{platform}.{store} must be a mapping with a "
+                f"`brand` (optionally `confidence` and `note`), not "
+                f"{value!r}. The brand mapping carries whether a row has been "
+                f"reviewed, and a bare brand name cannot say.")
+        out[norm_store(store)] = (str(value["brand"]),
+                                  str(value.get("confidence") or "confirmed"),
+                                  str(value.get("note") or ""))
+    return out
+
+
+def brand_map(settings: dict) -> dict[tuple[str, str], tuple[str, str, str]]:
+    """Every platform's brands as `{(platform, norm_store(store)): (...)}`.
+
+    The shape `master_summary.build` takes. It lives here rather than in
+    `master_summary` so the month-end master and a settlement run resolve a brand
+    through one function — the mapping used to disagree with itself across a CSV
+    and a config key, which is what D12 closed.
+    """
+    platforms = (settings.get("store_to_brand") or {}).keys()
+    return {(platform, store): value
+            for platform in platforms
+            for store, value in store_brands(settings, platform).items()}
+
+
+def derive_brand(df: pd.DataFrame, settings: dict, log: RunLog,
+                 platform: str) -> pd.DataFrame:
+    """Brand comes from the store→brand map; unmapped stores keep the store name.
+
+    `platform` became a parameter on 2026-08-21: the contract key is per platform
+    now, because a flat map collapses a storefront that sells under different
+    brands on two platforms, and the table it renders from is keyed
+    `(platform, store)`. Both callers already knew their platform.
+    """
+    mapping = {store: brand for store, (brand, _, _) in store_brands(settings, platform).items()}
     df = df.copy()
-    df["brand"] = df["store"].map(mapping)
+    df["brand"] = df["store"].map(norm_store).map(mapping)
     unmapped = sorted(df.loc[df["brand"].isna(), "store"].unique())
     if unmapped:
         log.warn(f"Stores with no store_to_brand mapping (brand falls back to store name): {unmapped}")

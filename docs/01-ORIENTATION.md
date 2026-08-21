@@ -35,7 +35,7 @@ For one full cycle, pipeline output must match the team's manually produced fina
 |---|---|
 | **Window** / period | One settlement payout period for one platform, e.g. `2026-05_w1`. The atomic unit of work. Never mix two windows' exports. |
 | **Store** / storefront | One seller account on one platform, e.g. "Unilever Homecare". Identified by the **download filename**, not by a column in the data. |
-| **Brand** | The client the storefront sells for. Mapped from store via `config/brand_map.csv`. Several storefronts can map to one client brand. |
+| **Brand** | The client the storefront sells for. Mapped from store via `store_to_brand` in the contract, per platform, matched through `ingest.norm_store`. Several storefronts can map to one client brand. It was `config/brand_map.csv` — a second mapping the pipeline never read — until 2026-08-21 ([D12](14-PRODUCTION-READINESS.md), [D65](06-DECISIONS.md#d65)). |
 | **KA** | "Key account" — the client. "For KA" files are the invoicing workbooks handed to finance. |
 | **Xuất HĐ** | Vietnamese for "issue invoice". The team's intermediary calculation sheets, and the source of the ported formula chain. |
 | **PV sum** | A control tab in the team's workbook; also the name of one of their tolerance checks. |

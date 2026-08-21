@@ -45,7 +45,7 @@ from openpyxl.utils import get_column_letter
 
 from . import ingest
 from .errors import ReconHardStop
-from .pipeline import norm_store
+from .ingest import norm_store
 
 # Accounting format, zero as a dash — the team's own convention in these files.
 ACC0 = '_(* #,##0_);_(* \\(#,##0\\);_(* "-"??_);_(@_)'
@@ -163,27 +163,12 @@ def window_label(period: str) -> str:
     return period.split("_", 1)[1] if "_" in period else period
 
 
-def parse_brand_map(text: str) -> dict[tuple[str, str], tuple[str, str, str]]:
-    """`config/brand_map.csv` text -> {(platform, storefront): (brand, conf, note)}.
-
-    Takes TEXT, not a path, so the parsing rule has one home while the file read
-    stays with whoever owns a filesystem — `tools/` for the CLI, `service/` for the
-    worker. `src/` reading a CSV here would need an I/O grant for a file that is
-    not part of the pipeline's own contract.
-    """
-    import csv
-    import io
-
-    out: dict[tuple[str, str], tuple[str, str, str]] = {}
-    for row in csv.DictReader(io.StringIO(text)):
-        key = ((row.get("platform") or "").strip().lower(),
-               (row.get("storefront") or "").strip())
-        if not key[1]:
-            continue
-        out[key] = ((row.get("client_brand") or "").strip(),
-                    (row.get("confidence") or "").strip(),
-                    (row.get("note") or "").strip())
-    return out
+# `parse_brand_map` lived here until 2026-08-21 and read `config/brand_map.csv`.
+# Both are gone: the mapping is `store_to_brand` in the contract, read by
+# `ingest.brand_map`, so a settlement run and the month-end master resolve a
+# storefront's brand through one function instead of two files that disagreed
+# (docs/14 D12). Callers pass the map in exactly as before — `tools/` and
+# `service/` still own the config read, `src/` still needs no new I/O grant.
 
 
 @dataclass(frozen=True)
@@ -423,9 +408,13 @@ def build(coverage: Coverage, windows: list[Window],
         per_plat[p] = acc
 
     def brand_of(p: str, store: str) -> tuple[str, str, str]:
-        return brand_map.get((PLATFORM_DIR[p].lower(), store),
+        # `norm_store` on the lookup side too, because `ingest.brand_map` keys on
+        # it: one matching rule for the master and for a settlement run, which is
+        # the whole of D12. Idempotent on `store`, which arrives normalised
+        # already — applied anyway so the rule is visible rather than inherited.
+        return brand_map.get((PLATFORM_DIR[p].lower(), norm_store(store)),
                              (store, "UNMAPPED (kept as storefront)",
-                              "not in config/brand_map.csv"))
+                              "no store_to_brand row for this storefront"))
 
     # By brand
     brand_vals: dict[tuple[str, str], float] = {}
@@ -466,7 +455,12 @@ def build(coverage: Coverage, windows: list[Window],
             ws.cell(row=r, column=2, value=s)
             ws.cell(row=r, column=3, value=b)
             cell = ws.cell(row=r, column=4, value=conf)
-            if conf != "high":
+            # `confirmed` is the contract's word for a reviewed mapping. It read
+            # `high` until 2026-08-21 — brand_map.csv's vocabulary, against
+            # `config_store_brands`' `confirmed`/`needs_confirmation` CHECK
+            # constraint, so once the CSV became the contract every row would have
+            # flagged red. One vocabulary, the database's (D12).
+            if conf != "confirmed":
                 cell.font = Font(bold=True, color="FFC00000")
             ws.cell(row=r, column=5, value=per_plat[p][s]).number_format = ACC0
             ws.cell(row=r, column=6, value=note)

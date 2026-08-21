@@ -25,8 +25,6 @@ from __future__ import annotations
 
 import enum
 import os
-import re
-import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -50,22 +48,13 @@ TIKTOK_MONEY = "subtotal_after_seller_discounts"
 SHOPEE_MONEY = None
 
 
-def norm_store(name: str) -> str:
-    """Shared normalization so team file labels ('income U food.xlsx',
-    'Income.Masan part 1.xlsx') and pipeline store names compare equal.
-
-    Moved here from tools/full_run.py: it is pipeline logic, and `src/` must not
-    import from `tools/` (tests/test_io_boundary.py pins that). Unchanged
-    otherwise — note it already normalizes to NFC, which is the treatment
-    ingest.py:158 never got (docs/08-KNOWN-DEFECTS.md#12).
-    """
-    s = unicodedata.normalize("NFC", str(name)).lower().strip()
-    s = re.sub(r"^\s*\d+[._ ]*", "", s)
-    s = re.sub(r"^(income|order)\b[. ]*", "", s)
-    s = re.sub(r"\s+part\s*\d+", "", s)
-    s = s.replace(".xlsx", "")
-    s = re.sub(r"[._]+", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
+# Re-exported, not defined here: it moved to `ingest` on 2026-08-21 so
+# `ingest.derive_brand` can normalise both sides of the storefront->brand lookup
+# without `ingest` importing `pipeline` (docs/14 D12). Every caller of
+# `pipeline.norm_store` — including `src/master_summary.py` and the two uses below —
+# keeps working, because a second spelling of store identity is the thing this
+# project refuses to have (A13 deduplicated this same function once already).
+norm_store = ingest.norm_store
 
 
 class RunStatus(enum.Enum):
@@ -470,8 +459,8 @@ def _run_tiktok(ctx: RunContext, out: RunResult) -> None:
         out.frames["income"] = income
 
     with m.stage("derive_brand", "compute", rows_out=lambda: len(income)):
-        orders = ingest.derive_brand(orders, settings, log)
-        income = ingest.derive_brand(income, settings, log)
+        orders = ingest.derive_brand(orders, settings, log, "tiktok")
+        income = ingest.derive_brand(income, settings, log, "tiktok")
     with m.stage("apply_settlement_bounds", "compute", rows_out=lambda: len(income)):
         income = ingest.apply_settlement_bounds(income, ctx.period, settings, log)
     # M8/2.3: the roster is checked against the ORDERS file too, not income alone.
@@ -579,8 +568,8 @@ def _run_shopee(ctx: RunContext, out: RunResult) -> None:
                                    "income", settings, log, "shopee")
 
     with m.stage("derive_brand", "compute", rows_out=lambda: len(income)):
-        orders = ingest.derive_brand(orders, settings, log)
-        income = ingest.derive_brand(income, settings, log)
+        orders = ingest.derive_brand(orders, settings, log, "shopee")
+        income = ingest.derive_brand(income, settings, log, "shopee")
     with m.stage("apply_settlement_bounds", "compute", rows_out=lambda: len(income)):
         income = ingest.apply_settlement_bounds(income, ctx.period, settings, log)
 

@@ -454,13 +454,242 @@ expected_stores:
     - "pepsicofoods"
     - "xa_kho_gia_tot"
 
-# Brand/invoice grouping per store. TikTok evidence (For KA "PV sum" bucket
-# pivots, both windows): three invoice buckets — "KAO 8%", "Merries 8%",
-# "Others 8%" — i.e. KAO and Merries get their own splits, everything else is
-# combined (the spec's Keoh pattern). Shopee file names suggest Xmen and Kao
-# split there. TODO-HUMAN (Hoang): confirm the full separate-invoice list.
-# Empty map = brand falls back to the store name (loud warning at ingest).
-store_to_brand: {}
+# Storefront -> client brand, per platform. **One mapping, in the contract** — it
+# was two until 2026-08-21: this key was `{}` (so every store fell back to its own
+# name with a loud ingest warning on every run) while `config/brand_map.csv` held
+# these 60 rows and only the month-end master read them. That file is deleted; the
+# rows below are it, and `config_store_brands` is where they are edited
+# (docs/14-PRODUCTION-READINESS.md D12, docs/06-DECISIONS.md#d65).
+#
+# Read by `ingest.derive_brand` (brand only) and by `src/master_summary.py` (all
+# three fields — the month-end master's "Brand mapping" tab is the team's review
+# surface, which is why `confidence` and `note` are part of the contract and not
+# editor-only decoration).
+#
+# **Keys are matched through `ingest.norm_store`, both sides.** The CSV's keys were
+# normalised spellings (`abbott grow`, `ufood store`) and the pipeline's stores are
+# roster spellings (`Abbott grow`, `ufood_store`), so an exact `.map()` matched 2 of
+# 42 — rendering the rows verbatim would have rebranded 2 storefronts and silently
+# failed to rebrand 40 while looking configured. Measured 2026-08-21: under
+# `norm_store` all 25 TikTok and all 17 Shopee rows match the roster.
+#
+# Stores are written in their ROSTER spelling for TikTok and Shopee so the editor
+# shows the storefront a person recognises. Lazada keeps the CSV's spelling: it has
+# no roster to canonicalise against (`expected_stores.lazada` is empty — register
+# A6, a business question), so there is nothing to be canonical to.
+#
+# An absent storefront is not an error: brand falls back to the store name, ingest
+# warns, and the master's mapping tab flags it as UNMAPPED for review. The three
+# July Shopee onboardings (Tolpa, pepsicofoods, xa_kho_gia_tot) are absent on
+# purpose — nobody has told us their client brand, and inventing one in a mapping
+# the month-end master invoices from is not engineering's call.
+#
+# Invoice bucketing is a DIFFERENT thing and lives in `invoice_buckets` (A14): that
+# decides which workbook tab a store's lines land on. TikTok evidence (For KA "PV
+# sum" bucket pivots, both windows): three buckets — "KAO 8%", "Merries 8%",
+# "Others 8%". TODO-HUMAN (Hoang): confirm the full separate-invoice list.
+store_to_brand:
+  tiktok:
+    Abbott grow:
+      brand: Abbott
+      confidence: confirmed
+    Abbott Pediasure:
+      brand: Abbott
+      confidence: confirmed
+    Abbott-Ensure:
+      brand: Abbott
+      confidence: confirmed
+    AHC:
+      brand: Unilever AHC
+      confidence: confirmed
+      note: Shopee and Lazada name the same brand 'Unilever AHC'
+    Astroman:
+      brand: Astroman
+      confidence: confirmed
+    Curel:
+      brand: Curel
+      confidence: confirmed
+      note: Kao brand; the team's own files invoice Curel separately
+    Glucerna:
+      brand: Abbott
+      confidence: confirmed
+      note: July 29-31 files name this store 'Abbott Glucerna'
+    KAO:
+      brand: KAO
+      confidence: confirmed
+    Kate:
+      brand: Kate
+      confidence: confirmed
+      note: separate Kate tab in the team's own invoicing files
+    Lashe:
+      brand: Lashe
+      confidence: confirmed
+    Mars:
+      brand: Mars
+      confidence: confirmed
+    Merries:
+      brand: Merries
+      confidence: confirmed
+      note: Kao brand; separate invoice bucket in the team's files
+    Mondelez Kinh Do:
+      brand: Mondelez
+      confidence: confirmed
+    Nutifood Nutrition Store:
+      brand: Nutifood
+      confidence: confirmed
+    Nutifood-Varna-life:
+      brand: Nutifood
+      confidence: confirmed
+      note: Varna is a Nutifood brand
+    Nutifood-Varna-Store:
+      brand: Nutifood
+      confidence: confirmed
+      note: Varna is a Nutifood brand
+    Pepsico foods:
+      brand: PepsiCo
+      confidence: confirmed
+    Purite:
+      brand: Purite
+      confidence: confirmed
+    Sanofi:
+      brand: Sanofi
+      confidence: confirmed
+    Similac:
+      brand: Abbott
+      confidence: confirmed
+      note: July 29-31 files name this store 'Abbott Similac'
+    Tolpa:
+      brand: Tolpa
+      confidence: confirmed
+    U food:
+      brand: U Food
+      confidence: confirmed
+    Unilever Homecare:
+      brand: Unilever Home Care
+      confidence: confirmed
+      note: Lazada 'Unilever Cham Soc Gia Dinh' translates to home care
+    Veet & Reckitt Personal Care:
+      brand: Reckitt - Personal Care (Veet)
+      confidence: needs_confirmation
+      note: 'NOT merged: Reckitt storefronts may be separate client entities'
+    Xmen:
+      brand: X-Men
+      confidence: confirmed
+  shopee:
+    Astroman:
+      brand: Astroman
+      confidence: confirmed
+    Curel:
+      brand: Curel
+      confidence: confirmed
+    Kao:
+      brand: KAO
+      confidence: confirmed
+    Kate:
+      brand: Kate
+      confidence: confirmed
+    Lashe:
+      brand: Lashe
+      confidence: confirmed
+    Mars wrigley:
+      brand: Mars
+      confidence: confirmed
+      note: Mars Wrigley is Mars' confectionery arm; TikTok/Lazada store is 'Mars'
+    Masan:
+      brand: Masan
+      confidence: confirmed
+    Merries:
+      brand: Merries
+      confidence: confirmed
+    mondelezkinhdovn:
+      brand: Mondelez
+      confidence: confirmed
+    nutifoodgpddvietnam:
+      brand: Nutifood
+      confidence: confirmed
+    Reckitt_chamsocnhacua:
+      brand: Reckitt - Cham soc nha cua
+      confidence: needs_confirmation
+      note: 'NOT merged: possibly a separate client entity'
+    Reckitt Sức Khỏe Sắc Đẹp:
+      brand: Reckitt - Suc Khoe Sac Dep
+      confidence: needs_confirmation
+      note: 'NOT merged: possibly a separate client entity'
+    Sanofi:
+      brand: Sanofi
+      confidence: confirmed
+    Thuan Phat:
+      brand: Thuan Phat
+      confidence: confirmed
+    ufood_store:
+      brand: U Food
+      confidence: confirmed
+    Unilever AHC:
+      brand: Unilever AHC
+      confidence: confirmed
+    Xmenforboss:
+      brand: X-Men
+      confidence: confirmed
+  lazada:
+    curel:
+      brand: Curel
+      confidence: confirmed
+    kao:
+      brand: KAO
+      confidence: confirmed
+    lactacyd:
+      brand: Sanofi - Lactacyd
+      confidence: needs_confirmation
+      note: Lactacyd is a Sanofi brand; confirm whether it invoices under Sanofi
+    lashe:
+      brand: Lashe
+      confidence: confirmed
+    mars:
+      brand: Mars
+      confidence: confirmed
+    masan:
+      brand: Masan
+      confidence: confirmed
+    merries:
+      brand: Merries
+      confidence: confirmed
+    mondelez:
+      brand: Mondelez
+      confidence: confirmed
+    nutifood grow:
+      brand: Nutifood
+      confidence: confirmed
+    pepsico foods store:
+      brand: PepsiCo
+      confidence: confirmed
+    reckitt:
+      brand: Reckitt - Lazada storefront
+      confidence: needs_confirmation
+      note: 'NOT merged: scope of this storefront unknown'
+    thuan phat:
+      brand: Thuan Phat
+      confidence: confirmed
+    thuận phát:
+      brand: Thuan Phat
+      confidence: confirmed
+      note: same store as Shopee 'Thuan Phat'; diacritics differ
+    tolpa:
+      brand: Tolpa
+      confidence: confirmed
+    unilever ahc:
+      brand: Unilever AHC
+      confidence: confirmed
+    unilever chăm sóc gia đình nâng tầm cuộc sống unilever1:
+      brand: Unilever Home Care
+      confidence: confirmed
+      note: '''Cham Soc Gia Dinh'' = home care; same division as TikTok ''Unilever Homecare'''
+    unilever chăm sóc vẻ đẹp unilever 2:
+      brand: Unilever Beauty
+      confidence: confirmed
+      note: single storefront; no cross-platform merge involved
+    xmen for boss:
+      brand: X-Men
+      confidence: confirmed
 
 # Store alias normalization, applied at ingest right after the store name is
 # derived. Left side = name as it appears in data/file names; right side =

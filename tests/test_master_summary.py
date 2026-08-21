@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src import ingest
 from src import master_summary as ms                               # noqa: E402
 from src.errors import ReconHardStop                               # noqa: E402
 
@@ -207,14 +208,19 @@ def test_an_unmapped_storefront_is_flagged_and_never_merged():
     """Merging two storefronts that are separate client entities invoices one
     client for another's revenue, so nothing merges without an explicit row."""
     windows = _month()
-    brand_map = ms.parse_brand_map(
-        "platform,storefront,client_brand,confidence,note\n"
-        "tiktok,kao,KAO,high,\n")
+    # The map comes from the CONTRACT since 2026-08-21 (D12) — `parse_brand_map`
+    # and `config/brand_map.csv` are gone — and its keys are `norm_store`d by
+    # `ingest.brand_map`, which is what makes one mapping serve the master and a
+    # settlement run. Built through that function rather than by hand, so a change
+    # to the shape fails here instead of silently unbranding the master.
+    brand_map = ingest.brand_map(
+        {"store_to_brand": {"tiktok": {"Kao": {"brand": "KAO",
+                                              "confidence": "confirmed"}}}})
     wb = ms.build(ms.Coverage(month="2026-07"), windows, brand_map)
 
     rows = {(wb["Brand mapping"].cell(row=i, column=2).value,
              wb["Brand mapping"].cell(row=i, column=3).value,
              wb["Brand mapping"].cell(row=i, column=4).value)
             for i in range(4, wb["Brand mapping"].max_row + 1)}
-    assert ("kao", "KAO", "high") in rows
+    assert ("kao", "KAO", "confirmed") in rows
     assert ("mars", "mars", "UNMAPPED (kept as storefront)") in rows

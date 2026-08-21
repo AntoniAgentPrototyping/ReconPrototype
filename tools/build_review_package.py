@@ -33,7 +33,10 @@ DOCS = ["README.md",
         "ARCHITECTURE_POSITION.md"]
 
 CODE_GLOBS = ["src/*.py", "tools/*.py", "config/settings.yaml",
-              "config/brand_map.csv", "config/lazada_fee_types.csv",
+              # `config/brand_map.csv` was here until 2026-08-21: the storefront->
+              # brand mapping is `store_to_brand` in settings.yaml now (D12), so
+              # it is already in this package via the line above.
+              "config/lazada_fee_types.csv",
               "config/lazada_vat_sku.csv", ".gitignore"]
 
 LANG = {".py": "python", ".yaml": "yaml", ".csv": "", ".gitignore": ""}

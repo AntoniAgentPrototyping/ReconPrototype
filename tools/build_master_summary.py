@@ -42,11 +42,16 @@ from src import master_summary as ms                         # noqa: E402
 
 
 def brand_map(config_dir: Path) -> dict[tuple[str, str], tuple[str, str, str]]:
-    """`config/brand_map.csv`, parsed by the shared rule in `src/`."""
-    path = Path(config_dir) / "brand_map.csv"
-    if not path.is_file():
-        return {}
-    return ms.parse_brand_map(path.read_text(encoding="utf-8-sig"))
+    """The storefront->brand mapping from the contract on disk.
+
+    Read `config/brand_map.csv` until 2026-08-21, when the two mappings became one
+    key in `settings.yaml` (D12). The CLI reads disk deliberately — that is what it
+    is for, and it is the same contract the worker renders from the database.
+    """
+    from src import config as src_config
+    from src import ingest
+
+    return ingest.brand_map(src_config.load_settings(Path(config_dir)))
 
 
 def discover(output_root: Path, month: str) -> list[ms.Window]:

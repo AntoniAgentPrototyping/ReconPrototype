@@ -48,7 +48,7 @@ import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
-from src import master_summary, pipeline
+from src import ingest, master_summary, pipeline
 from src.pipeline import RunStatus
 
 from . import retention
@@ -360,7 +360,19 @@ class Worker:
         from . import month_master
 
         try:
-            settings = src_config.load_settings(self.settings.config_dir)
+            # The month's config, resolved the way a run's is — NOT
+            # `load_settings(config_dir)`, which is this container's baked copy.
+            # It only started to matter on 2026-08-21: the storefront->brand
+            # mapping moved into the contract (D12), so reading disk here would
+            # mean a brand corrected in the editor never reached the master while
+            # every settlement run used the new one. That is A1 one layer over.
+            # A master is a month-level artifact and pins to no window, so it
+            # resolves UNPINNED — `resolve_for_window` with the month as its
+            # period, which has no pin and therefore renders from the database.
+            resolved = self._resolve_config(job, log)
+            settings = (src_config.parse_settings(resolved.content)
+                        if resolved is not None
+                        else src_config.load_settings(self.settings.config_dir))
             log.section(f"MONTH-END MASTER {job.period}")
             coverage, windows = month_master.collect(
                 self.repo, self.store, job.period, scratch=scratch, log=log,
@@ -372,7 +384,7 @@ class Worker:
                 config_dir=self.settings.config_dir, settings=settings, log=log)
             result = pipeline.RunResult(context=ctx, workbook_name="month_master.xlsx")
             result.workbook = master_summary.build(
-                coverage, windows, month_master.brand_map(self.settings.config_dir))
+                coverage, windows, ingest.brand_map(settings))
 
             written = pipeline.write_artifacts(result)
             stored = self._store_artifacts(job, run_id, written)

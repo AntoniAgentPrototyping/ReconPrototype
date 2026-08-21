@@ -1,0 +1,30 @@
+-- 022 — one storefront->brand mapping (register D12)
+--
+-- `config_store_brands.in_pipeline_contract` existed so that migration 007 could
+-- be a migration rather than a behaviour change: `store_to_brand` was `{}` and
+-- `config/brand_map.csv` held 60 rows only the month-end master read, so the
+-- column marked which of the two mappings was in force. Reconciling them was
+-- always meant to be its own change with its own stated delta. This is it.
+--
+-- What the reconciliation found, and why the column could not simply be flipped
+-- to true (measured 2026-08-21):
+--
+--   `ingest.derive_brand` used an exact `df["store"].map(mapping)`. brand_map.csv's
+--   keys were normalised spellings (`abbott grow`, `ufood store`) and the
+--   pipeline's stores are roster spellings (`Abbott grow`, `ufood_store`), so
+--   exactly 2 of 42 TikTok+Shopee rows matched. Flipping the flag would have
+--   rebranded two storefronts and silently failed to rebrand forty, with the
+--   contract looking fully populated — worse than either extreme. 007's own
+--   comment said "28 stores would change", which was measured a different way and
+--   was never the number the pipeline would have seen.
+--
+-- So the fix is not the flag. Both readers now match through `ingest.norm_store`
+-- (all 25 TikTok and all 17 Shopee rows match the roster under it), the rows carry
+-- the ROSTER spelling so the editor shows a storefront a person recognises, and
+-- `store_to_brand` renders per platform with `brand`/`confidence`/`note` — the
+-- master's review tab needs all three, which is why they are contract and not
+-- editor decoration.
+--
+-- With one mapping there is nothing left for the column to distinguish. Every
+-- surviving row is read by the pipeline AND by the master.
+alter table config_store_brands drop column if exists in_pipeline_contract;
