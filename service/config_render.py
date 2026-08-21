@@ -14,12 +14,13 @@ carries an explicit ORDER BY, and every value is emitted through `yaml.safe_dump
 quoting and escaping are decided by one library rather than by string formatting.
 
 **Every key is emitted explicitly, including the ones whose absence would be
-dangerous.** `dedupe_rows` has a code default that is the OPPOSITE of its configured
-value — it defaults to True, which silently drops legitimate duplicate order lines
-and understates revenue. "Key absent" is therefore not a safe state, and
-`assert_complete` exists so a missing row fails a test rather than a settlement run.
-(`drop_unmapped_columns` was the second such key until M8/2.4 flipped its code
-default to True; it is still required, but its absence no longer leaks.)
+dangerous.** `dedupe_rows` used to default to True in `src/ingest.py` — the OPPOSITE
+of its configured value, silently dropping legitimate duplicate order lines and
+understating revenue. "Key absent" is not a safe state, and `assert_complete` exists
+so a missing row fails a test rather than a settlement run. Since 2026-08-21 (A9)
+those keys have no code default at all: `src.config.require` hard-stops on them, and
+the set lives there rather than here so the two layers cannot disagree about which
+keys they are.
 
 **On comments.** Top-level evidence is re-emitted as a comment block above its key,
 so the rendered file still reads like the hand-written one. Per-entry evidence — the
@@ -37,6 +38,8 @@ from __future__ import annotations
 from typing import Any
 
 import yaml
+
+from src.config import REQUIRED_SETTINGS
 
 # The order top-level keys appear in the rendered file. Fixed here rather than
 # derived, because this is the reading order of a document somebody maintains: the
@@ -270,17 +273,19 @@ def render(conn) -> str:
 # The completeness control
 # ---------------------------------------------------------------------------
 
-# Keys `src/` reads with a default that differs from the configured value. A missing
-# row here does not raise — it silently changes money or leaks PII.
-DANGEROUS_DEFAULTS = {
-    "dedupe_rows": "code default is True — legitimate duplicate order lines "
-                   "would be dropped and revenue understated",
-}
-
-# `drop_unmapped_columns` was in the map above until M8/2.4, when `src/ingest.py`'s
-# default flipped False -> True. Its absence no longer leaks PII, so it is no longer
-# DANGEROUS — but it stays in REQUIRED_KEYS below, because a config that does not
-# state its PII posture is a config nobody can audit, and this file is the audit.
+# Keys whose absence is not a neutral state. **Not a second list** — it is
+# `src/config.py`'s own, imported: `service/` may import `src/`, and two spellings of
+# "these keys have no safe default" is how one of them goes stale. `src.config.require`
+# refuses them at read time for the disk/CLI path; this refuses them at render time,
+# before a run exists to fail.
+#
+# Until 2026-08-21 this was a local dict describing CODE DEFAULTS, and the description
+# was the part that rotted: `cross_window_order_backfill`'s entry below said absence
+# meant "the SAFE direction (today's behaviour, and every golden was produced under
+# it)", written while the mode was `off` and false from the moment it was flipped to
+# `apply` later the same day. The defaults are gone now (A9) — every key here
+# hard-stops — so there is nothing left to describe wrongly.
+DANGEROUS_DEFAULTS = dict(REQUIRED_SETTINGS)
 
 # Everything the pipeline reads that must be present in a rendered config.
 REQUIRED_KEYS = (
@@ -291,11 +296,6 @@ REQUIRED_KEYS = (
     # hard-stop accessors, so a rendered config without them cannot build a
     # workbook — absence should fail here, in a test, not in a settlement run.
     "invoice_buckets", "fee_buckets",
-    # Absent means `off`, which is the SAFE direction (today's behaviour, and every
-    # golden was produced under it) — so this is not a DANGEROUS_DEFAULT. It is
-    # required anyway, for the reason `drop_unmapped_columns` is: a contract that
-    # does not state whether it borrows lines across windows is a contract nobody
-    # can audit, and stating it is what this file is for.
     "cross_window_order_backfill",
 )
 

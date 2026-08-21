@@ -8,7 +8,7 @@ Money is **VND** — no minor unit, but the math is not integer (a VAT back-out 
 
 **One default factor plus per-SKU exceptions.**
 
-- `vat_factors.default: 1.08` — a temporary tax concession. Reverting to 10% is **that single config line and nothing else**.
+- `vat_factors.default: 1.08` — a temporary tax concession. Reverting to 10% is **that single config line and nothing else**, and since 2026-08-21 there is nothing in code that could outlive the edit: the three sites that read it went through a bare `.get("default", 1.08)` fallback until A14's last residual was closed, and now read `config.vat_default`, which hard-stops on an absent key rather than pricing a window at the old rate.
 - Per-SKU overrides come from the team-owned master's `VAT` sheet (660 SKUs, 4 at 1.05).
 - TikTok/Shopee template cells for 1.05/1.10 are **vestigial and verified dead**: one multiplies an empty cell, the other double-VATs inside a `#REF!`-broken block whose failing verdict the team ignores.
 

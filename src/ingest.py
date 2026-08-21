@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from .config import require
 from .errors import ReconHardStop
 from .runlog import RunLog
 
@@ -442,12 +443,12 @@ def read_files(
         # downstream uses them, it strips PII columns immediately (the
         # team's own Shopee M code does the same), and it keeps full-
         # platform runs within memory.
-        # Default TRUE since M8/2.4: a settings dict that forgets to say now
-        # STRIPS rather than retains. The old False meant the fail-open direction
-        # was the PII-leaking one — a caller that built its own settings (a test,
-        # a script, a future entry point) kept `Recipient`, `Phone #` and
-        # `Detail Address` in the frame and in anything that frame reached.
-        if settings.get("drop_unmapped_columns", True):
+        # No default at all since 2026-08-21 (A9). M8/2.4 flipped it False -> True
+        # so that a settings dict which forgot to say STRIPPED rather than retained
+        # `Recipient`, `Phone #` and `Detail Address`; safe, but still silent, and
+        # a config that does not state its PII posture cannot be audited. `require`
+        # also refuses the string "false", which is truthy here.
+        if require(settings, "drop_unmapped_columns"):
             keep = set(colmap.values()) | {"store", "source_file"}
             df = df[[c for c in df.columns if c in keep]]
         log.add(f"  {f.name}: {len(df)} rows" + (f" (headers not found: {missing})" if missing else ""))
@@ -477,7 +478,10 @@ def read_parts(
     # per-window folder discipline is the overlap protection. The synthetic
     # the legacy synthetic sample path set dedupe_rows: true because
     # its generator bakes overlapping parts.
-    if settings.get("dedupe_rows", True):
+    # No default since 2026-08-21 (A9): the one it had was `True`, the OPPOSITE of
+    # the configured value, so a settings dict that forgot to say dropped those
+    # legitimate lines and understated revenue with nothing to show for it.
+    if require(settings, "dedupe_rows"):
         data_cols = [c for c in combined.columns if c != "source_file"]
         combined = combined.drop_duplicates(subset=data_cols, ignore_index=True)
     dupes = before - len(combined)

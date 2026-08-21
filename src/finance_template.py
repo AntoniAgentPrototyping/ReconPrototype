@@ -52,6 +52,7 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
 
+from .config import vat_default
 from .errors import ReconHardStop
 from .runlog import RunLog
 
@@ -304,7 +305,7 @@ def build_tiktok(sku: pd.DataFrame, settings: dict, meta: dict, log: RunLog) -> 
     wb = Workbook(write_only=True)
     checks: list[dict] = []
     rates = vat_rates(settings)
-    default_factor = float((settings.get("vat_factors") or {}).get("default", 1.08))
+    default_factor = vat_default(settings)
     match, catch_all = invoice_buckets(settings, "tiktok")
     df = sku.sort_values(["store", "order_id"]).copy()
     df["bucket"] = df["store"].map(lambda s: _bucket(s, match, catch_all))
@@ -459,7 +460,7 @@ def build_shopee(sku: pd.DataFrame, settings: dict, meta: dict, log: RunLog) -> 
             f"lays out control rows and tabs for exactly [1.05, 1.08, 1.1]. "
             f"Changing the rate list is a template change in "
             f"src/finance_template.py, not a config edit.")
-    default_factor = float((settings.get("vat_factors") or {}).get("default", 1.08))
+    default_factor = vat_default(settings)
     match, catch_all = invoice_buckets(settings, "shopee")
 
     df = sku.sort_values(["store", "order_id"]).copy()

@@ -347,13 +347,34 @@ def test_apply_mode_refuses_an_unreadable_predecessor(tmp_path):
 
 # --- the mode switch --------------------------------------------------------
 
-def test_the_default_mode_is_off_when_nothing_is_configured():
-    assert backfill.mode_of({}) == "off"
-    # An empty or null value means "not set", which resolves to the SAFE direction —
-    # today's behaviour, the one every committed golden was produced under. A typo,
-    # by contrast, hard-stops: "unset" and "misspelled" are different mistakes.
-    assert backfill.mode_of({"cross_window_order_backfill": ""}) == "off"
-    assert backfill.mode_of({"cross_window_order_backfill": None}) == "off"
+def test_an_unconfigured_mode_hard_stops_rather_than_meaning_off():
+    """This test asserted the OPPOSITE until 2026-08-21, and its own comment is why
+    it had to change.
+
+    It read: *"An empty or null value means 'not set', which resolves to the SAFE
+    direction — today's behaviour, the one every committed golden was produced
+    under."* True when written — the mode **was** `off` — and false from later the
+    same day, when it was flipped to `apply`. From then on "not set" silently
+    reverted defect 2.12's fix and 2.33B VND of measured July recovery, and this
+    test asserted that it should.
+
+    So the premise was the stale part, not the code: a default is a claim about the
+    configured value and goes stale on its own (docs/14 A9). Absence is now a hard
+    stop naming the key; a typo still hard-stops naming the modes. Both mistakes
+    stop the run, and each says which mistake it was.
+    """
+    with pytest.raises(ReconHardStop) as exc:
+        backfill.mode_of({})
+    assert "cross_window_order_backfill is not configured" in str(exc.value)
+
+    with pytest.raises(ReconHardStop, match="not configured"):
+        backfill.mode_of({"cross_window_order_backfill": None})
+
+    # An empty string is a value somebody wrote, so it is the typo case, not the
+    # unset one — and it is reported as such.
+    with pytest.raises(ReconHardStop) as exc:
+        backfill.mode_of({"cross_window_order_backfill": ""})
+    assert "not one of" in str(exc.value)
 
 
 @pytest.mark.parametrize("value", ["off", "report", "apply"])

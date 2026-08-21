@@ -213,6 +213,8 @@ A stakeholder proposal placed AI agents on the calculation path (classification,
 
 Where it does pay is **absorbing change**, which is the genuine recurring cost ([12-CHANGE-HISTORY](12-CHANGE-HISTORY.md) logs 13 format changes in two months): proposing column-map diffs on schema drift, proposing fee-name buckets, and triaging the exception report into prose. All recommend-only, under the boundary **AI recommends, deterministic code executes, a human approves** — with the alias case as the standing example of why evidence must decide rather than similarity ([D7](06-DECISIONS.md#d7)).
 
+**Nothing in this system calls a model today, and the first thing that does will be the column-map suggestion — deliberately deferred, 2026-08-21.** [D5](14-PRODUCTION-READINESS.md) is being closed in two deterministic halves first: detect the drift at the upload door (which required fields a file is missing, which headers were not recognised), then let a person pair an unrecognised header with a canonical field in a pre-filled config proposal. *Suggesting* that pairing is its own future pass, and the order is the point — the suggestion needs the evidence the first half produces, and the screen the second half builds. Two constraints are already known and should not be re-argued: a useful suggestion has to look at cell **values**, which are PII-bearing, so its boundary is `04-DATA-FLOW.md`'s; and what it may cite as evidence has to be decided before it is built, because similarity is what [D7](06-DECISIONS.md#d7) exists to refuse.
+
 The full argument, written for stakeholders, is in `ARCHITECTURE_POSITION.md`.
 
 ## Standing risks

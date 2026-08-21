@@ -17,6 +17,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from src.config import REQUIRED_SETTINGS
+
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "config"
 
@@ -154,17 +156,22 @@ def test_a_rendered_config_supplies_every_key_the_pipeline_reads(imported):
     config_render.assert_complete(rendered)
 
 
-@pytest.mark.parametrize("key", ["drop_unmapped_columns", "dedupe_rows"])
+@pytest.mark.parametrize("key", sorted(REQUIRED_SETTINGS))
 def test_the_keys_whose_absence_changes_behaviour_are_caught(imported, key):
     """A missing row here is not a missing setting — it is a silent behaviour change,
     which is why rendering asserts rather than relies on `.get`.
 
-    `dedupe_rows` still has a code default that is the OPPOSITE of its configured
-    value (True: legitimate duplicate order lines dropped, revenue understated).
-    `drop_unmapped_columns` did too until M8/2.4 flipped `src/ingest.py`'s default to
-    True; its absence no longer leaks PII, but it stays required because a config
-    that does not state its PII posture cannot be audited — and this file IS the
-    audit trail. Both are still caught, for two different reasons."""
+    `dedupe_rows` had a code default that was the OPPOSITE of its configured value
+    (True: legitimate duplicate order lines dropped, revenue understated);
+    `drop_unmapped_columns` did too until M8/2.4. **Neither has a default any more** —
+    A9 (2026-08-21) made both, plus `cross_window_order_backfill`, hard-stop through
+    `src.config.require`.
+
+    This test does not become redundant. A run that hard-stops has already been
+    queued, materialised and started, so refusing an incomplete contract at RENDER
+    time is the earlier and cheaper failure. What changed is that it parametrizes
+    over `src.config.REQUIRED_SETTINGS` rather than a list kept here — one set of
+    keys for both layers, so they cannot disagree about which ones matter."""
     from service import config_render
     _, rendered = _rendered(imported)
     rendered.pop(key)

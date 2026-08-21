@@ -16,6 +16,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+from .config import vat_default
 from .runlog import RunLog
 
 
@@ -188,7 +189,7 @@ def resolve_vat_factors(sku_series, settings: dict, vat_sku: dict[str, float],
     so every line is invoiced at the default and a non-default-rate SKU
     trading on any of them would be taxed wrongly with no signal.
     """
-    default = float((settings.get("vat_factors") or {}).get("default", 1.08))
+    default = vat_default(settings)
     factors = vat_factor_for(sku_series, settings, vat_sku)
     unmapped = factors.isna()
     rows = len(factors)

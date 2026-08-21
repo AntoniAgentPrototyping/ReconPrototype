@@ -1079,3 +1079,56 @@ the J11 "working verdict". The verdicts survive in `checks`/run log, so this is 
 rendering gap, not a lost control — and fixing `emit` moves cells on all eight
 goldens, so it needs its own pre-stated pass ([08-KNOWN-DEFECTS 2.13](08-KNOWN-DEFECTS.md)).
 The stamp lives at A1/B1, which is both the safe region and where a caveat belongs.
+
+## 2026-08-21 — A9: a code default may not disagree with the contract
+
+One register row, and it turned out to name a class with two live members rather than
+the single line it cited. Nothing touches the money math; **the golden gate re-ran all
+eight windows at zero tolerance with no cell moved**, which was the delta stated
+before running it.
+
+**The named instance.** `settings.get("dedupe_rows", True)` against a contract that
+says `false`. Byte-identical order lines are legitimate — duplicated gift SKUs, where
+the team's quantity of 2 became 1 under deduping — so a settings dict that forgot the
+key understated revenue with nothing to show for it.
+
+**The instance nobody had named, found while planning the fix.**
+`settings.get("cross_window_order_backfill", "off")` (`src/backfill.py:120`) against a
+contract that says `apply`. Absence silently reverted defect 2.12's fix: 942,869,056
+VND on `2026-07_w2`, 1,390,095,674 on `_s4`, 173,429 on `_s2`. **That default was
+correct and safe on the day it was written** — the mode still was `off` — and stopped
+being safe when the mode was flipped later the *same day*. `mode_of` guarded the typo
+case with a comment saying "unset and misspelled are different mistakes", and left the
+more likely of the two unguarded. `tests/test_backfill.py` asserted the wrong
+behaviour and its own comment explains why: it cited "today's behaviour, the one every
+committed golden was produced under", which is a claim about the world, not about the
+code.
+
+**So the fix is the class, not the line.** `src/config.py` gains `REQUIRED_SETTINGS`
+(three keys: `dedupe_rows`, `drop_unmapped_columns`, `cross_window_order_backfill`)
+and `require`, which hard-stops naming the key, what the value decides, and where to
+set it — and refuses a quoted `"false"`, truthy in Python and a silent inversion the
+service already guards at the row (M8/1.6) on the one path that has no rows.
+`vat_factors.default`'s three bare `1.08` fallbacks — the last A14 left — become
+`config.vat_default`, so the 8%→10% revert cannot be outlived by a literal.
+
+**`service/config_render.DANGEROUS_DEFAULTS` is now `src.config.REQUIRED_SETTINGS`,
+imported rather than restated.** Its old local copy is the third stale claim this pass
+found: it described `cross_window_order_backfill`'s absence as "the SAFE direction
+(today's behaviour, and every golden was produced under it)" in the justification of
+the control meant to catch it. Render-time refusal stays — a run that hard-stops has
+already been queued, materialised and started — but both layers now read one set of
+keys.
+
+**`tests/test_config_defaults.py` is the part that outlives this.** An AST walk over
+`src/**` pairs every `settings.get(<key>, <literal>)` with the configured value and
+fails on disagreement; a key nothing configures needs an entry in
+`CODE_LITERAL_IS_THE_CONTRACT` with its reason (`date_coercion` is the only one, and
+D53 is the reason). It carries a negative control that parses both inversions as
+source text, because a walk that silently matched nothing would make the whole file
+pass. Six defaulted reads survive in `src/` and all six agree.
+
+Recorded rather than fixed: `(settings.get("dayfirst") or {}).get(platform, False)` is
+a real inversion (`dayfirst.tiktok: true`) and a dead one — `date_formats` takes
+precedence for both platforms that read it ([D54](06-DECISIONS.md#d54)) — so the walk
+cannot compare it and does not pretend to.

@@ -67,7 +67,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import ingest
+from . import config, ingest
 from .errors import ReconHardStop
 from .runlog import RunLog
 
@@ -116,8 +116,14 @@ def mode_of(settings: dict) -> str:
 
     A typo must not silently mean `off`: that is the fail-quiet direction, and this
     setting's whole purpose is to make a measured gap visible.
+
+    Neither may ABSENCE mean `off`, and that half was wrong here until 2026-08-21
+    (A9). The default was written on 2026-08-20 while the mode still was `off`, so
+    it was true and safe; the flip to `apply` later the same day made it a silent
+    revert of defect 2.12's fix worth 2.33B VND of July recovery. The typo case was
+    guarded and the missing-key case was not, which is the more likely of the two.
     """
-    value = str(settings.get("cross_window_order_backfill", "off") or "off").strip()
+    value = str(config.require(settings, "cross_window_order_backfill")).strip()
     if value not in MODES:
         raise ReconHardStop(
             f"cross_window_order_backfill is {value!r}, which is not one of "
