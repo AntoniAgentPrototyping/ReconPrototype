@@ -196,6 +196,32 @@ export const WORDS: Record<string, Entry> = {
     vi: "Cửa hàng được lấy từ tên file, và nó quyết định doanh thu này thuộc về ai. Kiểm tra từng file trước khi tải lên; sửa ở đây nhanh hơn đổi tên file.",
   },
 
+  // -- format drift (D5) ---------------------------------------------------
+  // The recurring cost of this system: an export renames a column and a developer
+  // has absorbed it by hand every month tested. "Column" not "field", "the export"
+  // not "the source": the operator is looking at a spreadsheet.
+  driftHeading: { en: "Columns in these files the rules do not know", vi: "Cột trong file mà quy tắc chưa biết" },
+  driftIntro: {
+    en: "The platform sometimes renames a column. These headers are in the files and are not in the rules, so nothing reads them. If one of them is a column the system needs under a new name, map it here — the old name is kept alongside, because earlier periods still have to run.",
+    vi: "Sàn có lúc đổi tên cột. Những tiêu đề này có trong file nhưng chưa có trong quy tắc, nên hệ thống không đọc. Nếu một trong số đó là cột hệ thống cần nhưng đã đổi tên, hãy khai báo ở đây — tên cũ vẫn được giữ, vì các kỳ trước vẫn phải chạy được.",
+  },
+  driftMissing: {
+    en: "Nothing in this period supplies these, so a run will stop",
+    vi: "Kỳ này không có file nào cung cấp các mục sau, nên chạy sẽ bị dừng",
+  },
+  driftMissingHint: {
+    en: "This is what a renamed column looks like. Find it among the unknown columns below and map it, then run again.",
+    vi: "Đây chính là dấu hiệu cột bị đổi tên. Tìm nó trong danh sách cột chưa biết bên dưới, khai báo lại, rồi chạy lại.",
+  },
+  driftMapTo: { en: "This column is really", vi: "Cột này thực chất là" },
+  driftPropose: { en: "Propose this mapping", vi: "Đề xuất khai báo" },
+  driftPick: { en: "Choose what it is", vi: "Chọn nội dung cột" },
+  driftNothing: { en: "Every column in these files is known.", vi: "Mọi cột trong các file này đều đã biết." },
+  driftUnchecked: {
+    en: "Column names were not checked for these files.",
+    vi: "Chưa kiểm tra tên cột cho các file này.",
+  },
+
   teamFigures: { en: "The team's figures", vi: "Số của team" },
   saveFigures: { en: "Save figures", vi: "Lưu số" },
   withdraw: { en: "Withdraw", vi: "Rút lại" },

@@ -320,6 +320,21 @@ export type RosterDeclaration = {
   declared_absent_stores: string[] | null;
 };
 
+/** Format drift for one file kind of one window (register D5). */
+export type KindDrift = {
+  /** Canonical fields NO file of this kind supplies, so the run will stop. The
+   *  arithmetic `ingest.read_parts` does, one step earlier — over the union of
+   *  the kind's files, because a part file with fewer columns is legitimate. */
+  missing_fields: string[];
+  /** filename -> headers the contract does not name, PII excluded. A renamed
+   *  column looks exactly like this. */
+  unrecognised_headers: Record<string, string[]>;
+  /** false means nothing was measured, not that nothing is wrong: Lazada has no
+   *  required field set, and files uploaded before migration 023 recorded no
+   *  headers. "Clean" and "unchecked" must not render the same. */
+  checked: boolean;
+};
+
 export type WindowPlan = {
   platform: string;
   period: string;
@@ -337,6 +352,11 @@ export type WindowPlan = {
    *  Their figures are included either way; the declaration no longer
    *  describes the window. */
   declared_absent_present: string[];
+  /** Per file kind: what the export's headers say about format drift (D5). */
+  drift: Record<string, KindDrift>;
+  /** What an unrecognised header may be mapped to — the closed set of names the
+   *  pipeline understands, from its own constants. */
+  canonical_fields: string[];
   /** What `POST /jobs` will do with this window as it stands. */
   ready: boolean;
 };

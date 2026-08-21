@@ -1209,6 +1209,12 @@ def create_app(repo: Repository, store: ArtifactStore, *,
                 filename=filename, sha256=digest, bytes_=len(raw),
                 uploaded_by=principal.subject, platform=platform, period=period,
                 kind=kind, pii_columns_dropped=result.dropped_columns,
+                # The headers the contract DID recognise. With `pii_columns_dropped`
+                # (which holds every dropped header, not only the PII ones) this is
+                # the file's original header row — and the sanitized object in the
+                # bucket no longer contains the dropped ones, so recording it here
+                # is the only chance (register D5, migration `023`).
+                kept_columns=result.kept_columns,
                 sanitized=True, uri=ref.uri, object_key=key, state="stored",
                 store=declared, store_canonical=canonical,
                 # The digest of what went INTO the store, not of what arrived. The
@@ -1247,6 +1253,14 @@ def create_app(repo: Repository, store: ArtifactStore, *,
         return {**payload(record), "sheet": result.sheet, "rows": result.rows,
                 "kept_columns": result.kept_columns,
                 "dropped_known_pii": result.dropped_known_pii,
+                # Register D5: headers this export carries that the contract does
+                # not name, PII excluded. A renamed column looks exactly like this,
+                # and until now the only place it surfaced was a hard stop ~200
+                # seconds into a run, phrased for a developer. The window's own
+                # required-field arithmetic is on `/uploads/plan`, because
+                # `read_parts` checks the CONCATENATION of a kind's files — a part
+                # file with fewer columns is legitimate and must not be refused here.
+                "unrecognised_headers": result.unrecognised_headers,
                 "sheets_read": result.sheets_read,
                 "store_derived_from_filename": derived,
                 "store_corrected": declared != derived,
@@ -1382,8 +1396,41 @@ def create_app(repo: Repository, store: ArtifactStore, *,
         kinds: dict[str, list[dict]] = {}
         problems: list[str] = []
 
+        # Register D5: which canonical fields this window's files actually supply,
+        # per kind, and which the run will hard-stop for. Computed here rather than
+        # at the door because `ingest.read_parts` checks the CONCATENATION of a
+        # kind's part files — a "part 2" export with fewer columns is legitimate and
+        # refusing it per file would break a real window to catch a fault the union
+        # does not have. This is the same arithmetic, one step earlier, in a
+        # sentence rather than a traceback ~200 seconds into a run.
+        drift: dict[str, dict] = {}
+
         for kind in naming.KINDS_BY_PLATFORM[platform]:
             group = {r["filename"]: r for r in rows if r["kind"] == kind}
+            colmap = upload_lib.column_map_for(domain, platform, kind)
+            unrecognised: dict[str, list[str]] = {}
+            for name, row in sorted(group.items()):
+                strange = sorted(h for h in (row.get("pii_columns_dropped") or ())
+                                 if h not in upload_lib.KNOWN_PII)
+                if strange:
+                    unrecognised[name] = strange
+            # `kept_columns` is empty for anything uploaded before migration `023`,
+            # which would read as "this file supplies nothing" and invent a drift
+            # report for a healthy window. Absent evidence is reported as absent.
+            measured = any(row.get("kept_columns") for row in group.values())
+            missing = (upload_lib.missing_fields(
+                [list(row.get("kept_columns") or ()) for row in group.values()],
+                colmap, kind) if measured else [])
+            drift[kind] = {"missing_fields": missing,
+                           "unrecognised_headers": unrecognised,
+                           "checked": (measured
+                                       and bool(upload_lib.required_fields(kind)))}
+            if missing:
+                problems.append(
+                    f"{kind}: no file in this window supplies "
+                    f"{', '.join(missing)}. The export's headers have most likely "
+                    f"been renamed — map the new spelling in the rules, as a "
+                    f"parallel entry beside the old one.")
             if not group:
                 kinds[kind] = []
                 continue
@@ -1431,6 +1478,17 @@ def create_app(repo: Repository, store: ArtifactStore, *,
             "expected_store_count": len((domain.get("expected_stores") or {})
                                         .get(platform) or []),
             "problems": problems,
+            # Register D5, per kind: `missing_fields` is what the run will stop for,
+            # `unrecognised_headers` is the evidence for fixing it (per filename),
+            # and `checked` distinguishes "nothing is wrong" from "nothing was
+            # measured" — Lazada has no required set at all, and a file uploaded
+            # before migration `023` recorded no headers.
+            "drift": drift,
+            # The right-hand side of a column-map proposal: what an unrecognised
+            # header may be mapped TO. Derived from the pipeline's own constants
+            # (`config_rows.canonical_fields`), never a list kept here.
+            "canonical_fields": (repo.canonical_fields()
+                                 if hasattr(repo, "canonical_fields") else []),
             "roster_declaration": payload(declaration) if declaration else None,
             # D3's re-evaluation nudge: declared-absent stores that now HAVE
             # files. Their figures are included either way — this is the record

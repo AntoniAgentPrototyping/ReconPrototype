@@ -1282,3 +1282,70 @@ the field. Text-level, the same technique `test_ui_vocabulary.py` uses and for t
 same reason — **there is still no browser automation** (register E2), so nothing here
 proves the screen works. It proves the field name is one string in three places,
 which is the side that went missing.
+
+## 2026-08-21 — D5: format drift becomes visible where it happens
+
+Register D5, decided as [D67](06-DECISIONS.md#d67). The last item of the
+A9/D12/D7/D5 plan. **No `src/` change and no contract change, so no golden could
+move and the money gate was not run** — stated rather than run.
+
+**What the drift log at the top of this file was really recording.** Eighteen events
+in three months, every one absorbed by a developer: an export renamed a column, the
+run hard-stopped ~200 seconds in with *"income data is missing required columns after
+header mapping: ['net_revenue']. Update column_maps.income in settings.yaml"*, and
+somebody who knew what a column map was edited YAML. The rules editor could always
+express the fix. Nothing helped a person find it.
+
+**The evidence half.** Migration `023` adds `uploads.kept_columns`: the headers the
+contract recognised. With `pii_columns_dropped` — which held *every* dropped header
+all along, despite its name — that is the file's original header row, and the
+sanitized object in the bucket no longer contains the dropped ones, so the door is
+the only chance to record it. Raw headers, not the fields they mapped to: the mapping
+belongs to the contract, which is versioned and pinned per window, so a stored
+mapping would freeze one reading of the file. The upload response and the window
+screen report the unrecognised ones **with `KNOWN_PII` subtracted** — a list
+containing `Recipient` and `Phone #` fires on every healthy file, and an operator
+learns to ignore it.
+
+**The step half.** The window screen maps an unknown header to a canonical field as
+a config proposal, reusing the existing `proposeEdits`. It is not a new control:
+approve/apply, `invalidates_goldens` and the verification canary all still stand
+between that form and a settlement run.
+
+**The decision that shaped it: the required-field check is per window-and-kind,
+never per file.** `ingest.read_parts` concatenates a kind's parts and checks the
+*result*, so a "part 2" export with fewer columns is legitimate — July produced nine
+of them. A per-file check at the door would have refused healthy windows to catch a
+fault the union does not have. So `uploads.missing_fields` takes the union and lives
+on `/uploads/plan`, appending to `problems`, which makes `ready` false: a window a
+run will refuse must not look ready. Both directions are pinned in
+`test_a_part_file_with_fewer_columns_is_not_a_drift_report`, including that each part
+*alone* would look broken.
+
+**Three smaller things worth not re-deriving:**
+
+- **`store` is excluded from the required set.** It is in `REQUIRED_COLUMNS` and
+  comes from the *filename* ([D6](06-DECISIONS.md#d6)); `read_files` adds it before
+  `read_parts` checks. Testing a file's headers for it would fail every export ever
+  written, so `PIPELINE_SUPPLIED_FIELDS` names the exception instead of leaving it a
+  subtraction somebody rediscovers.
+- **`checked: false` means unmeasured, not clean.** Lazada's kinds have no entry in
+  `REQUIRED_COLUMNS` (a fee-event ledger, read by `lazada.read_ledger`), and a file
+  uploaded before migration `023` recorded no headers. Rendering either as "no drift
+  found" is the shape of most of what this register has had to fix.
+- **Canonical field names render untranslated** on a translated page.
+  `unit_price_gross` is the identifier the rules editor's own dropdown shows;
+  inventing a Vietnamese label would create a second name for one thing.
+
+**No suggested mapping, decided with the user.** The screen shows the unknown headers
+and the fields nothing supplies; the human pairs them. That is [D7](06-DECISIONS.md#d7)
+applied one layer up — evidence decides, not similarity. Suggesting the pairing is
+the first thing in this system that would call a model and it needs to read cell
+**values**, which are PII-bearing; it is a future pass and its constraints are
+written down in [10-ROADMAP](10-ROADMAP.md#where-ai-does-and-does-not-belong).
+
+**Not browser-verified.** Register E2 stands: the drift panel was typechecked and
+reasoned about. What is tested is the arithmetic (six unit cases), the door's
+recording, and the plan's report end to end — including a real TikTok orders export
+with the price header renamed, which produces `missing_fields: ["unit_price_gross"]`
+and `ready: false`.

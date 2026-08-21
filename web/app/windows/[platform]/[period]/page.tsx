@@ -16,6 +16,7 @@ import ReferencesForm from "./references-form";
 import RosterForm from "./roster-form";
 import UploadForm from "./upload-form";
 import FileRow from "./file-row";
+import DriftPanel from "./drift-panel";
 
 export const dynamic = "force-dynamic";
 
@@ -272,6 +273,21 @@ export default async function WindowPage({
                   </tbody>
                 </table>
               </div>
+            )}
+
+            {/* D5: what these files' own headers say. Rendered per kind because
+                the required-field arithmetic is per kind — `read_parts` checks the
+                concatenation of a kind's part files, not each file. */}
+            {files.length > 0 && plan.drift?.[kind] && (
+              <DriftPanel
+                platform={platform}
+                period={period}
+                kind={kind}
+                drift={plan.drift[kind]}
+                canonicalFields={plan.canonical_fields ?? []}
+                canEdit={canEdit}
+                lang={lang}
+              />
             )}
           </section>
         );

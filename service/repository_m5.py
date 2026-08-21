@@ -88,6 +88,17 @@ class M5Repository(IdentityRepository):
         with self._conn() as conn:
             return config_rows.payload(conn)
 
+    def canonical_fields(self) -> list[str]:
+        """What a column map may target — the right-hand side of every mapping.
+
+        Exposed as a repository method (rather than the api reaching for a cursor)
+        because the window page needs it too since register D5: an unrecognised
+        header is only actionable if the screen can offer what to map it TO.
+        """
+        from . import config_rows
+        with self._conn() as conn:
+            return config_rows.canonical_fields(conn)
+
     def config_rows(self, table: str) -> list[dict]:
         from . import config_rows as rows
         with self._conn() as conn:
@@ -417,7 +428,8 @@ class M5Repository(IdentityRepository):
     def record_upload(self, *, filename: str, sha256: str, bytes_: int,
                       uploaded_by: str, platform: str | None = None,
                       period: str | None = None, kind: str | None = None,
-                      pii_columns_dropped: Sequence[str] = (), sanitized: bool = False,
+                      pii_columns_dropped: Sequence[str] = (),
+                      kept_columns: Sequence[str] = (), sanitized: bool = False,
                       uri: str | None = None, state: str = "stored",
                       reason: str | None = None, store: str | None = None,
                       store_canonical: str | None = None,
@@ -443,13 +455,15 @@ class M5Repository(IdentityRepository):
             with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
                 cur.execute("""
                     insert into uploads (filename, sha256, bytes, platform, period, kind,
-                                         pii_columns_dropped, sanitized, uri, state,
+                                         pii_columns_dropped, kept_columns, sanitized,
+                                         uri, state,
                                          reason, uploaded_by, store, store_canonical,
                                          object_key, object_sha256)
-                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     returning *
                 """, (filename, sha256, bytes_, platform, period, kind,
-                      list(pii_columns_dropped), sanitized, uri, state, reason,
+                      list(pii_columns_dropped), list(kept_columns), sanitized,
+                      uri, state, reason,
                       uploaded_by, store, store_canonical, object_key, object_sha256))
                 return self._one(cur)
         except psycopg.errors.UniqueViolation as exc:

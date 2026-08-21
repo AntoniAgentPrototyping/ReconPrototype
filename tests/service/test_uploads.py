@@ -934,3 +934,162 @@ def test_the_preview_refuses_an_incoherent_platform_and_kind(upload_client):
                            json={"platform": "lazada", "period": WINDOW,
                                  "kind": "orders", "filenames": ["2_KAO.xlsx"]})
     assert r.status_code == 422, r.text
+
+
+# ---------------------------------------------------------------------------
+# Format drift at the door and on the plan (register D5)
+# ---------------------------------------------------------------------------
+
+def test_unrecognised_headers_exclude_the_pii_the_contract_deliberately_drops():
+    """The subtraction that decides whether this report is usable.
+
+    Every healthy export carries `Recipient`, `Phone #` and `Detail Address`, and
+    the contract deliberately does not name them. A drift list that included them
+    would flag every file forever, and an operator would learn to ignore it — the
+    exact failure `src/pipeline.py`'s comment predicted for the UNVERIFIED list.
+    """
+    result = upload_lib.SanitizeResult(
+        sheet="s", rows=1, kept_columns=["Order ID"],
+        dropped_columns=["Recipient", "Phone #", "Net revenue NEW", "Số điện thoại"])
+    assert result.unrecognised_headers == ["Net revenue NEW"]
+    assert result.dropped_known_pii == ["Phone #", "Recipient", "Số điện thoại"]
+
+
+def test_the_required_set_is_the_pipeline_s_own_minus_what_it_supplies_itself():
+    """`store` is in `REQUIRED_COLUMNS` and comes from the FILENAME, not a column
+    (D6). Checking a file's headers for it would fail every export ever written."""
+    assert "store" not in upload_lib.required_fields("orders")
+    assert "order_id" in upload_lib.required_fields("orders")
+    assert "net_revenue" in upload_lib.required_fields("income")
+    # Lazada is a fee-event ledger read by `lazada.read_ledger`; `REQUIRED_COLUMNS`
+    # has no entry for its kinds, so there is nothing to check and the answer says
+    # so rather than inventing a set.
+    assert upload_lib.required_fields("weekly") == frozenset()
+    assert upload_lib.required_fields("daily") == frozenset()
+
+
+def test_a_part_file_with_fewer_columns_is_not_a_drift_report():
+    """The property that decides where this check lives.
+
+    `ingest.read_parts` concatenates a kind's parts and checks the CONCATENATION,
+    so a "part 2" export with fewer columns is legitimate — July produced nine of
+    them. Judging each file alone would refuse a healthy window for a fault the
+    union does not have, which is why the arithmetic is on the window plan and not
+    at the door.
+    """
+    colmap = {"Order ID": "order_id", "Revenue": "net_revenue",
+              "Refund": "actual_refund", "Gross": "gross_revenue",
+              "Statement": "statement_date"}
+    full = list(colmap)
+    part_two = ["Order ID", "Revenue"]
+
+    assert upload_lib.missing_fields([full, part_two], colmap, "income") == []
+    # Each part alone WOULD look broken, which is the point being made.
+    assert upload_lib.missing_fields([part_two], colmap, "income")
+
+
+def test_a_field_no_file_supplies_is_named():
+    """What the run will hard-stop for, said one step earlier."""
+    colmap = {"Order ID": "order_id", "Refund": "actual_refund",
+              "Gross": "gross_revenue", "Statement": "statement_date"}
+    missing = upload_lib.missing_fields([list(colmap)], colmap, "income")
+    assert missing == ["net_revenue"]
+
+
+def test_a_lazada_kind_reports_nothing_missing_rather_than_everything():
+    assert upload_lib.missing_fields([["anything"]], {}, "weekly") == []
+
+
+def test_the_door_records_the_headers_and_reports_the_unknown_ones(upload_client, tmp_path):
+    """The evidence has to be captured at the door or it is gone: the sanitized
+    object in the bucket no longer contains the dropped columns (migration `023`).
+
+    `sample_export` writes one PII column (`Recipient`) and no unknown ones, so a
+    clean file must report an EMPTY drift list — a check that fires on healthy data
+    is worse than no check.
+    """
+    path = sample_export(tmp_path, "3_KAO.xlsx")
+    with path.open("rb") as fh:
+        r = upload_client.post("/uploads", files={"file": (path.name, fh)},
+                               data={"platform": PLATFORM, "period": WINDOW,
+                                     "kind": KIND})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["kept_columns"], "the recognised headers must be recorded"
+    assert body["dropped_known_pii"] == ["Recipient"]
+    assert body["unrecognised_headers"] == []
+
+
+def test_the_plan_reports_an_unknown_column_per_file(upload_client, tmp_path):
+    """A renamed column looks exactly like this, and this is where a person sees it
+    without starting a run."""
+    import pandas as pd
+    from _contract import lazada_headers, lazada_sheet
+
+    path = tmp_path / "4_KAO.xlsx"
+    mapped = lazada_headers("weekly")[:5]
+    frame = pd.DataFrame({**{c: [f"{c}-drift"] for c in mapped},
+                          "Recipient": ["a person"],
+                          "Item Price Credit NEW": ["12345"]})
+    with pd.ExcelWriter(path, engine="openpyxl") as w:
+        frame.to_excel(w, sheet_name=lazada_sheet("weekly"), index=False)
+
+    with path.open("rb") as fh:
+        assert upload_client.post(
+            "/uploads", files={"file": (path.name, fh)},
+            data={"platform": PLATFORM, "period": WINDOW,
+                  "kind": KIND}).status_code == 201
+
+    plan = upload_client.get("/uploads/plan",
+                             params={"platform": PLATFORM, "period": WINDOW}).json()
+    drift = plan["drift"][KIND]
+    assert drift["unrecognised_headers"]["4_KAO.xlsx"] == ["Item Price Credit NEW"]
+    # Lazada has no required field set, so nothing was measured — and that is
+    # reported as unmeasured rather than as clean.
+    assert drift["checked"] is False
+    assert drift["missing_fields"] == []
+    assert plan["canonical_fields"], "an unknown column needs somewhere to map TO"
+
+
+def _tiktok_orders_export(tmp_path: Path, name: str, headers: list[str]) -> Path:
+    """A minimal TikTok orders export: sheet `OrderSKUList`, header on row 1, and
+    one junk row under it (`skip_rows_after_header: 1`) — the shape the real
+    exports have, because `read_source` applies those rules to whatever is here."""
+    import pandas as pd
+    path = tmp_path / name
+    frame = pd.DataFrame([{h: f"junk-{h}" for h in headers},
+                          {h: f"{h}-{name}" for h in headers}])
+    with pd.ExcelWriter(path, engine="openpyxl") as w:
+        frame.to_excel(w, sheet_name="OrderSKUList", index=False)
+    return path
+
+
+def test_a_field_no_file_in_the_window_supplies_makes_the_window_not_ready(
+        upload_client, tmp_path, settings_dict):
+    """D5 end to end, on the failure it exists for.
+
+    Drop the header that carries `unit_price_gross` from every file of a kind and
+    the run will hard-stop ~200 seconds in with a developer's sentence about column
+    maps. The window plan now says it first, names the field, and refuses to promise
+    a run — `ready` is what the queue button reads.
+    """
+    colmap = dict(settings_dict["column_maps"]["tiktok"]["orders"])
+    price = next(h for h, c in colmap.items() if c == "unit_price_gross")
+    headers = [h for h in colmap if h != price] + ["SKU Unit Original Price NEW"]
+
+    path = _tiktok_orders_export(tmp_path, "1. order Mars.xlsx", headers)
+    with path.open("rb") as fh:
+        r = upload_client.post("/uploads", files={"file": (path.name, fh)},
+                               data={"platform": "tiktok", "period": "2026-05_w1",
+                                     "kind": "orders"})
+    assert r.status_code == 201, r.text
+    assert r.json()["unrecognised_headers"] == ["SKU Unit Original Price NEW"]
+
+    plan = upload_client.get(
+        "/uploads/plan",
+        params={"platform": "tiktok", "period": "2026-05_w1"}).json()
+    drift = plan["drift"]["orders"]
+    assert drift["checked"] is True
+    assert drift["missing_fields"] == ["unit_price_gross"]
+    assert any("unit_price_gross" in p for p in plan["problems"]), plan["problems"]
+    assert plan["ready"] is False, "a window a run will refuse must not look ready"

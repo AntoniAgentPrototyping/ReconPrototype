@@ -176,6 +176,20 @@ class SanitizeResult:
     def dropped_known_pii(self) -> list[str]:
         return sorted(c for c in self.dropped_columns if c in KNOWN_PII)
 
+    @property
+    def unrecognised_headers(self) -> list[str]:
+        """Dropped headers that are not PII — the drift evidence (register D5).
+
+        A dropped column is one of two very different things: a customer-PII column
+        the contract deliberately does not name, or a header the export renamed. The
+        first is the system working; the second is the monthly cost. Subtracting
+        `KNOWN_PII` is what stops the report crying wolf on every healthy file — an
+        untriaged list including `Recipient` and `Phone #` is a list an operator
+        learns to ignore, which is the failure mode the whole findings design exists
+        to avoid.
+        """
+        return sorted(c for c in self.dropped_columns if c not in KNOWN_PII)
+
 
 def check_filename(name: str) -> str:
     """The filename is data, not decoration.
@@ -198,6 +212,67 @@ def check_filename(name: str) -> str:
 
 def digest_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+# Canonical fields the PIPELINE supplies rather than reading from a column, so a
+# file must not be judged for lacking them. `store` comes from the filename
+# (docs/06-DECISIONS.md#d6) and `read_files` adds it before `read_parts` checks its
+# required set — checking the file's own headers for it would fail every export ever
+# written.
+PIPELINE_SUPPLIED_FIELDS = frozenset({"store"})
+
+
+def required_fields(kind: str) -> frozenset[str]:
+    """Canonical fields a window of this kind must supply, or the run hard-stops.
+
+    The same set `ingest.read_parts` checks, minus what the pipeline supplies
+    itself — one definition, read from `src/`, because a copy here would be a second
+    opinion about what the money math needs.
+
+    **Empty for Lazada's kinds, and that is not an oversight.** `REQUIRED_COLUMNS`
+    has entries for `orders` and `income` only; Lazada is a fee-event ledger read by
+    `lazada.read_ledger`, which has no equivalent required set. Returning an empty
+    set means "nothing to check here", which is the honest answer and the same
+    posture the roster check takes on a platform with no roster.
+    """
+    from src.ingest import REQUIRED_COLUMNS
+
+    return frozenset(REQUIRED_COLUMNS.get(kind, ())) - PIPELINE_SUPPLIED_FIELDS
+
+
+def fields_of(headers, colmap: dict[str, str]) -> set[str]:
+    """Which canonical fields a set of raw headers supplies, per this colmap.
+
+    Mapped at READ time rather than stored, because the mapping belongs to the
+    contract — which is versioned and pinned per window — while the headers belong
+    to the file. A stored mapping would freeze one reading of the file and go stale
+    the moment a column map is edited (migration `023`).
+    """
+    return {colmap[h] for h in headers if h in colmap}
+
+
+def missing_fields(header_sets, colmap: dict[str, str], kind: str) -> list[str]:
+    """Required fields that NO file of this kind supplies.
+
+    **The union across a kind's files, and that is the whole design.**
+    `ingest.read_parts` concatenates every part of a kind and checks its required
+    columns against the result, so a "part 2" export carrying fewer columns is
+    legitimate — July produced nine of them. Judging each file on its own would
+    refuse a healthy window to catch a fault the concatenation does not have, which
+    is why this check lives on the window plan rather than at the upload door.
+
+    An empty result means either "nothing missing" or "nothing to check" — Lazada's
+    kinds have no required set at all. The caller distinguishes those; see the
+    `checked` flag on the plan's drift payload, because "clean" and "unmeasured"
+    must not render the same.
+    """
+    required = required_fields(kind)
+    if not required:
+        return []
+    present: set[str] = set()
+    for headers in header_sets:
+        present |= fields_of(headers, colmap)
+    return sorted(required - present)
 
 
 def column_map_for(settings: dict, platform: str, kind: str) -> dict[str, str]:

@@ -1,0 +1,20 @@
+-- 023 — keep the headers a file arrived with (register D5)
+--
+-- Format drift is this system's recurring cost: `docs/12-CHANGE-HISTORY.md` logs 18
+-- events in three months, every one absorbed by a developer hand-editing config.
+-- Nothing in the product helped a finance user notice one, and the reason was
+-- partly that the evidence was thrown away.
+--
+-- `pii_columns_dropped` already records what the sanitizer removed — despite its
+-- name it holds EVERY dropped header, not only the PII ones. What was missing is
+-- the other half: which headers the contract recognised. Together they are the
+-- file's original header row, and the sanitized object in the bucket no longer
+-- contains the dropped ones, so if this is not recorded at the door the evidence is
+-- gone for good.
+--
+-- Deliberately RAW headers, not the canonical fields they mapped to. The mapping is
+-- a property of the contract, which is versioned and pinned per window; storing the
+-- result would freeze one reading of the file and go stale the moment a column map
+-- is edited. The file said what it said — that is the durable fact, and every
+-- consumer maps it through the config the window actually runs under.
+alter table uploads add column if not exists kept_columns text[] not null default '{}';
